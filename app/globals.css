@@ -1,0 +1,144 @@
+@import "tailwindcss";
+
+:root,
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #05070c;
+  --bg-85: rgba(5, 7, 12, 0.85);
+  --text: rgba(233, 238, 245, 0.9);
+  --text-strong: #ffffff;
+  --dim: rgba(255, 255, 255, 0.4);
+  --faint: rgba(255, 255, 255, 0.25);
+  --icon: rgba(255, 255, 255, 0.4);
+  --icon-hover: rgba(255, 255, 255, 0.9);
+  --hover: rgba(255, 255, 255, 0.05);
+  --bubble: rgba(255, 255, 255, 0.07);
+  --border: rgba(255, 255, 255, 0.1);
+  --panel: rgba(11, 17, 27, 0.85);
+  --shadow: 0 10px 40px rgba(0, 0, 0, 0.45);
+  --map-bg: radial-gradient(ellipse at 40% 40%, #0c1a2e 0%, #04070d 70%);
+  --scroll: rgba(255, 255, 255, 0.08);
+  --glow-bg: radial-gradient(ellipse at 50% 0%, #0d1b2e 0%, transparent 60%);
+  --bubble-border: transparent;
+  --bubble-shadow: none;
+  --send: linear-gradient(135deg, #67e8f9, #a78bfa);
+  --send-fg: #05070c;
+  --send-glow: 0 0 18px rgba(58, 215, 255, 0.45);
+  --dot: #3ad7ff;
+  --beam-a: #3ad7ff;
+  --beam-b: #b26bff;
+}
+
+:root[data-theme="light"] {
+  /* 晨光：暖米白底 + 顶部一抹蜜桃和淡紫 */
+  color-scheme: light;
+  --bg: #f7f3ee;
+  --bg-85: rgba(247, 243, 238, 0.86);
+  --glow-bg: radial-gradient(60% 55% at 12% -5%, #ffdcc6 0%, rgba(255, 220, 198, 0) 70%),
+    radial-gradient(55% 50% at 92% 0%, #e2d9ff 0%, rgba(226, 217, 255, 0) 70%);
+  --text: rgba(42, 36, 32, 0.9);
+  --text-strong: #231d19;
+  --dim: rgba(42, 36, 32, 0.45);
+  --faint: rgba(42, 36, 32, 0.3);
+  --icon: rgba(42, 36, 32, 0.38);
+  --icon-hover: rgba(42, 36, 32, 0.85);
+  --hover: rgba(42, 36, 32, 0.05);
+  --bubble: rgba(255, 255, 255, 0.8);
+  --bubble-border: rgba(120, 90, 60, 0.08);
+  --bubble-shadow: 0 2px 10px rgba(120, 90, 60, 0.06);
+  --border: rgba(120, 90, 60, 0.1);
+  --panel: rgba(255, 253, 250, 0.88);
+  --shadow: 0 12px 40px rgba(120, 90, 60, 0.12);
+  --map-bg: radial-gradient(ellipse at 40% 40%, #fffaf4 0%, #f1e9df 80%);
+  --scroll: rgba(120, 90, 60, 0.15);
+  --send: linear-gradient(135deg, #ffa47a, #b490ff);
+  --send-fg: #ffffff;
+  --send-glow: 0 4px 16px rgba(255, 140, 110, 0.35);
+  --dot: #ff9a76;
+  --beam-a: #ffa47a;
+  --beam-b: #b490ff;
+}
+
+html,
+body {
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  transition: background-color 0.4s ease;
+  font-family: "PingFang SC", "Hiragino Sans GB", -apple-system, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: rgba(58, 215, 255, 0.3);
+}
+
+/* 细滚动条 */
+.scroll-thin {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scroll) transparent;
+}
+
+/* 流式输出：每段新字从模糊里浮出来 */
+@keyframes chunk-in {
+  from {
+    opacity: 0;
+    filter: blur(6px);
+  }
+  to {
+    opacity: 1;
+    filter: blur(0);
+  }
+}
+.chunk {
+  animation: chunk-in 0.55s ease-out both;
+}
+
+/* 等待首字时的呼吸光点 */
+@keyframes breathe {
+  0%,
+  100% {
+    transform: scale(0.75);
+    opacity: 0.45;
+  }
+  50% {
+    transform: scale(1.15);
+    opacity: 1;
+  }
+}
+.breathe {
+  animation: breathe 1.6s ease-in-out infinite;
+}
+
+/* 输入框聚焦时的流光边框 */
+@property --beam {
+  syntax: "<angle>";
+  initial-value: 0deg;
+  inherits: false;
+}
+@keyframes beam-spin {
+  to {
+    --beam: 360deg;
+  }
+}
+.beam {
+  position: relative;
+}
+.beam::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  padding: 1px;
+  pointer-events: none;
+  background: conic-gradient(from var(--beam), transparent 0 65%, var(--beam-a) 78%, var(--beam-b) 88%, transparent 100%);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  opacity: 0;
+  transition: opacity 0.4s;
+  animation: beam-spin 5s linear infinite;
+}
+.beam:focus-within::before {
+  opacity: 1;
+}

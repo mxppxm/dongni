@@ -1,0 +1,32 @@
+{
+  "name": "dongni",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev --turbopack -p 3939",
+    "build": "next build",
+    "start": "next start -p 3939",
+    "typecheck": "tsc --noEmit"
+  },
+  "packageManager": "pnpm@9.15.4",
+  "dependencies": {
+    "better-sqlite3": "11",
+    "lucide-react": "^1.63.0",
+    "motion": "^14.7.1",
+    "next": "15",
+    "react": "19",
+    "react-dom": "19",
+    "react-force-graph-2d": "^1.29.2",
+    "server-only": "^0.0.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "4",
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "22",
+    "@types/react": "19",
+    "@types/react-dom": "19",
+    "tailwindcss": "4",
+    "typescript": "^5.9.3"
+  }
+}
