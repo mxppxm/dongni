@@ -7,14 +7,14 @@ export const dynamic = "force-dynamic";
 
 const abs = (p: string) => path.resolve(p.startsWith("~") ? path.join(os.homedir(), p.slice(1)) : p);
 
-/** 文件卡片要知道名字和大小 */
+/** 文件卡片要知道名字、大小和修改时间 */
 export async function GET(req: Request) {
   const p = new URL(req.url).searchParams.get("path") || "";
   if (!p.trim()) return Response.json({ ok: false });
   try {
     const file = abs(p);
     const st = fs.statSync(file);
-    return Response.json({ ok: true, name: path.basename(file), size: st.size, dir: st.isDirectory() });
+    return Response.json({ ok: true, name: path.basename(file), size: st.size, mtime: st.mtimeMs, dir: st.isDirectory() });
   } catch {
     return Response.json({ ok: false });
   }

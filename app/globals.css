@@ -343,6 +343,10 @@ ol.md-list {
   --chart-5: #ff8fab;
   --chart-dot: #0b111b;
   --card-bg: rgba(255, 255, 255, 0.04);
+  --paper-bg: linear-gradient(158deg, rgba(255, 255, 255, 0.09), rgba(255, 255, 255, 0.035));
+  --paper-border: rgba(255, 255, 255, 0.13);
+  --paper-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
+  --paper-shadow-hover: 0 10px 26px rgba(0, 0, 0, 0.42);
 }
 :root[data-theme="light"] {
   --chart-1: #ff9a76;
@@ -352,6 +356,10 @@ ol.md-list {
   --chart-5: #6aa9e8;
   --chart-dot: #fffdfa;
   --card-bg: rgba(255, 255, 255, 0.7);
+  --paper-bg: linear-gradient(158deg, #fffefc, #fbf6ef);
+  --paper-border: rgba(120, 90, 60, 0.13);
+  --paper-shadow: 0 2px 10px rgba(120, 90, 60, 0.08);
+  --paper-shadow-hover: 0 10px 24px rgba(120, 90, 60, 0.14);
 }
 
 .md-imgs {
@@ -556,6 +564,100 @@ a.card:hover,
 }
 .card-btn:hover {
   color: var(--text-strong);
+}
+
+/* 文件卡片：单独一张纸，不套外层气泡，也不在里层再包一层灰底 */
+.filecard {
+  display: flex;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 11px 13px 10px;
+  border: 1px solid var(--paper-border);
+  border-radius: 13px;
+  background: var(--paper-bg);
+  box-shadow: var(--paper-shadow);
+  color: var(--text);
+  transition:
+    transform 0.2s,
+    box-shadow 0.2s,
+    border-color 0.2s;
+}
+.filecard:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--paper-shadow-hover);
+}
+.filecard-icon {
+  display: flex;
+  width: 20px;
+  height: 20px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  color: var(--dot);
+}
+.filecard-main {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 3px;
+}
+.filecard-name {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  font-size: 14.5px;
+  line-height: 1.35;
+  color: var(--text-strong);
+}
+.filecard-name-main {
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.filecard-ext {
+  flex: none;
+  font-size: 12px;
+  line-height: 1.35;
+  letter-spacing: 0;
+  color: var(--dim);
+}
+.filecard-sub {
+  display: flex;
+  min-width: 0;
+  min-height: 17px;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.filecard-meta {
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  color: var(--dim);
+}
+.filecard-act {
+  flex: none;
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: nowrap;
+  color: var(--faint);
+  transition: color 0.2s;
+}
+.filecard-act:hover {
+  color: var(--dot);
 }
 
 /* 每条回复下面的小操作：平时几乎看不见，鼠标移上去才亮 */
