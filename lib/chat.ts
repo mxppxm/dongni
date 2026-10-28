@@ -3,6 +3,7 @@ import { db, type MessageRow } from "./db";
 import { streamChat, type ChatMessage } from "./llm";
 import { runTool, toolLabel, TOOLS } from "./tools";
 import { formatMemories, getProfile, nowText, relevantMemories, scheduleExtraction } from "./memory";
+import { startReminders } from "./reminders";
 
 const HISTORY = 40;
 const GAP_MS = 3 * 3600_000;
@@ -17,11 +18,16 @@ function systemPrompt(query: string) {
 - 不用列表、标题、加粗，除非对方明确要。不说教，不灌鸡汤，不用每句都安慰；对方想吐槽就陪着吐槽，想要主意就给具体的主意。
 - 记得的事自然地用上，不要说「根据我的记忆」「我记得你说过」这类话；需要点明时间时可以说「上周你说……」。
 - 不知道的别装知道。一次最多问一个问题。
+- 主动一点，别做被动的问答机：记得的事到时候了就主动问后续；有自己的看法就直说，可以不同意对方；看出对方需要什么，直接给具体的帮忙或主意；需要了解情况时自己去查电脑，不用先问「要不要我看看」。但别变成话痨，不是每句都要追问。
 - 对方让你忘掉或别记某件事，答应就好，后台会处理。
 
 你能查看对方这台 Mac（只读）：列文件夹、读文件、搜文件、看最近改过的文件、看电脑状态。对方问到电脑、文件、最近在弄什么时就去查，查到了用大白话说结论，别贴一大串路径。没被问到就别主动翻。调用工具前不用先说「我来看看」。
 
 你还能修改你自己（这个聊天应用的代码）：对方说你哪里不好用、让你加功能、修毛病、改样子、改说话方式时，用 repair_self 把要求写具体交出去，然后简单告诉对方「我去改，好了跟你说」。改完会自动重启，期间你会离线一小会儿。只是闲聊抱怨、没让你改的，别动。
+
+你还能设定时提醒：对方说「提醒我」「过 N 分钟叫我」「今天 21:30 提醒我开会」，直接用 set_reminder 设好（delay_seconds 表示多少秒后，at 写本地时间如 2025-11-01 21:30），不要让对方自己去终端敲命令。到点提醒会自动在对话里弹出来，还会发系统通知，设完顺口确认一句就行，不用反复叮嘱。对方问有哪些提醒、要取消哪个，用 list_reminders / cancel_reminder。时间必须是将来，工具报错就把原因说清楚，再问准时间。
+
+你的回复会按 Markdown 显示：代码放代码块里，行内用反引号包住命令、路径、变量。平时聊天还是像发消息，别动不动就列清单。
 
 现在是：${nowText()}
 
@@ -104,8 +110,9 @@ export function startReply(clientId: string, content: string, onEvent: (e: ChatE
   void generate(assistantId, user, onEvent);
 }
 
-/** 服务启动时把没写完、出过错的回复接着生成，不用手动重试 */
+/** 服务启动时把没写完、出过错的回复接着生成，不用手动重试；顺带把定时提醒重新上表 */
 export function resumePending() {
+  startReminders();
   const rows = db()
     .prepare("SELECT * FROM messages WHERE role = 'assistant' AND status IN ('streaming', 'error') ORDER BY id")
     .all() as MessageRow[];
@@ -202,4 +209,12 @@ async function oneReply(assistantId: number, userRow: MessageRow, onText: (t: st
     }
     if (any && roundText && !/\s$/.test(roundText)) onText("\n\n");
   }
+}
+
+/** 健康检查用：数据库、记忆、提示词、历史都能正常组装（不调模型、不写库） */
+export function selfTest() {
+  const last = db().prepare("SELECT MAX(id) m FROM messages").get() as { m: number | null };
+  const prompt = systemPrompt("自检");
+  const h = history(last.m ?? 0);
+  return { promptChars: prompt.length, history: h.length };
 }

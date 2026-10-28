@@ -17,6 +17,28 @@ const LOG = path.join(ROOT, "logs", "self-repair.log");
 const RESULT = path.join(ROOT, "data", "rebuild-result.json");
 const PI_TIMEOUT = 25 * 60_000;
 
+/**
+ * 内核：它改不了的部分。自我修复机制本身、重启脚本、健康检查、启动入口、数据库与备份、忽略规则。
+ * 改完只要碰到这些文件，整次作废退回——由程序检查，不靠提示词。
+ */
+const PROTECTED = [
+  "lib/selfrepair.ts",
+  "lib/db.ts",
+  "scripts/rebuild.sh",
+  "app/api/health/route.ts",
+  "instrumentation.ts",
+  ".gitignore",
+  "package.json",
+  "pnpm-lock.yaml",
+];
+const PROTECTED_DIRS = ["data/", "logs/", ".git/"];
+
+async function touchedProtected(good: string) {
+  const tracked = (await git("diff", "--name-only", good)).stdout.split("\n").filter(Boolean);
+  const untracked = (await git("ls-files", "--others", "--exclude-standard")).stdout.split("\n").filter(Boolean);
+  return [...tracked, ...untracked].filter((f) => PROTECTED.includes(f) || PROTECTED_DIRS.some((d) => f.startsWith(d)));
+}
+
 const state = ((globalThis as unknown as { __dongniRepair?: { running: string | null } }).__dongniRepair ??= { running: null });
 
 function log(line: string) {
@@ -46,6 +68,8 @@ ${request}
 
 约束：
 - 只改这个项目里的代码。不要动 data/、logs/、.next/、node_modules/，不要删用户数据。
+- 以下「内核」文件不许改，改了整次会被作废退回：${PROTECTED.join("、")}。需要新的存储就在别的模块里用 db() 建新表（CREATE TABLE IF NOT EXISTS），或用 kv 表。
+- 改完会自动重启并做健康检查（打开首页、/api/health），检查不过会自动退回。所以首页和 lib/chat.ts 里的 selfTest() 必须保持能用。
 - 保持原有设计原则：输入方便、动效好看、页面干净、非必要的东西不出现、响应快、不丢东西。不要顺手加没被要求的文案或功能。
 - 不要运行 pnpm build、不要重启服务、不要 git commit——这些外面会自动做。
 - 改完必须运行 pnpm typecheck，确保通过。
@@ -74,6 +98,13 @@ async function runPi(request: string): Promise<string> {
   });
 }
 
+/** pi 改完后的硬检查：不许自己提交/改历史，不许碰内核 */
+async function guard(good: string) {
+  if ((await head()) !== good) throw new Error("改动里动了版本历史，不允许");
+  const bad = await touchedProtected(good);
+  if (bad.length) throw new Error(`改动碰到了不允许改的内核文件：${bad.join("、")}`);
+}
+
 export function repairRunning() {
   return state.running;
 }
@@ -90,6 +121,7 @@ export function startRepair(request: string): string {
       good = await head();
 
       let summary = await runPi(request);
+      await guard(good);
       const changed = (await git("status", "--porcelain")).stdout.trim();
       if (!changed) {
         postAssistant(summary || "看了一圈，这次没有改代码。");
@@ -102,6 +134,7 @@ export function startRepair(request: string): string {
         const msg = (e as { stdout?: string }).stdout?.slice(-3000) ?? String(e);
         log(`typecheck 失败，让 pi 再修：\n${msg}`);
         summary = await runPi(`${request}\n\n（上一轮改完 pnpm typecheck 没通过，报错如下，请修好）\n${msg}`);
+        await guard(good);
         await run("pnpm", ["typecheck"], { cwd: ROOT, maxBuffer: 20 << 20 });
       }
       await git("add", "-A");
@@ -133,8 +166,9 @@ export function startRepair(request: string): string {
 export function reportRebuild() {
   if (!fs.existsSync(RESULT)) return;
   try {
-    const r = JSON.parse(fs.readFileSync(RESULT, "utf8")) as { ok: boolean };
+    const r = JSON.parse(fs.readFileSync(RESULT, "utf8")) as { ok: boolean; reason?: string };
     if (r.ok) postAssistant("回来了，新版本已经生效。");
+    else if (r.reason === "health") postAssistant("新版本重启后自检没通过，我已经退回到修改前的版本，一切照旧。");
     else postAssistant("新代码没编译过，我已经退回到修改前的版本，一切照旧。");
     log(`重启完成 ok=${r.ok}`);
   } finally {

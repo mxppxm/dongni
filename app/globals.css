@@ -27,6 +27,15 @@
   --dot: #3ad7ff;
   --beam-a: #3ad7ff;
   --beam-b: #b26bff;
+  --code-bg: #0c121b;
+  --code-border: rgba(255, 255, 255, 0.08);
+  --code-fg: #dae3ee;
+  --code-inline-bg: rgba(255, 255, 255, 0.08);
+  --link: #7cc4ff;
+  --tk-com: #6f7f95;
+  --tk-str: #9fd7a3;
+  --tk-kw: #8aabff;
+  --tk-num: #f0a07a;
 }
 
 :root[data-theme="light"] {
@@ -57,6 +66,15 @@
   --dot: #ff9a76;
   --beam-a: #ffa47a;
   --beam-b: #b490ff;
+  --code-bg: #1b2029;
+  --code-border: rgba(60, 40, 25, 0.16);
+  --code-fg: #e4eaf2;
+  --code-inline-bg: rgba(120, 90, 60, 0.09);
+  --link: #a85a2e;
+  --tk-com: #8b98a8;
+  --tk-str: #b3e0b6;
+  --tk-kw: #9dbaff;
+  --tk-num: #f2ab84;
 }
 
 html,
@@ -92,6 +110,108 @@ body {
 }
 .chunk {
   animation: chunk-in 0.55s ease-out both;
+}
+
+/* ---------- Markdown 排版 ---------- */
+.md {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+.md > * + * {
+  margin-top: 0.8em;
+}
+.md-head {
+  margin-top: 1.15em;
+  font-weight: 600;
+  line-height: 1.5;
+  color: var(--text-strong);
+}
+.md-head-1 {
+  font-size: 1.22em;
+}
+.md-head-2 {
+  font-size: 1.14em;
+}
+.md-head-3 {
+  font-size: 1.06em;
+}
+.md-head-4,
+.md-head-5,
+.md-head-6 {
+  font-size: 1em;
+}
+.md-list {
+  list-style: disc;
+  padding-left: 1.3em;
+}
+ol.md-list {
+  list-style: decimal;
+}
+.md-list li {
+  margin: 0.2em 0;
+}
+.md-list li::marker {
+  color: var(--dim);
+}
+.md-quote {
+  margin: 0;
+  padding-left: 12px;
+  border-left: 2px solid var(--border);
+  color: var(--dim);
+}
+.md-hr {
+  border: 0;
+  border-top: 1px solid var(--border);
+}
+.md a {
+  color: var(--link);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.md .md-code {
+  padding: 0.1em 0.35em;
+  border-radius: 5px;
+  background: var(--code-inline-bg);
+  font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.88em;
+  white-space: break-spaces;
+}
+.md-pre {
+  max-width: 100%;
+  margin: 0;
+  padding: 12px 14px;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  border: 1px solid var(--code-border);
+  border-radius: 12px;
+  background: var(--code-bg);
+}
+.md-pre code {
+  display: block;
+  font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--code-fg);
+  white-space: pre;
+  tab-size: 2;
+}
+.tk-com {
+  color: var(--tk-com);
+  font-style: italic;
+}
+.tk-str {
+  color: var(--tk-str);
+}
+.tk-kw {
+  color: var(--tk-kw);
+}
+.tk-num {
+  color: var(--tk-num);
+}
+/* 新出现的块轻轻浮进来（流式输出时只动新块，不会整段重播） */
+.md-anim > * {
+  animation: chunk-in 0.5s ease-out both;
 }
 
 /* 等待首字时的呼吸光点 */

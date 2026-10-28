@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { addReminder, cancelReminder, pendingReminders, resolveWhen } from "./reminders";
 import { startRepair } from "./selfrepair";
 
 /**
@@ -139,6 +140,52 @@ async function systemInfo() {
   return `【系统】\n${ver}\n内存 ${fmtSize(os.totalmem())}，空闲 ${fmtSize(os.freemem())}\n\n【磁盘】\n${disk}\n\n【电池】\n${batt}\n\n【运行时长/负载】\n${up}\n\n【CPU 占用最高的进程】（%CPU / 内存KB / 名称）\n${top}`;
 }
 
+const fmtWhen = (ms: number) =>
+  new Date(ms).toLocaleString("zh-CN", { month: "long", day: "numeric", weekday: "short", hour: "2-digit", minute: "2-digit", hour12: false });
+
+function fmtLeft(ms: number) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s} 秒`;
+  if (s < 3600) return `${Math.round(s / 60)} 分钟`;
+  if (s < 86400) return `${Math.floor(s / 3600)} 小时 ${Math.round((s % 3600) / 60)} 分`;
+  return `${Math.floor(s / 86400)} 天 ${Math.round((s % 86400) / 3600)} 小时`;
+}
+
+async function setReminder({ text, delay_seconds, at }: { text?: string; delay_seconds?: number; at?: string }) {
+  const now = Date.now();
+  const content = (text ?? "").trim();
+  if (!content) return "没给提醒内容，再调一次，把 text 写上。";
+  let when: number | null = null;
+  if (at && String(at).trim()) {
+    when = resolveWhen(String(at), now);
+    if (when === null) return `看不懂这个时间「${at}」。请写成 2025-11-01 21:30 这样，或者改用 delay_seconds。`;
+  } else if (typeof delay_seconds === "number" && Number.isFinite(delay_seconds)) {
+    when = now + Math.round(delay_seconds * 1000);
+  }
+  if (when === null) return "需要 delay_seconds 或 at 其中一个。";
+  if (when <= now + 1000)
+    return `这个时间（${fmtWhen(when)}）已经过去了，现在是 ${fmtWhen(now)}。不能设过去的提醒，请和对方确认一个将来的时间。`;
+  const r = addReminder(content, when);
+  return `已设好提醒：${fmtWhen(r.at)}（${fmtLeft(r.at - now)}后）「${r.text}」，编号 ${r.id}。`;
+}
+
+async function listReminders() {
+  const list = pendingReminders();
+  if (!list.length) return "现在没有待触发的提醒。";
+  const now = Date.now();
+  return (
+    `待触发的提醒（${list.length} 个）：\n` +
+    list.map((r) => `#${r.id} · ${fmtWhen(r.at)} · ${fmtLeft(r.at - now)}后 · ${r.text}`).join("\n")
+  );
+}
+
+async function cancelReminderTool({ id }: { id?: number }) {
+  const rid = Number(id);
+  if (!Number.isFinite(rid)) return "需要提醒的编号 id（用 list_reminders 能看到）。";
+  const r = cancelReminder(rid);
+  return r ? `已取消 #${r.id}「${r.text}」（${fmtWhen(r.at)}）。` : `没有编号 ${rid} 的待触发提醒，可以先 list_reminders 看看。`;
+}
+
 export const TOOLS = [
   {
     type: "function",
@@ -191,6 +238,39 @@ export const TOOLS = [
   {
     type: "function",
     function: {
+      name: "set_reminder",
+      description:
+        "给对方设一个定时提醒，到点在聊天界面里弹出来，同时发系统通知。delay_seconds 和 at 二选一：delay_seconds 是相对现在多少秒后（1 分钟后=60，两小时=7200）；at 是绝对时间，用本地时间写，如 2025-11-01 21:30。时间必须是将来，过去的时间会报错。",
+      parameters: {
+        type: "object",
+        properties: {
+          text: { type: "string", description: "提醒内容，简短，如「喝水」「开会」" },
+          delay_seconds: { type: "number", description: "多少秒之后提醒" },
+          at: { type: "string", description: "绝对时间，如 2025-11-01 21:30" },
+        },
+        required: ["text"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_reminders",
+      description: "列出还没触发的提醒（编号、时间、还有多久、内容）。",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "cancel_reminder",
+      description: "取消一个还没触发的提醒，需要编号 id（list_reminders 里能看到）。",
+      parameters: { type: "object", properties: { id: { type: "number" } }, required: ["id"] },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "repair_self",
       description:
         "修改你自己（这个聊天应用）的代码：对方让你加功能、修 bug、改样式、改你的说话方式或行为时用。把对方的要求连同必要的上下文写清楚，交给后台的编码助手去改；改完会自动检查、重启，失败自动退回。要几分钟。",
@@ -201,6 +281,9 @@ export const TOOLS = [
 
 const IMPL: Record<string, (a: never) => Promise<string>> = {
   repair_self: async ({ request }: { request: string }) => startRepair(request),
+  set_reminder: setReminder as (a: never) => Promise<string>,
+  list_reminders: listReminders,
+  cancel_reminder: cancelReminderTool as (a: never) => Promise<string>,
   list_dir: listDir,
   read_file: readFile,
   search_files: searchFiles,
@@ -222,6 +305,12 @@ export function toolLabel(name: string, args: Record<string, unknown>) {
       return "看最近改过的文件";
     case "system_info":
       return "看看电脑状态";
+    case "set_reminder":
+      return `设个提醒：${String(args.text ?? "")}`;
+    case "list_reminders":
+      return "看看有哪些提醒";
+    case "cancel_reminder":
+      return `取消提醒 #${String(args.id ?? "")}`;
     case "repair_self":
       return "开始改自己的代码";
     default:

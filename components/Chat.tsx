@@ -4,6 +4,8 @@ import dynamic from "next/dynamic";
 import { AnimatePresence, motion } from "motion/react";
 import { ArrowUp, Moon, Sparkles, Sun } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import Markdown from "./Markdown";
+import ReminderToast from "./ReminderToast";
 import Starfield, { type Theme } from "./Starfield";
 
 const MemoryMap = dynamic(() => import("./MemoryMap"), { ssr: false });
@@ -15,7 +17,6 @@ type Msg = {
   clientId?: string | null;
   role: "user" | "assistant";
   content: string;
-  chunks?: string[];
   status: Status;
   createdAt: number;
   fresh?: boolean;
@@ -59,6 +60,7 @@ export default function Chat() {
   const [memCount, setMemCount] = useState<number | null>(null);
   const [pulse, setPulse] = useState(0);
   const [theme, setTheme] = useState<Theme>("light");
+  const [reminder, setReminder] = useState<{ id: number; text: string } | null>(null);
 
   useEffect(() => {
     setTheme(document.documentElement.dataset.theme === "dark" ? "dark" : "light");
@@ -110,7 +112,7 @@ export default function Chat() {
           const { messages } = (await (await fetch(`/api/messages?after=${assistantId}`)).json()) as { messages: ServerMsg[] };
           const m = messages.find((x) => x.id === assistantId);
           if (!m) return;
-          patch(key, (old) => ({ ...old, content: m.content, chunks: undefined, status: m.content || m.status === "done" ? m.status : "waiting" }));
+          patch(key, (old) => ({ ...old, content: m.content, status: m.content || m.status === "done" ? m.status : "waiting" }));
           if (m.status === "done") return;
         } catch {}
       }
@@ -126,7 +128,7 @@ export default function Chat() {
       patch(uKey, (m) => ({ ...m, status: "sending" }));
       setMsgs((list) => [
         ...list.filter((m) => m.key !== aKey),
-        { key: aKey, role: "assistant", content: "", chunks: [], status: "waiting", createdAt: Date.now(), fresh: true },
+        { key: aKey, role: "assistant", content: "", status: "waiting", createdAt: Date.now(), fresh: true },
       ]);
       stick.current = true;
 
@@ -162,12 +164,12 @@ export default function Chat() {
               } else if (e.type === "tool") {
                 patch(aKey, (m) => ({ ...m, tool: e.label }));
               } else if (e.type === "reset") {
-                patch(aKey, (m) => ({ ...m, status: "waiting", content: "", chunks: [], tool: undefined }));
+                patch(aKey, (m) => ({ ...m, status: "waiting", content: "", tool: undefined }));
               } else if (e.type === "delta") {
-                patch(aKey, (m) => ({ ...m, status: "streaming", tool: undefined, content: m.content + e.text, chunks: [...(m.chunks ?? []), e.text] }));
+                patch(aKey, (m) => ({ ...m, status: "streaming", tool: undefined, content: m.content + e.text }));
               } else if (e.type === "done") {
                 finished = true;
-                patch(aKey, (m) => ({ ...m, status: "done", chunks: undefined, tool: undefined }));
+                patch(aKey, (m) => ({ ...m, status: "done", tool: undefined }));
                 [6000, 15000, 30000].forEach((ms) => setTimeout(checkMemories, ms));
               }
             }
@@ -259,6 +261,34 @@ export default function Chat() {
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  /* ---------- 到点的提醒：轮询，弹一张小卡片（弹过的记着，不重复弹） ---------- */
+  const seenReminders = useRef<Set<number> | null>(null);
+  useEffect(() => {
+    if (!loaded) return;
+    let stopped = false;
+    const check = async () => {
+      if (document.visibilityState !== "visible") return;
+      try {
+        const { fired } = (await (await fetch("/api/reminders")).json()) as {
+          fired: { id: number; text: string; firedAt: number | null }[];
+        };
+        if (stopped) return;
+        // 第一次只把早就不新的标记成已弹，刚触发的照样弹
+        seenReminders.current ??= new Set(fired.filter((r) => Date.now() - (r.firedAt ?? 0) > 90_000).map((r) => r.id));
+        const unseen = fired.filter((r) => !seenReminders.current!.has(r.id));
+        if (!unseen.length) return;
+        unseen.forEach((r) => seenReminders.current!.add(r.id));
+        setReminder({ id: unseen[unseen.length - 1].id, text: unseen[unseen.length - 1].text });
+      } catch {}
+    };
+    void check();
+    const t = setInterval(check, 5000);
+    return () => {
+      stopped = true;
+      clearInterval(t);
+    };
+  }, [loaded]);
 
   /* ---------- 往上翻历史 ---------- */
   const loadOlder = useCallback(async () => {
@@ -384,28 +414,22 @@ export default function Chat() {
                   {m.role === "user" ? (
                     <div className="flex max-w-[85%] items-center gap-2">
                       <div
-                        className={`rounded-2xl rounded-br-md border border-[var(--bubble-border)] bg-[var(--bubble)] shadow-[var(--bubble-shadow)] px-4 py-2.5 text-[15px] leading-relaxed whitespace-pre-wrap break-words text-[var(--text)] transition-opacity ${
+                        className={`min-w-0 rounded-2xl rounded-br-md border border-[var(--bubble-border)] bg-[var(--bubble)] px-4 py-2.5 text-[15px] leading-relaxed text-[var(--text)] shadow-[var(--bubble-shadow)] transition-opacity ${
                           m.status === "sending" ? "opacity-70" : ""
                         }`}
                       >
-                        {m.content}
+                        <Markdown text={m.content} animate={!!m.fresh} />
                       </div>
                     </div>
                   ) : (
-                    <div className="text-[16px] leading-[1.85] whitespace-pre-wrap break-words text-[var(--text)]">
+                    <div className="min-w-0 text-[16px] leading-[1.85] text-[var(--text)]">
                       {m.status === "waiting" ? (
                         <span className="inline-flex items-center gap-2.5">
                           <span className="breathe inline-block h-2 w-2 rounded-full bg-[var(--dot)] shadow-[0_0_12px_var(--dot)]" />
                           {m.tool && <span className="text-[13px] text-[var(--faint)]">{m.tool}…</span>}
                         </span>
-                      ) : m.chunks ? (
-                        m.chunks.map((c, k) => (
-                          <span key={k} className="chunk">
-                            {c}
-                          </span>
-                        ))
                       ) : (
-                        m.content
+                        <Markdown text={m.content} animate={m.status === "streaming" || !!m.fresh} />
                       )}
                       {m.status === "streaming" && m.tool && (
                         <span className="mt-1 flex items-center gap-2.5 text-[13px] text-[var(--faint)]">
@@ -459,6 +483,8 @@ export default function Chat() {
       </div>
 
       <AnimatePresence>{showMap && <MemoryMap theme={theme} onClose={() => setShowMap(false)} />}</AnimatePresence>
+
+      <ReminderToast reminder={reminder} onClose={() => setReminder(null)} />
     </div>
   );
 }
