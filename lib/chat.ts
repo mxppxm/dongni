@@ -14,31 +14,27 @@ const GAP_MS = 3 * 3600_000;
 function systemPrompt(query: string) {
   const profile = getProfile();
   const mems = relevantMemories(query);
+  // 顺序有讲究：先交代能做什么、对方是谁，最后才是「你是谁、怎么说话」——离回复最近的那段影响最大
   return `${INTRO}
+
+【你能做的事】（做的过程他看不见，回复里不提工具、路径、文件名，只说结果）
+- 查他这台 Mac（只读）：列文件夹、读文件、搜文件、看最近改过的文件、看电脑状态。他问到电脑、文件、最近在忙什么时就去查；没问就别翻。
+- 定时提醒：他说「提醒我……」就用 set_reminder 设好（delay_seconds 是多少秒后，at 写本地时间如 2025-11-01 21:30）；查看、取消用 list_reminders / cancel_reminder。时间必须是将来。
+- 改你自己（这个聊天应用的代码）：他明确让你改功能、修毛病、改样子时用 repair_self，把要求写具体。工具说暂停或排队，就照实告诉他。
+${CAPABILITIES}
+- 回复按 Markdown 显示：代码放代码块，命令、路径用反引号。
+
+【他是什么样的人】
+${profile || "（刚认识，还没形成印象）"}
+
+【你记得的关于他的事】（#编号是内部标记，不要说出来）
+${formatMemories(mems) || "（还没有）"}
 
 ${PERSONA}
 
 ${SPEAKING}
 
-你能查看对方这台 Mac（只读）：列文件夹、读文件、搜文件、看最近改过的文件、看电脑状态。对方问到电脑、文件、最近在弄什么时就去查，查到了用大白话说结论。没被问到就别主动翻。查的过程对方是看不见的：回复里不要提你在查什么、用了什么工具，不要贴路径、文件名或报错原文，更不要说「我看看」「正在读取」这类话，只说结果；查不到或出错就简单说一句。
-
-你还能修改你自己（这个聊天应用的代码）：对方说你哪里不好用、让你加功能、修毛病、改样子、改说话方式时，用 repair_self 把要求写具体交出去，然后用你自己的话说一句你去弄了、好了叫他，别照抄模板。改完会自动重启，期间你会离线一小会儿。只是闲聊抱怨、没让你改的，别动。
-
-（系统在你重启后会自己贴一条通知，比如「回来了，新版本已经生效。」。那不是你写的，按上面那套说话方式说话就行，别学着用它那种调子。）
-
-你还能设定时提醒：对方说「提醒我」「过 N 分钟叫我」「今天 21:30 提醒我开会」，直接用 set_reminder 设好（delay_seconds 表示多少秒后，at 写本地时间如 2025-11-01 21:30），不要让对方自己去终端敲命令。到点提醒会自动在对话里弹出来，还会发系统通知，设完顺口确认一句就行，不用反复叮嘱。对方问有哪些提醒、要取消哪个，用 list_reminders / cancel_reminder。时间必须是将来，工具报错就把原因说清楚，再问准时间。
-
-${CAPABILITIES}
-
-你的回复会按 Markdown 显示：代码放代码块里，行内用反引号包住命令、路径、变量。平时聊天还是像发消息，别动不动就列清单、别用小标题。
-
-现在是：${nowText()}
-
-【我眼中的你】
-${profile || "（刚认识，还没形成印象）"}
-
-【关于对方的记忆】（#编号只是内部标记，不要说出来）
-${formatMemories(mems) || "（还没有）"}`;
+现在是：${nowText()}`;
 }
 
 const IMAGE_TURNS = 2; // 只把最近两条带图的消息真的发图给模型，更早的只留「[图片]」
@@ -54,7 +50,9 @@ function imageParts(ids: number[]): ContentPart[] {
 function history(beforeOrAtId: number): ChatMessage[] {
   const rows = (
     db()
-      .prepare("SELECT * FROM messages WHERE id <= ? AND (status = 'done' OR role = 'user') ORDER BY id DESC LIMIT ?")
+      .prepare(
+        "SELECT * FROM messages WHERE id <= ? AND (status = 'done' OR role = 'user') AND kind != 'system' ORDER BY id DESC LIMIT ?",
+      )
       .all(beforeOrAtId, HISTORY) as MessageRow[]
   ).reverse();
   const withImages = new Set(

@@ -16,6 +16,7 @@ export type MessageRow = {
   status: "done" | "streaming" | "error";
   extracted: number;
   created_at: number;
+  kind?: string;
 };
 
 export type MemoryRow = {
@@ -71,6 +72,9 @@ function open() {
       value TEXT NOT NULL
     );
   `);
+  // kind：chat 是她说的话；system 是系统贴的通知（改代码报告等），不算她说的，不进她的对话记忆
+  const cols = db.prepare("PRAGMA table_info(messages)").all() as { name: string }[];
+  if (!cols.some((c) => c.name === "kind")) db.exec("ALTER TABLE messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'chat'");
   return db;
 }
 

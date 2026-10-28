@@ -158,10 +158,10 @@ async function extractBatch(pending: MessageRow[]) {
   const firstId = pending[0].id;
   const lastId = pending[pending.length - 1].id;
   const before = (
-    db().prepare("SELECT * FROM messages WHERE id < ? AND status = 'done' ORDER BY id DESC LIMIT 6").all(firstId) as MessageRow[]
+    db().prepare("SELECT * FROM messages WHERE id < ? AND status = 'done' AND kind != 'system' ORDER BY id DESC LIMIT 6").all(firstId) as MessageRow[]
   ).reverse();
   const batch = db()
-    .prepare("SELECT * FROM messages WHERE id >= ? AND id <= ? + 1 AND status != 'error' ORDER BY id")
+    .prepare("SELECT * FROM messages WHERE id >= ? AND id <= ? + 1 AND status != 'error' AND kind != 'system' ORDER BY id")
     .all(firstId, lastId) as MessageRow[];
 
   const fmt = (ms: MessageRow[]) =>

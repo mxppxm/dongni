@@ -9,6 +9,7 @@ const pick = (m: MessageRow) => ({
   content: m.content,
   status: m.status,
   createdAt: m.created_at,
+  kind: m.kind ?? "chat",
 });
 
 /** ?before=id 往前翻页；?after=id 取之后的（含状态更新） */

@@ -96,7 +96,7 @@ async function* streamOnce(messages: ChatMessage[], tools?: unknown[]): AsyncGen
   };
   try {
     const res = await post(
-      { messages, stream: true, reasoning_effort: "high", max_tokens: 16000, temperature: 0.8, ...(tools ? { tools } : {}) },
+      { messages, stream: true, reasoning_effort: process.env.DONGNI_CHAT_REASONING || "high", max_tokens: 16000, temperature: 0.8, ...(tools ? { tools } : {}) },
       ctrl.signal,
     );
     const reader = res.body!.getReader();

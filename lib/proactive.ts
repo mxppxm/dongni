@@ -61,7 +61,7 @@ export async function proactiveTick() {
 
   state.running = true;
   try {
-    const recent = (d.prepare("SELECT * FROM messages WHERE status = 'done' ORDER BY id DESC LIMIT 24").all() as MessageRow[]).reverse();
+    const recent = (d.prepare("SELECT * FROM messages WHERE status = 'done' AND kind != 'system' ORDER BY id DESC LIMIT 24").all() as MessageRow[]).reverse();
     const chat = recent.map((m) => `${m.role === "user" ? "对方" : "你"}（${nowText(m.created_at)}）：${m.content}`).join("\n");
     const files = await runTool("recent_files", JSON.stringify({ days: 0 }));
     const canImprove = now - Number(getKv("improve_last_at") ?? 0) > IMPROVE_GAP;

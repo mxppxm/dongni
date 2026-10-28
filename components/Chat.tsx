@@ -22,8 +22,9 @@ type Msg = {
   createdAt: number;
   fresh?: boolean;
   previews?: string[];
+  kind?: string;
 };
-type ServerMsg = { id: number; clientId: string | null; role: "user" | "assistant"; content: string; status: Status; createdAt: number };
+type ServerMsg = { id: number; clientId: string | null; role: "user" | "assistant"; content: string; status: Status; createdAt: number; kind?: string };
 type Outbox = { clientId: string; content: string; createdAt: number; images?: string[] };
 
 const DRAFT_KEY = "dongni:draft";
@@ -450,7 +451,11 @@ export default function Chat() {
                   transition={{ duration: 0.35, ease: [0.2, 0.8, 0.2, 1] }}
                   className={m.role === "user" ? "mt-5 flex justify-end" : "mt-4"}
                 >
-                  {m.role === "user" ? (
+                  {m.kind === "system" ? (
+                    <div className="mx-auto line-clamp-2 max-w-[80%] text-center text-xs leading-relaxed text-[var(--faint)]" title={m.content}>
+                      {m.content.replace(/[*`#]/g, "")}
+                    </div>
+                  ) : m.role === "user" ? (
                     <div className="flex max-w-[85%] items-center gap-2">
                       <div
                         className={`min-w-0 rounded-2xl rounded-br-md border border-[var(--bubble-border)] bg-[var(--bubble)] px-4 py-2.5 text-[15px] leading-relaxed text-[var(--text)] shadow-[var(--bubble-shadow)] transition-opacity ${

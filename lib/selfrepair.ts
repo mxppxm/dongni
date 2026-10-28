@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { db, getKv, setKv } from "./db";
+import { speakAsHer } from "./speak";
 
 /**
  * 自我修复：把用户的要求交给 pi（编码 agent）去改本项目的代码，
@@ -46,11 +47,16 @@ function log(line: string) {
   fs.appendFileSync(LOG, `[${new Date().toLocaleString("zh-CN", { hour12: false })}] ${line}\n`);
 }
 
-/** 以「它」的身份往对话里补一条消息（修复进度/结果） */
-export function postAssistant(content: string) {
+/** 往对话里补一条她说的话（kind=system 表示系统通知，不算她说的） */
+export function postAssistant(content: string, kind: "chat" | "system" = "chat") {
   db()
-    .prepare("INSERT INTO messages(role, content, status, extracted, created_at) VALUES('assistant', ?, 'done', 1, ?)")
-    .run(content, Date.now());
+    .prepare("INSERT INTO messages(role, content, status, extracted, created_at, kind) VALUES('assistant', ?, 'done', 1, ?, ?)")
+    .run(content, Date.now(), kind);
+}
+
+/** 让她用自己的话说出来（接着刚才的话头），说不出来就用简短的原意 */
+async function say(what: string, fallback: string) {
+  postAssistant(await speakAsHer(what, fallback));
 }
 
 const git = (...args: string[]) => run("git", args, { cwd: ROOT, maxBuffer: 20 << 20 });
@@ -147,7 +153,7 @@ export function startRepair(request: string): string {
       await guard(good);
       const changed = (await git("status", "--porcelain")).stdout.trim();
       if (!changed) {
-        postAssistant(summary || "看了一圈，这次没有改代码。");
+        await say(`你看了一圈，这次没有改代码。编码助手的说明：${summary}`, "看了一圈，这次没动代码。");
         return;
       }
       try {
@@ -163,7 +169,7 @@ export function startRepair(request: string): string {
       await git("add", "-A");
       await git("commit", "-q", "-m", `自我修复：${request.slice(0, 60)}`);
       setKv("repair_summary", summary);
-      postAssistant(`${summary}\n\n我重启一下，半分钟左右回来。`);
+      await say(`你刚把自己改好了，马上要重启，半分钟左右回来。改了什么（编码助手的说明，挑他关心的说一句就够）：${summary}`, "改好啦，我重启一下，半分钟就回来～");
       log("提交完成，后台重新编译并重启");
       // 新起一个进程组去编译重启，自己被重启也不影响它
       restarting = true;
@@ -182,7 +188,7 @@ export function startRepair(request: string): string {
         // 改到一半新建的文件也清掉，不然会混进下一次的「修改前」版本
         await git("clean", "-fd", "-e", "data", "-e", "logs").catch(() => {});
       }
-      postAssistant(`这次没改成，已经退回原样了。原因：${msg.slice(0, 200)}`);
+      await say(`这次改自己没改成，已经退回原样，什么都没坏。原因（技术细节别说）：${msg.slice(0, 200)}`, "这次没改成，已经退回原样了，啥也没坏。");
     } finally {
       state.running = null;
       // 要重启的话交给重启后的新进程接着改，否则这里直接接着改下一个
@@ -197,9 +203,10 @@ export function reportRebuild() {
   if (!fs.existsSync(RESULT)) return;
   try {
     const r = JSON.parse(fs.readFileSync(RESULT, "utf8")) as { ok: boolean; reason?: string };
-    if (r.ok) postAssistant("回来了，新版本已经生效。");
-    else if (r.reason === "health") postAssistant("新版本重启后自检没通过，我已经退回到修改前的版本，一切照旧。");
-    else postAssistant("新代码没编译过，我已经退回到修改前的版本，一切照旧。");
+    const what = r.ok
+      ? ["你重启回来了，刚才改的已经生效，可以让他试试。", "我回来啦，改好的已经能用了，你试试～"]
+      : ["你重启回来了，但新改的没通过，已经退回改之前的样子，一切照旧。", "我回来了，不过新改的没成，已经退回原样了。"];
+    void say(what[0], what[1]);
     log(`重启完成 ok=${r.ok}`);
   } finally {
     fs.rmSync(RESULT, { force: true });
