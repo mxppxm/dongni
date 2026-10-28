@@ -1,8 +1,8 @@
 import "server-only";
-import { execFile } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { db } from "./db";
+import { notify } from "./notify";
 import { speakReminder } from "./reminder-voice";
 
 /**
@@ -84,17 +84,6 @@ function arm(r: Reminder) {
   );
 }
 
-function notify(text: string) {
-  const esc = (s: string) => s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\r?\n/g, " ");
-  execFile(
-    "/usr/bin/osascript",
-    ["-e", `display notification "${esc(text)}" with title "懂你" sound name "Ping"`],
-    { timeout: 10_000 },
-    (e) => {
-      if (e) console.warn("[dongni] 系统通知没发出去：", e.message);
-    },
-  );
-}
 
 async function fire(id: number) {
   load();

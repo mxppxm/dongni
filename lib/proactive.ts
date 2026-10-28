@@ -1,5 +1,6 @@
 import "server-only";
-import { execFile, execFileSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
+import { myName, notify } from "./notify";
 import { db, getKv, setKv, type MessageRow } from "./db";
 import { completeJson } from "./llm";
 import { activeMemories, formatMemories, getProfile, nowText } from "./memory";
@@ -27,24 +28,6 @@ const state = ((globalThis as unknown as { __dongniProactive?: { running: boolea
 function quietHours(d = new Date()) {
   const m = d.getHours() * 60 + d.getMinutes();
   return m >= 23 * 60 + 30 || m < 8 * 60 + 30;
-}
-
-/** 对方给它起的名字（从记忆里找），没有就叫「懂你」 */
-function myName() {
-  for (const m of activeMemories()) {
-    const hit = m.content.match(/(?:起名|名字|叫)[^「」]*「([^」]{1,8})」/);
-    if (hit) return hit[1];
-  }
-  return "懂你";
-}
-
-function notify(text: string) {
-  const clean = (x: string) => x.replace(/\s+/g, " ").replace(/[\\"]/g, "");
-  execFile(
-    "/usr/bin/osascript",
-    ["-e", `display notification "${clean(text).slice(0, 120)}" with title "${clean(myName())}" sound name "Glass"`],
-    () => {},
-  );
 }
 
 function recentErrors() {

@@ -1,6 +1,9 @@
 "use client";
 
 import type { ReactNode } from "react";
+import CardBlock from "./Cards";
+import Chart from "./Chart";
+import ImageFigure from "./ImageFigure";
 
 /**
  * 极简 Markdown：自己切块、自己拼 React 节点，全程不碰 innerHTML，所以不存在 XSS。
@@ -16,6 +19,8 @@ type Block =
   | { type: "p"; text: string }
   | { type: "list"; ordered: boolean; start: number; items: { text: string; depth: number }[] }
   | { type: "quote"; text: string }
+  | { type: "table"; head: string[]; align: ("left" | "right" | "center")[]; rows: string[][] }
+  | { type: "images"; items: { alt: string; src: string }[] }
   | { type: "hr" };
 
 const FENCE = /^\s*(```|~~~)\s*([\w+#.-]*)\s*$/;
@@ -24,8 +29,22 @@ const HR = /^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/;
 const UL = /^(\s*)[-*+]\s+(.*)$/;
 const OL = /^(\s*)(\d{1,9})[.)]\s+(.*)$/;
 const QUOTE = /^\s{0,3}>\s?(.*)$/;
+const TABLE_SEP = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/;
+const IMAGE_LINE = /^\s*(!\[[^\]]*\]\([^)\s]+\)\s*)+$/;
+const IMAGE = /!\[([^\]]*)\]\(([^)\s]+)\)/g;
 
-const isBlockStart = (l: string) => FENCE.test(l) || HEADING.test(l) || HR.test(l) || UL.test(l) || OL.test(l) || QUOTE.test(l);
+const cells = (l: string) =>
+  l
+    .trim()
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split("|")
+    .map((c) => c.trim());
+
+const isTableStart = (lines: string[], i: number) => lines[i]?.includes("|") && TABLE_SEP.test(lines[i + 1] ?? "") && lines[i + 1].includes("-");
+
+const isBlockStart = (l: string) =>
+  FENCE.test(l) || HEADING.test(l) || HR.test(l) || UL.test(l) || OL.test(l) || QUOTE.test(l) || IMAGE_LINE.test(l);
 
 function parse(src: string): Block[] {
   const lines = src.replace(/\r\n?/g, "\n").split("\n");
@@ -48,6 +67,30 @@ function parse(src: string): Block[] {
       while (i < lines.length && !close.test(lines[i])) body.push(lines[i++]);
       if (i < lines.length) i++; // 跳过结束围栏（边生成边渲染时可能还没出现）
       out.push({ type: "code", lang, code: body.join("\n") });
+      continue;
+    }
+
+    if (isTableStart(lines, i)) {
+      const head = cells(line);
+      const align = cells(lines[i + 1]).map((c) => (c.startsWith(":") && c.endsWith(":") ? "center" : c.endsWith(":") ? "right" : "left")) as (
+        | "left"
+        | "right"
+        | "center"
+      )[];
+      i += 2;
+      const rows: string[][] = [];
+      while (i < lines.length && lines[i].includes("|") && lines[i].trim()) rows.push(cells(lines[i++]));
+      out.push({ type: "table", head, align, rows });
+      continue;
+    }
+
+    if (IMAGE_LINE.test(line)) {
+      const items: { alt: string; src: string }[] = [];
+      while (i < lines.length && IMAGE_LINE.test(lines[i])) {
+        for (const m of lines[i].matchAll(IMAGE)) items.push({ alt: m[1], src: m[2] });
+        i++;
+      }
+      out.push({ type: "images", items });
       continue;
     }
 
@@ -102,7 +145,7 @@ function parse(src: string): Block[] {
     }
 
     const buf: string[] = [];
-    while (i < lines.length && lines[i].trim() && !isBlockStart(lines[i])) buf.push(lines[i++]);
+    while (i < lines.length && lines[i].trim() && !isBlockStart(lines[i]) && !isTableStart(lines, i)) buf.push(lines[i++]);
     if (buf.length) out.push({ type: "p", text: buf.join("\n") });
     else {
       out.push({ type: "p", text: line });
@@ -254,11 +297,56 @@ export default function Markdown({ text, animate = false }: { text: string; anim
     <div className={animate ? "md md-anim" : "md"}>
       {blocks.map((b, i) => {
         switch (b.type) {
-          case "code":
+          case "code": {
+            // 图表、卡片：代码块里是 JSON；边生成边渲染时 JSON 还不完整，就先不显示
+            if (b.lang === "chart" || b.lang === "card") {
+              let spec: unknown;
+              try {
+                spec = JSON.parse(b.code);
+              } catch {
+                return null;
+              }
+              if (b.lang === "chart") return <Chart key={i} spec={spec} />;
+              return <CardBlock key={i} items={(Array.isArray(spec) ? spec : [spec]) as Record<string, unknown>[]} />;
+            }
             return (
               <pre key={i} className="md-pre scroll-thin">
                 <code>{highlight(b.code, b.lang)}</code>
               </pre>
+            );
+          }
+          case "table":
+            return (
+              <div key={i} className="md-table-wrap scroll-thin">
+                <table className="md-table">
+                  <thead>
+                    <tr>
+                      {b.head.map((c, k) => (
+                        <th key={k} style={{ textAlign: b.align[k] ?? "left" }}>
+                          {inline(c, `th${i}-${k}`)}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {b.rows.map((r, ri) => (
+                      <tr key={ri}>
+                        {b.head.map((_, k) => (
+                          <td key={k} style={{ textAlign: b.align[k] ?? "left" }}>
+                            {inline(r[k] ?? "", `td${i}-${ri}-${k}`)}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            );
+          case "images":
+            return (
+              <div key={i} className={b.items.length > 1 ? "md-imgs md-imgs-multi" : "md-imgs"}>
+                {b.items.map((im, k) => (safeHref(im.src) ? <ImageFigure key={k} src={im.src} alt={im.alt} /> : null))}
+              </div>
             );
           case "heading":
             return (

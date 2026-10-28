@@ -6,6 +6,8 @@ import { ArrowUp, Moon, Sparkles, Sun } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import Markdown from "./Markdown";
 import Starfield, { type Theme } from "./Starfield";
+import { AttachmentStrip, useAttachments } from "./useAttachments";
+import { hasSpeakable, VoiceButton, VoiceProvider } from "./Voice";
 
 const MemoryMap = dynamic(() => import("./MemoryMap"), { ssr: false });
 
@@ -19,9 +21,10 @@ type Msg = {
   status: Status;
   createdAt: number;
   fresh?: boolean;
+  previews?: string[];
 };
 type ServerMsg = { id: number; clientId: string | null; role: "user" | "assistant"; content: string; status: Status; createdAt: number };
-type Outbox = { clientId: string; content: string; createdAt: number };
+type Outbox = { clientId: string; content: string; createdAt: number; images?: string[] };
 
 const DRAFT_KEY = "dongni:draft";
 const THEME_KEY = "dongni:theme";
@@ -34,7 +37,30 @@ const readOutbox = (): Outbox[] => {
     return [];
   }
 };
-const writeOutbox = (o: Outbox[]) => localStorage.setItem(OUTBOX_KEY, JSON.stringify(o));
+const writeOutbox = (o: Outbox[]) => {
+  try {
+    localStorage.setItem(OUTBOX_KEY, JSON.stringify(o));
+  } catch {
+    // 图太大存不下：至少把文字存住
+    localStorage.setItem(OUTBOX_KEY, JSON.stringify(o.map(({ images: _, ...rest }) => rest)));
+  }
+};
+
+/* ---------- Chrome 通知：页面在后台时弹，点一下跳回来 ---------- */
+let swReg: ServiceWorkerRegistration | null = null;
+let myName = "懂你";
+const plain = (t: string) =>
+  t
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, "[图片]")
+    .replace(/[*_~`#>]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 120);
+function browserNotify(id: number, text: string) {
+  if (!document.hidden || !swReg || typeof Notification === "undefined" || Notification.permission !== "granted") return;
+  void swReg.showNotification(myName, { body: plain(text) || "给你发了条消息", tag: `msg-${id}` });
+}
 const fromServer = (m: ServerMsg): Msg => ({ ...m, key: `s${m.id}` });
 
 function timeLabel(ts: number) {
@@ -137,7 +163,7 @@ export default function Chat() {
           const res = await fetch("/api/chat", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ clientId: item.clientId, content: item.content }),
+            body: JSON.stringify({ clientId: item.clientId, content: item.content, images: item.images ?? [] }),
           });
           if (!res.ok || !res.body) throw new Error(String(res.status));
           const reader = res.body.getReader();
@@ -164,7 +190,10 @@ export default function Chat() {
                 patch(aKey, (m) => ({ ...m, status: "streaming", content: m.content + e.text }));
               } else if (e.type === "done") {
                 finished = true;
-                patch(aKey, (m) => ({ ...m, status: "done" }));
+                patch(aKey, (m) => {
+                  if (m.id) browserNotify(m.id, m.content);
+                  return { ...m, status: "done" };
+                });
                 [6000, 15000, 30000].forEach((ms) => setTimeout(checkMemories, ms));
               }
             }
@@ -206,7 +235,7 @@ export default function Chat() {
   useEffect(() => {
     if (!loaded) return;
     const t = setInterval(async () => {
-      if (busy.current || document.visibilityState !== "visible") return;
+      if (busy.current) return;
       const maxId = Math.max(0, ...msgsRef.current.map((m) => m.id ?? 0));
       try {
         const { messages } = (await (await fetch(`/api/messages?after=${maxId + 1}`)).json()) as { messages: ServerMsg[] };
@@ -215,25 +244,61 @@ export default function Chat() {
         if (!fresh.length || busy.current) return;
         stick.current = true;
         setMsgs((list) => [...list, ...fresh.map((m) => ({ ...fromServer(m), fresh: true }))]);
+        fresh.filter((m) => m.role === "assistant").forEach((m) => browserNotify(m.id, m.content));
       } catch {}
     }, 4000);
     return () => clearInterval(t);
   }, [loaded]);
 
+  useEffect(() => {
+    if ("serviceWorker" in navigator)
+      navigator.serviceWorker
+        .register("/sw.js")
+        .then((r) => (swReg = r))
+        .catch(() => {});
+    const ping = async () => {
+      const granted = typeof Notification !== "undefined" && Notification.permission === "granted";
+      try {
+        const r = await (
+          await fetch("/api/presence", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ granted }) })
+        ).json();
+        if (r.name) myName = r.name;
+      } catch {}
+    };
+    void ping();
+    const t = setInterval(ping, 45_000);
+    return () => clearInterval(t);
+  }, []);
+
+  const att = useAttachments();
+
   const send = useCallback(() => {
     const text = draft.trim();
-    if (!text) return;
-    const item: Outbox = { clientId: crypto.randomUUID(), content: text, createdAt: Date.now() };
+    const images = att.items.map((a) => a.dataUrl);
+    if (!text && !images.length) return;
+    // 第一次发消息时顺手要一下通知权限（必须在用户操作里要）
+    if (typeof Notification !== "undefined" && Notification.permission === "default") void Notification.requestPermission();
+    const item: Outbox = { clientId: crypto.randomUUID(), content: text, createdAt: Date.now(), ...(images.length ? { images } : {}) };
+    att.clear();
     writeOutbox([...readOutbox(), item]);
     setMsgs((list) => [
       ...list,
-      { key: `c${item.clientId}`, clientId: item.clientId, role: "user", content: text, status: "sending", createdAt: item.createdAt, fresh: true },
+      {
+        key: `c${item.clientId}`,
+        clientId: item.clientId,
+        role: "user",
+        content: text,
+        previews: images,
+        status: "sending",
+        createdAt: item.createdAt,
+        fresh: true,
+      },
     ]);
     setDraft("");
     localStorage.removeItem(DRAFT_KEY);
     stick.current = true;
     enqueue(item);
-  }, [draft, enqueue]);
+  }, [draft, enqueue, att]);
 
   /* ---------- 初次加载 + 补发没送达的 ---------- */
   useEffect(() => {
@@ -246,7 +311,7 @@ export default function Chat() {
       writeOutbox(outbox.filter((o) => !known.has(o.clientId)));
       const resend = outbox.filter((o) => !known.has(o.clientId));
       for (const o of resend)
-        list.push({ key: `c${o.clientId}`, clientId: o.clientId, role: "user", content: o.content, status: "sending", createdAt: o.createdAt });
+        list.push({ key: `c${o.clientId}`, clientId: o.clientId, role: "user", content: o.content, previews: o.images, status: "sending", createdAt: o.createdAt });
       setMsgs(list);
       setHasMore(hasMore);
       setLoaded(true);
@@ -327,7 +392,14 @@ export default function Chat() {
 
 
   return (
-    <div className="relative flex h-dvh flex-col overflow-hidden">
+    <VoiceProvider>
+    <div
+      className="relative flex h-dvh flex-col overflow-hidden"
+      onDragEnter={att.onDragEnter}
+      onDragOver={att.onDragOver}
+      onDragLeave={att.onDragLeave}
+      onDrop={att.onDrop}
+    >
       <div className="pointer-events-none fixed inset-0 bg-[image:var(--glow-bg)]" />
       <Starfield pulse={pulse} theme={theme} />
 
@@ -385,17 +457,30 @@ export default function Chat() {
                           m.status === "sending" ? "opacity-70" : ""
                         }`}
                       >
-                        <Markdown text={m.content} animate={!!m.fresh} />
+                        {!!m.previews?.length && (
+                          <div className="md-imgs md-imgs-multi mb-1">
+                            {m.previews.map((p, k) => (
+                              // eslint-disable-next-line @next/next/no-img-element
+                              <img key={k} src={p} alt="" className="md-img" />
+                            ))}
+                          </div>
+                        )}
+                        {m.content && <Markdown text={m.content} animate={!!m.fresh} />}
                       </div>
                     </div>
                   ) : (
-                    <div className="min-w-0 text-[16px] leading-[1.85] text-[var(--text)]">
+                    <div className="group min-w-0 text-[16px] leading-[1.85] text-[var(--text)]">
                       {m.status === "waiting" ? (
                         <span className="inline-flex items-center gap-2.5">
                           <span className="breathe inline-block h-2 w-2 rounded-full bg-[var(--dot)] shadow-[0_0_12px_var(--dot)]" />
                         </span>
                       ) : (
                         <Markdown text={m.content} animate={m.status === "streaming" || !!m.fresh} />
+                      )}
+                      {m.status === "done" && !!m.id && hasSpeakable(m.content) && (
+                        <div className="msg-actions">
+                          <VoiceButton id={m.id} />
+                        </div>
                       )}
                     </div>
                   )}
@@ -408,8 +493,16 @@ export default function Chat() {
 
       <div className="pointer-events-none fixed inset-x-0 bottom-0 z-20 bg-[linear-gradient(to_top,var(--bg)_0%,var(--bg-85)_45%,transparent_100%)] pt-16 pb-6">
         <div className="pointer-events-auto mx-auto w-full max-w-[680px] px-5">
-          <div className="beam flex items-end gap-2 rounded-[26px] border border-[var(--border)] bg-[var(--panel)] py-2 pr-2 pl-5 shadow-[var(--shadow)] backdrop-blur-xl">
+          {att.hint && <div className="mb-2 text-center text-xs text-[var(--faint)]">{att.hint}</div>}
+          <div
+            className={`beam flex items-end gap-2 rounded-[26px] border bg-[var(--panel)] py-2 pr-2 pl-5 shadow-[var(--shadow)] backdrop-blur-xl transition-colors ${
+              att.dragging ? "border-[var(--dot)]" : "border-[var(--border)]"
+            }`}
+          >
+            <div className="min-w-0 flex-1 pt-1">
+            <AttachmentStrip items={att.items} onRemove={att.remove} />
             <textarea
+              onPaste={att.onPaste}
               ref={input}
               value={draft}
               rows={1}
@@ -421,10 +514,11 @@ export default function Chat() {
               onCompositionStart={() => (composing.current = true)}
               onCompositionEnd={() => (composing.current = false)}
               placeholder="说点什么…"
-              className="scroll-thin max-h-[40vh] flex-1 resize-none bg-transparent py-2 text-[16px] leading-relaxed text-[var(--text)] outline-none placeholder:text-[var(--faint)]"
+              className="scroll-thin block max-h-[40vh] w-full resize-none bg-transparent py-1 text-[16px] leading-relaxed text-[var(--text)] outline-none placeholder:text-[var(--faint)]"
             />
+            </div>
             <AnimatePresence>
-              {draft.trim() && (
+              {(draft.trim() || att.items.length > 0) && (
                 <motion.button
                   initial={{ scale: 0.4, opacity: 0 }}
                   animate={{ scale: 1, opacity: 1 }}
@@ -444,5 +538,6 @@ export default function Chat() {
 
       <AnimatePresence>{showMap && <MemoryMap theme={theme} onClose={() => setShowMap(false)} />}</AnimatePresence>
     </div>
+    </VoiceProvider>
   );
 }

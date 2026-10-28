@@ -5,6 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { addReminder, cancelReminder, pendingReminders, resolveWhen } from "./reminders";
+import { generateImage } from "./imagegen";
+import { addLocalImage, IMAGE_EXT, imageMarkdown } from "./images";
 import { startRepair } from "./selfrepair";
 
 /**
@@ -66,11 +68,15 @@ async function listDir({ path: p }: { path: string }) {
 
 const TEXTUTIL = new Set([".doc", ".docx", ".rtf", ".rtfd", ".odt", ".html", ".htm", ".webarchive"]);
 
-async function readFile({ path: p, offset = 0 }: { path: string; offset?: number }) {
+async function readFile({ path: p, offset = 0 }: { path: string; offset?: number }, ctx?: ToolCtx) {
   const file = resolvePath(p);
   const st = await fs.stat(file);
   if (st.isDirectory()) return listDir({ path: file });
   const ext = path.extname(file).toLowerCase();
+  if (IMAGE_EXT.has(ext)) {
+    ctx?.see(addLocalImage(file).id);
+    return "这是一张图片，你现在能看到它了（对方看不到；想给对方看就用 show_image）。";
+  }
   let text: string;
   if (TEXTUTIL.has(ext)) {
     text = (await run("/usr/bin/textutil", ["-convert", "txt", "-stdout", file], { maxBuffer: 20 << 20 })).stdout;
@@ -151,7 +157,7 @@ function fmtLeft(ms: number) {
   return `${Math.floor(s / 86400)} 天 ${Math.round((s % 86400) / 3600)} 小时`;
 }
 
-async function setReminder({ text, delay_seconds, at }: { text?: string; delay_seconds?: number; at?: string }) {
+async function setReminder({ text, delay_seconds, at }: { text?: string; delay_seconds?: number; at?: string }, ctx?: ToolCtx) {
   const now = Date.now();
   const content = (text ?? "").trim();
   if (!content) return "没给提醒内容，再调一次，把 text 写上。";
@@ -166,6 +172,7 @@ async function setReminder({ text, delay_seconds, at }: { text?: string; delay_s
   if (when <= now + 1000)
     return `这个时间（${fmtWhen(when)}）已经过去了，现在是 ${fmtWhen(now)}。不能设过去的提醒，请和对方确认一个将来的时间。`;
   const r = addReminder(content, when);
+  ctx?.attach(card({ type: "reminder", id: r.id, text: r.text, at: r.at }));
   return `已设好提醒：${fmtWhen(r.at)}（${fmtLeft(r.at - now)}后）「${r.text}」，编号 ${r.id}。`;
 }
 
@@ -184,6 +191,42 @@ async function cancelReminderTool({ id }: { id?: number }) {
   if (!Number.isFinite(rid)) return "需要提醒的编号 id（用 list_reminders 能看到）。";
   const r = cancelReminder(rid);
   return r ? `已取消 #${r.id}「${r.text}」（${fmtWhen(r.at)}）。` : `没有编号 ${rid} 的待触发提醒，可以先 list_reminders 看看。`;
+}
+
+/** 一次回复里，工具可以往回复末尾挂东西（图片、卡片），也可以让模型「看到」图片 */
+export type ToolCtx = { turnId: string; attach: (markdown: string) => void; see: (imageId: number) => void };
+
+const card = (spec: Record<string, unknown>) => "```card\n" + JSON.stringify(spec) + "\n```";
+
+async function showImage({ path: p }: { path: string }, ctx?: ToolCtx) {
+  const file = resolvePath(p);
+  if (!IMAGE_EXT.has(path.extname(file).toLowerCase())) return "这不是图片文件。";
+  const rec = addLocalImage(file);
+  ctx?.attach(imageMarkdown(rec.id));
+  ctx?.see(rec.id);
+  return "图片已经放进你的回复里给对方看了，你也能看到它。回复里不要再写图片链接或路径，直接说你想说的。";
+}
+
+async function drawImage({ prompt }: { prompt: string }, ctx?: ToolCtx) {
+  const r = await generateImage(prompt, ctx?.turnId ?? "x");
+  if (!r.ok) return r.message;
+  ctx?.attach(r.markdown);
+  return "画好了，图已经放进你的回复里。回复里不要再写图片链接，直接用一两句话说说这张图。";
+}
+
+const OUT_DIR = path.join(HOME, "Downloads", "敏");
+
+async function writeFile({ name, content }: { name: string; content: string }, ctx?: ToolCtx) {
+  const safe = path.basename(String(name || "").trim()).replace(/[\\/:*?"<>|]/g, "_");
+  if (!safe) return "文件名不能为空。";
+  if (typeof content !== "string" || !content) return "文件内容不能为空。";
+  await fs.mkdir(OUT_DIR, { recursive: true });
+  let file = path.join(OUT_DIR, safe);
+  const ext = path.extname(safe);
+  for (let i = 2; await fs.stat(file).then(() => true, () => false); i++) file = path.join(OUT_DIR, `${path.basename(safe, ext)} (${i})${ext}`);
+  await fs.writeFile(file, content, "utf8");
+  ctx?.attach(card({ type: "file", path: file }));
+  return "文件写好了，回复末尾会自动带一张文件卡片，对方点一下就能在 Finder 里看到。回复里不用写路径。";
 }
 
 export const TOOLS = [
@@ -277,15 +320,44 @@ export const TOOLS = [
       parameters: { type: "object", properties: { request: { type: "string", description: "要改什么，写具体" } }, required: ["request"] },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "show_image",
+      description: "把电脑里的一张图片放进你的回复里给对方看（你自己也能看到这张图）。先用 search_files / list_dir 找到图片路径再用。",
+      parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "generate_image",
+      description:
+        "自己画一张图给对方看（插画、示意图、逗对方开心的小画）。prompt 写清内容、风格、构图。一次回复最多一张；能用话说清楚的就别画。",
+      parameters: { type: "object", properties: { prompt: { type: "string" } }, required: ["prompt"] },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "write_file",
+      description:
+        "给对方写一个文件（文档、脚本、清单、代码等纯文本），存到下载文件夹里的「敏」目录，回复里会自动带一张文件卡片。name 带扩展名，如 周报.md、backup.sh。",
+      parameters: { type: "object", properties: { name: { type: "string" }, content: { type: "string" } }, required: ["name", "content"] },
+    },
+  },
 ];
 
-const IMPL: Record<string, (a: never) => Promise<string>> = {
+const IMPL: Record<string, (a: never, ctx?: ToolCtx) => Promise<string>> = {
+  show_image: showImage as (a: never, ctx?: ToolCtx) => Promise<string>,
+  generate_image: drawImage as (a: never, ctx?: ToolCtx) => Promise<string>,
+  write_file: writeFile as (a: never, ctx?: ToolCtx) => Promise<string>,
   repair_self: async ({ request }: { request: string }) => startRepair(request),
-  set_reminder: setReminder as (a: never) => Promise<string>,
+  set_reminder: setReminder as (a: never, ctx?: ToolCtx) => Promise<string>,
   list_reminders: listReminders,
   cancel_reminder: cancelReminderTool as (a: never) => Promise<string>,
   list_dir: listDir,
-  read_file: readFile,
+  read_file: readFile as (a: never, ctx?: ToolCtx) => Promise<string>,
   search_files: searchFiles,
   recent_files: recentFiles,
   system_info: systemInfo,
@@ -293,12 +365,12 @@ const IMPL: Record<string, (a: never) => Promise<string>> = {
 
 /** 工具调用过程不上屏：界面上只出现最终回复，所以这里不再提供「正在做什么」的文案 */
 
-export async function runTool(name: string, rawArgs: string): Promise<string> {
+export async function runTool(name: string, rawArgs: string, ctx?: ToolCtx): Promise<string> {
   const fn = IMPL[name];
   if (!fn) return `没有这个工具：${name}`;
   try {
     const args = rawArgs ? JSON.parse(rawArgs) : {};
-    const out = await fn(args as never);
+    const out = await fn(args as never, ctx);
     return out.length > 30_000 ? out.slice(0, 30_000) + "\n……（太长，已截断）" : out;
   } catch (e) {
     const err = e as NodeJS.ErrnoException;

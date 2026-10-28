@@ -1,6 +1,7 @@
 import "server-only";
 import { db, getKv, setKv, type LinkRow, type MemoryRow, type MessageRow } from "./db";
 import { completeJson } from "./llm";
+import { stripImageMarkdown } from "./images";
 
 export const CATEGORIES = ["人", "偏好", "经历", "近况", "想法"] as const;
 
@@ -164,7 +165,7 @@ async function extractBatch(pending: MessageRow[]) {
     .all(firstId, lastId) as MessageRow[];
 
   const fmt = (ms: MessageRow[]) =>
-    ms.map((m) => `${m.role === "user" ? `用户[#${m.id}]` : "AI"}（${nowText(m.created_at)}）：${m.content}`).join("\n");
+    ms.map((m) => `${m.role === "user" ? `用户[#${m.id}]` : "AI"}（${nowText(m.created_at)}）：${stripImageMarkdown(m.content) || "[图片]"}`).join("\n");
   const newText = batch.map((m) => m.content).join("\n");
   const existing = relevantMemories(newText, 150);
 

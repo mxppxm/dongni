@@ -127,6 +127,8 @@ export function drainRepairQueue() {
 }
 
 export function startRepair(request: string): string {
+  if (getKv("repair_paused") === "1")
+    return "改自己的功能现在被对方暂停了（对方让别人来改）。这次没有交出去，别说你在改；如实告诉对方，你把想法记下了。";
   if (state.running) {
     setKv("repair_queue", JSON.stringify([...queue(), request]));
     return "前面还有一处正在改，这个已经排上队了：前一个改完（可能会重启一下）就接着改这个。如实告诉对方要排一会儿。";
@@ -175,7 +177,11 @@ export function startRepair(request: string): string {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       log(`失败：${msg}`);
-      if (good) await git("reset", "--hard", good).catch(() => {});
+      if (good) {
+        await git("reset", "--hard", good).catch(() => {});
+        // 改到一半新建的文件也清掉，不然会混进下一次的「修改前」版本
+        await git("clean", "-fd", "-e", "data", "-e", "logs").catch(() => {});
+      }
       postAssistant(`这次没改成，已经退回原样了。原因：${msg.slice(0, 200)}`);
     } finally {
       state.running = null;

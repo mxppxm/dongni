@@ -3,8 +3,8 @@ import { startReply, type ChatEvent } from "@/lib/chat";
 export const dynamic = "force-dynamic";
 
 export async function POST(req: Request) {
-  const { clientId, content } = (await req.json()) as { clientId?: string; content?: string };
-  if (!clientId || !content?.trim()) return Response.json({ error: "空消息" }, { status: 400 });
+  const { clientId, content = "", images = [] } = (await req.json()) as { clientId?: string; content?: string; images?: string[] };
+  if (!clientId || (!content.trim() && !images.length)) return Response.json({ error: "空消息" }, { status: 400 });
 
   const enc = new TextEncoder();
   let closed = false;
@@ -23,7 +23,7 @@ export async function POST(req: Request) {
           closed = true;
         }
       };
-      startReply(clientId, content.trim(), send);
+      startReply(clientId, content.trim(), send, images.slice(0, 3));
     },
     cancel() {
       closed = true;

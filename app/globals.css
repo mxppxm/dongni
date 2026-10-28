@@ -262,3 +262,287 @@ ol.md-list {
 .beam:focus-within::before {
   opacity: 1;
 }
+
+/* ================= 图片、表格、图表、卡片、语音、附件 ================= */
+:root,
+:root[data-theme="dark"] {
+  --chart-1: #5ad1f5;
+  --chart-2: #b48cff;
+  --chart-3: #ffc86b;
+  --chart-4: #63e0b0;
+  --chart-5: #ff8fab;
+  --chart-dot: #0b111b;
+  --card-bg: rgba(255, 255, 255, 0.04);
+}
+:root[data-theme="light"] {
+  --chart-1: #ff9a76;
+  --chart-2: #a78bfa;
+  --chart-3: #f2b84b;
+  --chart-4: #4cc29a;
+  --chart-5: #6aa9e8;
+  --chart-dot: #fffdfa;
+  --card-bg: rgba(255, 255, 255, 0.7);
+}
+
+.md-imgs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.md-img {
+  display: block;
+  max-width: min(100%, 360px);
+  max-height: 360px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  cursor: zoom-in;
+  object-fit: cover;
+  transition: transform 0.2s;
+}
+.md-img:hover {
+  transform: scale(1.01);
+}
+.md-imgs-multi .md-img {
+  width: 150px;
+  height: 150px;
+}
+.md-img-fail {
+  font-size: 13px;
+  color: var(--faint);
+}
+.img-zoom {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.72);
+  backdrop-filter: blur(6px);
+  cursor: zoom-out;
+  animation: chunk-in 0.25s ease-out both;
+}
+.img-zoom img {
+  max-width: 92vw;
+  max-height: 90vh;
+  border-radius: 12px;
+}
+.img-zoom-close {
+  position: absolute;
+  top: 18px;
+  right: 18px;
+  display: flex;
+  width: 34px;
+  height: 34px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.md-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.md-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+  line-height: 1.6;
+}
+.md-table th,
+.md-table td {
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.md-table th {
+  font-weight: 600;
+  color: var(--text-strong);
+  background: var(--hover);
+}
+.md-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.chart {
+  padding: 12px 14px 10px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--card-bg);
+}
+.chart-title {
+  margin-bottom: 4px;
+  font-size: 13px;
+  color: var(--dim);
+}
+.chart-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+.chart-grid {
+  stroke: var(--border);
+  stroke-width: 1;
+}
+.chart-axis {
+  fill: var(--faint);
+  font-size: 11px;
+}
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--dim);
+}
+.chart-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.chart-legend i {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+}
+.chart-legend em {
+  font-style: normal;
+  color: var(--faint);
+}
+
+.cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 420px;
+}
+.card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--card-bg);
+  color: var(--text);
+  text-decoration: none !important;
+  transition:
+    transform 0.2s,
+    box-shadow 0.2s;
+}
+a.card:hover,
+.card:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow);
+}
+.card-icon {
+  display: flex;
+  width: 34px;
+  height: 34px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  color: var(--dot);
+  background: var(--hover);
+}
+.card-title,
+.card-sub {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.card-title {
+  font-size: 14px;
+  line-height: 1.4;
+  color: var(--text-strong);
+}
+.card-sub {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--faint);
+}
+.card-tail {
+  flex: none;
+  font-size: 12px;
+  color: var(--faint);
+}
+.card-btn {
+  flex: none;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--dim);
+  background: var(--hover);
+  transition: color 0.2s;
+}
+.card-btn:hover {
+  color: var(--text-strong);
+}
+
+/* 每条回复下面的小操作：平时几乎看不见，鼠标移上去才亮 */
+.msg-actions {
+  display: flex;
+  height: 22px;
+  margin-top: 2px;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+.group:hover .msg-actions,
+.msg-actions:has([data-on="1"]) {
+  opacity: 1;
+}
+.voice-btn {
+  display: flex;
+  width: 22px;
+  height: 22px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  color: var(--faint);
+  transition:
+    color 0.2s,
+    background 0.2s;
+}
+.voice-btn:hover,
+.voice-btn[data-on="1"] {
+  color: var(--dot);
+  background: var(--hover);
+}
+.voice-note {
+  font-size: 12px;
+  color: var(--faint);
+}
+
+.attach {
+  position: relative;
+  width: 56px;
+  height: 56px;
+  animation: chunk-in 0.3s ease-out both;
+}
+.attach img {
+  width: 100%;
+  height: 100%;
+  border-radius: 10px;
+  object-fit: cover;
+  border: 1px solid var(--border);
+}
+.attach button {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  display: flex;
+  width: 18px;
+  height: 18px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.6);
+}
