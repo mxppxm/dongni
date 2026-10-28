@@ -5,6 +5,7 @@ import { AnimatePresence, motion } from "motion/react";
 import { ArrowUp, Moon, Sparkles, Sun } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import Markdown from "./Markdown";
+import Mood from "./Mood";
 import Starfield, { type Theme } from "./Starfield";
 import { AttachmentStrip, useAttachments } from "./useAttachments";
 import { hasSpeakable, VoiceButton, VoiceProvider } from "./Voice";
@@ -23,6 +24,7 @@ type Msg = {
   fresh?: boolean;
   previews?: string[];
   kind?: string;
+  mood?: string;
 };
 type ServerMsg = { id: number; clientId: string | null; role: "user" | "assistant"; content: string; status: Status; createdAt: number; kind?: string };
 type Outbox = { clientId: string; content: string; createdAt: number; images?: string[] };
@@ -185,6 +187,8 @@ export default function Chat() {
                 writeOutbox(readOutbox().filter((o) => o.clientId !== item.clientId));
                 patch(uKey, (m) => ({ ...m, id: e.userId, status: "done" }));
                 patch(aKey, (m) => ({ ...m, id: e.assistantId }));
+              } else if (e.type === "mood") {
+                patch(aKey, (m) => ({ ...m, mood: e.mood }));
               } else if (e.type === "reset") {
                 patch(aKey, (m) => ({ ...m, status: "waiting", content: "" }));
               } else if (e.type === "delta") {
@@ -476,9 +480,7 @@ export default function Chat() {
                   ) : (
                     <div className="group min-w-0 text-[16px] leading-[1.85] text-[var(--text)]">
                       {m.status === "waiting" ? (
-                        <span className="inline-flex items-center gap-2.5">
-                          <span className="breathe inline-block h-2 w-2 rounded-full bg-[var(--dot)] shadow-[0_0_12px_var(--dot)]" />
-                        </span>
+                        <Mood mood={m.mood} />
                       ) : (
                         <Markdown text={m.content} animate={m.status === "streaming" || !!m.fresh} />
                       )}

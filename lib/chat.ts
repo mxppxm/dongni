@@ -2,6 +2,7 @@ import "server-only";
 import { db, type MessageRow } from "./db";
 import { streamChat, type ChatMessage, type ContentPart } from "./llm";
 import { CAPABILITIES } from "./capabilities";
+import { pickMood } from "./moods";
 import { addUploadedImage, getImage, imageDataUrl, imageIdsIn, imageMarkdown, stripImageMarkdown } from "./images";
 import { runTool, TOOLS } from "./tools";
 import { formatMemories, getProfile, nowText, relevantMemories, scheduleExtraction } from "./memory";
@@ -88,6 +89,7 @@ export type ChatEvent =
   | { type: "meta"; userId: number; assistantId: number }
   | { type: "delta"; text: string }
   | { type: "reset" }
+  | { type: "mood"; mood: string }
   | { type: "follow" }
   | { type: "done" };
 
@@ -173,6 +175,15 @@ async function generate(assistantId: number, userRow: MessageRow, onEvent: (e: C
   let lastSave = 0;
   const save = (status: string) => d.prepare("UPDATE messages SET content = ?, status = ? WHERE id = ?").run(text, status, assistantId);
   save("streaming");
+  // 一边想怎么回，一边看对方这句话挑一个等待的样子（很快，不耽误回复）
+  const recent = history(userRow.id)
+    .slice(-5, -1)
+    .map((m) => `${m.role === "user" ? "他" : "你"}：${typeof m.content === "string" ? m.content.slice(0, 200) : "[图片]"}`)
+    .join("\n");
+  let working = false; // 已经去跑腿/画画了，挑出来的心情就别盖掉它
+  void pickMood(stripImageMarkdown(userRow.content) || "[发了一张图]", recent).then((mood) => {
+    if (!text && !working) emit({ type: "mood", mood });
+  });
   try {
     for (let attempt = 0; ; attempt++) {
       if (attempt) {
@@ -205,6 +216,10 @@ async function generate(assistantId: number, userRow: MessageRow, onEvent: (e: C
             lastSave = Date.now();
             emit({ type: "reset" });
           },
+          (mood) => {
+            working = true;
+            emit({ type: "mood", mood });
+          },
         );
         if (!text.trim()) throw new Error("模型返回为空");
         save("done");
@@ -225,6 +240,7 @@ async function oneReply(
   userRow: MessageRow,
   onText: (t: string) => void,
   onDiscard: () => void,
+  onMood: (mood: string) => void,
 ) {
   const msgs: ChatMessage[] = [{ role: "system", content: systemPrompt(stripImageMarkdown(userRow.content)) }, ...history(userRow.id)];
   const attachments: string[] = [];
@@ -257,6 +273,8 @@ async function oneReply(
     // 工具照常执行，但界面上不出现任何调用痕迹：铺垫话丢掉，只留最终回答
     if (roundText.trim()) onDiscard();
     msgs.push({ role: "assistant", content: roundText, tool_calls: calls });
+    // 去干活了：画图就「画画」，其他都是「跑腿」
+    onMood(calls.some((c) => c.function.name === "generate_image") ? "draw" : "run");
     for (const c of calls) {
       msgs.push({ role: "tool", tool_call_id: c.id, content: await runTool(c.function.name, c.function.arguments, ctx) });
     }

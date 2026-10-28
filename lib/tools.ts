@@ -6,6 +6,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { addReminder, cancelReminder, pendingReminders, resolveWhen } from "./reminders";
 import { generateImage } from "./imagegen";
+import { createMood } from "./moods";
 import { addLocalImage, IMAGE_EXT, imageMarkdown } from "./images";
 import { startRepair } from "./selfrepair";
 
@@ -323,6 +324,19 @@ export const TOOLS = [
   {
     type: "function",
     function: {
+      name: "create_mood",
+      description:
+        "给自己画一个新的「等对方时的样子」（聊天里等回复时出现的那个小贴纸）。对方让你多一个表情、或者你想要一个现在没有的样子时用。name 两三个字，when 写什么时候用，pose 写具体动作表情。",
+      parameters: {
+        type: "object",
+        properties: { name: { type: "string" }, when: { type: "string" }, pose: { type: "string" } },
+        required: ["name", "pose"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "show_image",
       description: "把电脑里的一张图片放进你的回复里给对方看（你自己也能看到这张图）。先用 search_files / list_dir 找到图片路径再用。",
       parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
@@ -349,6 +363,10 @@ export const TOOLS = [
 ];
 
 const IMPL: Record<string, (a: never, ctx?: ToolCtx) => Promise<string>> = {
+  create_mood: (async ({ name, when, pose }: { name: string; when?: string; pose: string }) => {
+    void createMood(name, when ?? "", pose);
+    return "开始画了（要一两分钟），画好、自己检查过关后会入库，并拿给对方看。现在只需跟对方说一句你去画了，别说已经画好。";
+  }) as (a: never, ctx?: ToolCtx) => Promise<string>,
   show_image: showImage as (a: never, ctx?: ToolCtx) => Promise<string>,
   generate_image: drawImage as (a: never, ctx?: ToolCtx) => Promise<string>,
   write_file: writeFile as (a: never, ctx?: ToolCtx) => Promise<string>,

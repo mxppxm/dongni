@@ -138,12 +138,12 @@ async function* streamOnce(messages: ChatMessage[], tools?: unknown[]): AsyncGen
 }
 
 /** 要 JSON 结果的后台任务（记忆整理、画像） */
-export async function completeJson<T>(messages: ChatMessage[], maxTokens = 6000): Promise<T> {
+export async function completeJson<T>(messages: ChatMessage[], maxTokens = 6000, effort = "low"): Promise<T> {
   let lastErr: unknown;
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const res = await post(
-        { messages, response_format: { type: "json_object" }, reasoning_effort: "low", max_tokens: maxTokens, temperature: 0.2 },
+        { messages, response_format: { type: "json_object" }, reasoning_effort: effort, max_tokens: maxTokens, temperature: 0.2 },
         AbortSignal.timeout(180_000),
       );
       const json = await res.json();

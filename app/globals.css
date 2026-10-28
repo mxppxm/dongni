@@ -546,3 +546,87 @@ a.card:hover,
   color: #fff;
   background: rgba(0, 0, 0, 0.6);
 }
+
+/* ================= 她等你时的样子 ================= */
+.mood {
+  position: relative;
+  display: inline-block;
+  width: 44px;
+  height: 44px;
+  vertical-align: middle;
+  animation: chunk-in 0.35s ease-out both;
+}
+.mood > img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  filter: drop-shadow(0 2px 3px rgba(80, 50, 30, 0.18));
+  transform-origin: 50% 90%;
+  user-select: none;
+}
+.mood-fx {
+  position: absolute;
+  pointer-events: none;
+}
+.mood-ponder > img { animation: m-ponder 2.6s ease-in-out infinite; }
+.mood-stride > img { animation: m-stride 0.32s ease-in-out infinite alternate; }
+.mood-jump > img { transform-origin: 50% 100%; animation: m-jump 0.9s cubic-bezier(0.3, 0.7, 0.4, 1) infinite; }
+.mood-breathe > img { transform-origin: 50% 100%; animation: m-breathe 3s ease-in-out infinite; }
+.mood-scribble > img { animation: m-scribble 0.5s ease-in-out infinite; }
+.mood-hi > img { transform-origin: 50% 100%; animation: m-hi 1.6s ease-in-out infinite; }
+.mood-sway > img { animation: m-sway 2s ease-in-out infinite; }
+.mood-shake > img { animation: m-shake 0.6s ease-in-out infinite; }
+.mood-float > img { animation: m-float 2.4s ease-in-out infinite; }
+@keyframes m-ponder { 0%, 100% { transform: rotate(0); } 25% { transform: rotate(-7deg); } 55% { transform: rotate(4deg) translateY(-1px); } }
+@keyframes m-stride { from { transform: translateY(0) rotate(3deg); } to { transform: translateY(-4px) rotate(5deg); } }
+@keyframes m-jump { 0%, 100% { transform: translateY(0) scale(1.06, 0.94); } 15% { transform: scale(0.96, 1.04); } 45% { transform: translateY(-9px); } 75% { transform: translateY(0) scale(1.05, 0.95); } }
+@keyframes m-breathe { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.04) translateY(-1px); } }
+@keyframes m-scribble { 0%, 100% { transform: rotate(0); } 25% { transform: rotate(-2deg) translateX(-0.5px); } 75% { transform: rotate(2deg) translateX(0.5px); } }
+@keyframes m-hi { 0%, 100% { transform: rotate(0); } 10% { transform: rotate(-8deg); } 20% { transform: rotate(6deg); } 30% { transform: rotate(-5deg); } 40% { transform: rotate(0); } }
+@keyframes m-sway { 0%, 100% { transform: rotate(-4deg); } 50% { transform: rotate(4deg); } }
+@keyframes m-shake { 0%, 100% { transform: translateX(0); } 20% { transform: translateX(-2px) rotate(-2deg); } 40% { transform: translateX(2px) rotate(2deg); } 60% { transform: translateX(-1.5px); } 80% { transform: translateX(1.5px); } }
+@keyframes m-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-5px); } }
+
+/* 思考泡 */
+.fx-bubbles { right: -14px; top: -4px; width: 16px; height: 16px; }
+.fx-bubbles i { position: absolute; border-radius: 50%; background: var(--chart-2); opacity: 0; animation: f-bubble 2.6s ease-in-out infinite; }
+.fx-bubbles i:nth-child(1) { left: 0; bottom: 0; width: 4px; height: 4px; }
+.fx-bubbles i:nth-child(2) { left: 4px; bottom: 5px; width: 5px; height: 5px; animation-delay: 0.25s; }
+.fx-bubbles i:nth-child(3) { left: 9px; bottom: 11px; width: 7px; height: 7px; animation-delay: 0.5s; }
+@keyframes f-bubble { 0%, 15% { opacity: 0; transform: scale(0.3); } 35%, 75% { opacity: 0.9; transform: scale(1); } 95%, 100% { opacity: 0; transform: scale(1.1) translateY(-2px); } }
+/* 风线 */
+.fx-wind { left: -16px; top: 12px; width: 16px; height: 22px; }
+.fx-wind i { position: absolute; left: 0; height: 2px; border-radius: 2px; background: var(--faint); animation: f-wind 0.5s linear infinite; }
+.fx-wind i:nth-child(1) { top: 2px; width: 12px; }
+.fx-wind i:nth-child(2) { top: 10px; width: 16px; animation-delay: 0.17s; }
+.fx-wind i:nth-child(3) { top: 18px; width: 9px; animation-delay: 0.33s; }
+@keyframes f-wind { 0% { transform: translateX(8px); opacity: 0; } 30% { opacity: 1; } 100% { transform: translateX(-10px); opacity: 0; } }
+/* 汗滴 */
+.fx-drops { right: -4px; top: 0; width: 10px; height: 20px; }
+.fx-drops i { position: absolute; width: 4px; height: 6px; border-radius: 50% 50% 50% 50% / 60% 60% 40% 40%; background: var(--chart-5); opacity: 0; animation: f-drop 1.4s ease-in infinite; }
+.fx-drops i:nth-child(2) { left: 5px; animation-delay: 0.5s; }
+.fx-drops i:nth-child(3) { display: none; }
+@keyframes f-drop { 0% { opacity: 0; transform: translateY(0); } 30% { opacity: 0.9; } 100% { opacity: 0; transform: translateY(14px); } }
+/* 小星星 */
+.fx-sparks { inset: -10px; }
+.fx-sparks svg { position: absolute; width: 9px; height: 9px; fill: var(--chart-3); opacity: 0; animation: f-spark 0.9s ease-out infinite; }
+.fx-sparks svg:nth-child(1) { left: 0; top: 6px; }
+.fx-sparks svg:nth-child(2) { right: 0; top: 0; width: 11px; height: 11px; animation-delay: 0.3s; }
+.fx-sparks svg:nth-child(3) { right: 4px; bottom: 10px; width: 7px; height: 7px; animation-delay: 0.6s; }
+@keyframes f-spark { 0% { opacity: 0; transform: scale(0.2) rotate(0); } 40% { opacity: 1; transform: scale(1.1) rotate(45deg); } 100% { opacity: 0; transform: scale(0.6) rotate(90deg); } }
+/* 小爱心、音符 */
+.fx-hearts, .fx-notes { right: -12px; top: -6px; width: 14px; height: 40px; }
+.fx-hearts svg, .fx-notes svg { position: absolute; bottom: 0; width: 9px; height: 9px; opacity: 0; animation: f-float 3s ease-out infinite; }
+.fx-hearts svg { fill: #ff8fab; }
+.fx-notes svg { fill: var(--chart-2); animation-duration: 2s; }
+.fx-hearts svg:nth-child(2), .fx-notes svg:nth-child(2) { left: 5px; width: 7px; height: 7px; animation-delay: 1.5s; }
+.fx-notes svg:nth-child(2) { animation-delay: 1s; }
+@keyframes f-float { 0% { opacity: 0; transform: translateY(0) scale(0.5); } 20% { opacity: 0.95; } 100% { opacity: 0; transform: translateY(-30px) scale(1); } }
+/* 彩线 */
+.fx-line { right: -34px; top: 14px; width: 30px; height: 18px; }
+.fx-line path { fill: none; stroke: url(#mood-ink); stroke-width: 2.5; stroke-linecap: round; stroke-dasharray: 46 100; animation: f-line 1.4s ease-in-out infinite; }
+@keyframes f-line { from { stroke-dashoffset: 146; } to { stroke-dashoffset: 0; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .mood > img, .mood-fx, .mood-fx * { animation: none !important; }
+}
