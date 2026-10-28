@@ -3,10 +3,11 @@ import { execFile } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { db } from "./db";
+import { speakReminder } from "./reminder-voice";
 
 /**
  * 定时提醒：存在 data/reminders.json，进程里用一个 Map 管所有定时器（设一个清一个，取消就清掉）。
- * 到点往对话里补一条消息（前端轮询会看到）+ 发一条 macOS 通知。
+ * 到点让敏用自己的口吻在对话里说一句（前端轮询会看到）+ 发一条 macOS 通知。
  * 重启后从文件读回来：还没到点的重新上表；已经过点的立刻补发一次，不会丢。
  */
 const DATA_DIR = process.env.DONGNI_DATA_DIR || path.join(process.cwd(), "data");
@@ -79,7 +80,7 @@ function arm(r: Reminder) {
   }
   state.timers.set(
     r.id,
-    setTimeout(() => fire(r.id), Math.max(0, delay)),
+    setTimeout(() => void fire(r.id), Math.max(0, delay)),
   );
 }
 
@@ -95,19 +96,23 @@ function notify(text: string) {
   );
 }
 
-function fire(id: number) {
+async function fire(id: number) {
   load();
   clearTimer(id);
   const r = state.list.find((x) => x.id === id);
   if (!r || r.firedAt) return;
+  // 先在内存里标成已触发，不会重复响；存盘等话写好之后——中途重启就重来一次，不丢
   r.firedAt = Date.now();
-  save();
+  // 系统通知用当初设的原始内容，立刻发，不等模型
+  notify(r.text);
+  // 对话里让她自己说一句（模型抽风就用原话，不加前缀）
+  const said = await speakReminder(r.text);
   // extracted=1：提醒不是对方说的话，不用拿来整理记忆
   db()
     .prepare("INSERT INTO messages(role, content, status, extracted, created_at) VALUES('assistant', ?, 'done', 1, ?)")
-    .run(`⏰ 提醒你：${r.text}`, r.firedAt);
-  notify(r.text);
-  console.log(`[dongni] 提醒 #${r.id} 到点：${r.text}`);
+    .run(said, Date.now());
+  save();
+  console.log(`[dongni] 提醒 #${r.id} 到点：${r.text} → 说：${said}`);
 }
 
 /** 服务启动时把提醒重新上表；关机期间错过的立刻补上 */

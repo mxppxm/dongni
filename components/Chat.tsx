@@ -5,7 +5,6 @@ import { AnimatePresence, motion } from "motion/react";
 import { ArrowUp, Moon, Sparkles, Sun } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import Markdown from "./Markdown";
-import ReminderToast from "./ReminderToast";
 import Starfield, { type Theme } from "./Starfield";
 
 const MemoryMap = dynamic(() => import("./MemoryMap"), { ssr: false });
@@ -60,7 +59,6 @@ export default function Chat() {
   const [memCount, setMemCount] = useState<number | null>(null);
   const [pulse, setPulse] = useState(0);
   const [theme, setTheme] = useState<Theme>("light");
-  const [reminder, setReminder] = useState<{ id: number; text: string } | null>(null);
 
   useEffect(() => {
     setTheme(document.documentElement.dataset.theme === "dark" ? "dark" : "light");
@@ -262,34 +260,6 @@ export default function Chat() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /* ---------- 到点的提醒：轮询，弹一张小卡片（弹过的记着，不重复弹） ---------- */
-  const seenReminders = useRef<Set<number> | null>(null);
-  useEffect(() => {
-    if (!loaded) return;
-    let stopped = false;
-    const check = async () => {
-      if (document.visibilityState !== "visible") return;
-      try {
-        const { fired } = (await (await fetch("/api/reminders")).json()) as {
-          fired: { id: number; text: string; firedAt: number | null }[];
-        };
-        if (stopped) return;
-        // 第一次只把早就不新的标记成已弹，刚触发的照样弹
-        seenReminders.current ??= new Set(fired.filter((r) => Date.now() - (r.firedAt ?? 0) > 90_000).map((r) => r.id));
-        const unseen = fired.filter((r) => !seenReminders.current!.has(r.id));
-        if (!unseen.length) return;
-        unseen.forEach((r) => seenReminders.current!.add(r.id));
-        setReminder({ id: unseen[unseen.length - 1].id, text: unseen[unseen.length - 1].text });
-      } catch {}
-    };
-    void check();
-    const t = setInterval(check, 5000);
-    return () => {
-      stopped = true;
-      clearInterval(t);
-    };
-  }, [loaded]);
-
   /* ---------- 往上翻历史 ---------- */
   const loadOlder = useCallback(async () => {
     if (loadingOlder.current || !hasMore) return;
@@ -483,8 +453,6 @@ export default function Chat() {
       </div>
 
       <AnimatePresence>{showMap && <MemoryMap theme={theme} onClose={() => setShowMap(false)} />}</AnimatePresence>
-
-      <ReminderToast reminder={reminder} onClose={() => setReminder(null)} />
     </div>
   );
 }
