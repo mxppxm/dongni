@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { addReminder, cancelReminder, pendingReminders, resolveWhen } from "./reminders";
 import { generateImage } from "./imagegen";
 import { createMood } from "./moods";
+import { setCity, takeDailyPhoto } from "./wardrobe";
 import { addLocalImage, IMAGE_EXT, imageMarkdown } from "./images";
 import { startRepair } from "./selfrepair";
 
@@ -324,6 +325,22 @@ export const TOOLS = [
   {
     type: "function",
     function: {
+      name: "set_city",
+      description: "记下他所在的城市（中文或拼音都行，如 北京、Shanghai），你的穿搭会跟着那边的天气换。",
+      parameters: { type: "object", properties: { city: { type: "string" } }, required: ["city"] },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "take_photo",
+      description: "给自己拍一张今天的照片（穿今天那身，全身），放进相册并发给他看。他想看你、问你今天穿啥、让你拍照时用。",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "create_mood",
       description:
         "给自己画一个新的「等对方时的样子」（聊天里等回复时出现的那个小贴纸）。对方让你多一个表情、或者你想要一个现在没有的样子时用。name 两三个字，when 写什么时候用，pose 写具体动作表情。",
@@ -363,6 +380,15 @@ export const TOOLS = [
 ];
 
 const IMPL: Record<string, (a: never, ctx?: ToolCtx) => Promise<string>> = {
+  set_city: (async ({ city }: { city: string }) => {
+    if (!city?.trim()) return "城市名不能为空。";
+    setCity(city);
+    return `记下了：${city.trim()}。以后穿什么跟着那边的天气走。`;
+  }) as (a: never, ctx?: ToolCtx) => Promise<string>,
+  take_photo: (async () => {
+    void takeDailyPhoto(true);
+    return "开始拍了：会先在对话里跟他说一声，拍好（要一两分钟）自动发给他、放进相册。现在别说已经拍好。";
+  }) as (a: never, ctx?: ToolCtx) => Promise<string>,
   create_mood: (async ({ name, when, pose }: { name: string; when?: string; pose: string }) => {
     void createMood(name, when ?? "", pose);
     return "开始画了（要一两分钟），画好、自己检查过关后会入库，并拿给对方看。现在只需跟对方说一句你去画了，别说已经画好。";

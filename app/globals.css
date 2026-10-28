@@ -820,3 +820,99 @@ a.card:hover,
 @media (prefers-reduced-motion: reduce) {
   .mood > img, .mood-fx, .mood-fx * { animation: none !important; }
 }
+
+/* ================= 相册 / 衣橱 ================= */
+.album-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 34px 26px;
+}
+.polaroid {
+  margin: 0;
+  padding: 10px 10px 14px;
+  border-radius: 6px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  cursor: zoom-in;
+  transition: transform 0.25s, box-shadow 0.25s;
+}
+.polaroid:hover {
+  transform: translateY(-4px) rotate(0deg) !important;
+}
+.polaroid img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 2 / 3;
+  object-fit: cover;
+  border-radius: 3px;
+}
+.polaroid figcaption {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 4px 0;
+}
+.pc-caption {
+  font-size: 14.5px;
+  line-height: 1.6;
+  color: var(--text-strong);
+}
+.pc-meta {
+  font-size: 12px;
+  color: var(--faint);
+}
+.wardrobe-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 20px;
+}
+.outfit {
+  cursor: zoom-in;
+}
+.outfit-img {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  aspect-ratio: 2 / 3;
+  overflow: hidden;
+  border-radius: 18px;
+  border: 1px solid var(--border);
+  background: var(--hover);
+  transition: transform 0.25s, box-shadow 0.25s;
+}
+.outfit-img img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.outfit:hover .outfit-img {
+  transform: translateY(-3px);
+  box-shadow: var(--shadow);
+}
+.outfit-now .outfit-img {
+  border-color: var(--dot);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--dot) 35%, transparent);
+}
+.outfit-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  font-size: 14px;
+  color: var(--text-strong);
+}
+.outfit-name em {
+  font-style: normal;
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  color: var(--send-fg);
+  background: var(--send);
+}
+.outfit-when {
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--faint);
+}

@@ -19,4 +19,9 @@ export async function register() {
   const { proactiveTick } = await import("./lib/proactive");
   setTimeout(() => void proactiveTick(), 3 * 60_000);
   setInterval(() => void proactiveTick(), 15 * 60_000);
+
+  // 衣橱：缺的定妆照补上；相册：白天他来过就拍今天这张
+  const { ensureWardrobe, dailyTick } = await import("./lib/wardrobe");
+  void ensureWardrobe().then(() => dailyTick());
+  setInterval(() => void dailyTick(), 15 * 60_000);
 }

@@ -2,7 +2,7 @@
 
 import dynamic from "next/dynamic";
 import { AnimatePresence, motion } from "motion/react";
-import { ArrowUp, Moon, Sparkles, Sun } from "lucide-react";
+import { ArrowUp, BookHeart, Moon, Sparkles, Sun } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import Markdown from "./Markdown";
 import Mood from "./Mood";
@@ -11,6 +11,7 @@ import { AttachmentStrip, useAttachments } from "./useAttachments";
 import { hasSpeakable, VoiceButton, VoiceProvider } from "./Voice";
 
 const MemoryMap = dynamic(() => import("./MemoryMap"), { ssr: false });
+const Album = dynamic(() => import("./Album"), { ssr: false });
 
 type Status = "done" | "streaming" | "error" | "sending" | "waiting";
 type Msg = {
@@ -84,6 +85,7 @@ export default function Chat() {
   const [loaded, setLoaded] = useState(false);
   const [draft, setDraft] = useState("");
   const [showMap, setShowMap] = useState(false);
+  const [showAlbum, setShowAlbum] = useState(false);
   const [memCount, setMemCount] = useState<number | null>(null);
   const [pulse, setPulse] = useState(0);
   const [theme, setTheme] = useState<Theme>("light");
@@ -375,14 +377,14 @@ export default function Chat() {
   useEffect(() => {
     // 在页面任何地方直接打字就进输入框
     const onKey = (e: KeyboardEvent) => {
-      if (showMap) return;
+      if (showMap || showAlbum) return;
       const t = e.target as HTMLElement;
       if (t.tagName === "TEXTAREA" || t.tagName === "INPUT" || e.metaKey || e.ctrlKey || e.altKey) return;
       if (e.key.length === 1 || e.key === "Process") input.current?.focus();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [showMap]);
+  }, [showMap, showAlbum]);
 
   useEffect(() => {
     if (loaded && !showMap) input.current?.focus();
@@ -426,6 +428,14 @@ export default function Chat() {
             {theme === "dark" ? <Sun size={18} strokeWidth={1.6} /> : <Moon size={18} strokeWidth={1.6} />}
           </motion.span>
         </AnimatePresence>
+      </button>
+      <button
+        onClick={() => setShowAlbum(true)}
+        className="flex h-10 w-10 items-center justify-center rounded-full text-[var(--icon)] transition-colors hover:bg-[var(--hover)] hover:text-[var(--icon-hover)]"
+        aria-label="相册"
+        title="相册和衣橱"
+      >
+        <BookHeart size={18} strokeWidth={1.6} />
       </button>
       <motion.button
         key={pulse}
@@ -544,6 +554,7 @@ export default function Chat() {
       </div>
 
       <AnimatePresence>{showMap && <MemoryMap theme={theme} onClose={() => setShowMap(false)} />}</AnimatePresence>
+      <AnimatePresence>{showAlbum && <Album onClose={() => setShowAlbum(false)} />}</AnimatePresence>
     </div>
     </VoiceProvider>
   );

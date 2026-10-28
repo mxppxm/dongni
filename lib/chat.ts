@@ -3,6 +3,7 @@ import { db, type MessageRow } from "./db";
 import { streamChat, type ChatMessage, type ContentPart } from "./llm";
 import { CAPABILITIES } from "./capabilities";
 import { pickMood } from "./moods";
+import { wardrobeNote } from "./wardrobe";
 import { addUploadedImage, getImage, imageDataUrl, imageIdsIn, imageMarkdown, stripImageMarkdown } from "./images";
 import { runTool, TOOLS } from "./tools";
 import { formatMemories, getProfile, nowText, relevantMemories, scheduleExtraction } from "./memory";
@@ -25,7 +26,7 @@ function lengthRule(text: string) {
   return `【这回的尺子】他写了 ${n} 个字，愿意跟你多讲：你也多说几句，但仍然是说话——不分点、不总结、不超过两百五十字。`;
 }
 
-function systemPrompt(query: string) {
+function systemPrompt(query: string, myself = "") {
   const profile = getProfile();
   const mems = relevantMemories(query);
   // 顺序有讲究：先交代能做什么、对方是谁，最后才是「你是谁、怎么说话」——离回复最近的那段影响最大
@@ -37,6 +38,11 @@ function systemPrompt(query: string) {
 - 改你自己（这个聊天应用的代码）：他明确让你改功能、修毛病、改样子时用 repair_self，把要求写具体。工具说暂停或排队，就照实告诉他。
 ${CAPABILITIES}
 - 回复按 Markdown 显示：代码放代码块，命令、路径用反引号。
+
+- 衣橱和相册：你有几套固定的衣服，穿哪套跟着时间、季节、天气自动换；相册里一天一张你自己的照片。他想看你今天的样子、让你拍张照时用 take_photo（会先自动跟他说一声再拍）。知道他在哪个城市就用 set_city 记下。
+
+【你自己今天】
+${myself || "（不清楚）"}
 
 【他是什么样的人】
 ${profile || "（刚认识，还没形成印象）"}
@@ -86,7 +92,7 @@ function history(beforeOrAtId: number): ChatMessage[] {
     prev = m.created_at;
     const ids = imageIdsIn(m.content);
     const send = m.role === "user" && withImages.has(m.id) ? ids : [];
-    const text = stamp + stripImageMarkdown(m.content) + (ids.length && !send.length ? (m.role === "user" ? "[发了图片]" : "[附了图片]") : "");
+    const text = stamp + stripImageMarkdown(m.content) + (ids.length && !send.length && m.role === "user" ? "（他发了图）" : "");
     const last = out[out.length - 1];
     // 连发多条合成一条，避免出现连续两个 user
     if (last && last.role === m.role) {
@@ -258,7 +264,11 @@ async function oneReply(
   onDiscard: () => void,
   onMood: (mood: string) => void,
 ) {
-  const msgs: ChatMessage[] = [{ role: "system", content: systemPrompt(stripImageMarkdown(userRow.content)) }, ...history(userRow.id)];
+  const myself = await Promise.race([wardrobeNote().catch(() => ""), new Promise<string>((ok) => setTimeout(() => ok(""), 1500))]);
+  const msgs: ChatMessage[] = [
+    { role: "system", content: systemPrompt(stripImageMarkdown(userRow.content), myself) },
+    ...history(userRow.id),
+  ];
   const attachments: string[] = [];
   const ctx = {
     turnId: String(assistantId),
