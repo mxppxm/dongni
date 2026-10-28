@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { myName, notify } from "./notify";
 import { db, getKv, setKv, type MessageRow } from "./db";
+import { repeatContext, repeatedAlready, silence } from "./dedupe";
 import { completeJson } from "./llm";
 import { activeMemories, formatMemories, getProfile, nowText } from "./memory";
 import { INTRO, PERSONA, SPEAKING } from "./persona";
@@ -67,6 +68,9 @@ export async function proactiveTick() {
     const chat = recent.map((m) => `${m.role === "user" ? "对方" : "你"}（${nowText(m.created_at)}）：${m.content}`).join("\n");
     const files = await runTool("recent_files", JSON.stringify({ days: 0 }));
     const canImprove = true; // 对方说不给她设限：每次都可以回看自己
+    // 去重用的上下文：他上一条之后她说过什么、他沉默多久了
+    const quiet = silence();
+    const said = repeatContext(quiet);
 
     const r = await completeJson<Decision>([
       {
@@ -88,6 +92,14 @@ ${SPEAKING}
 
 不该发的：没有具体由头的「在吗」「最近怎么样」；重复你最近已经说过的；说教；太长。
 要发的话，就按上面那套说话方式来写：一两句、口语、具体、接得上你们上次聊的话头，不要客套开场白。没有值得说的就 send=false，宁缺毋滥。
+
+【别复读】下面是对方上一条消息之后你自己说过的话（从早到晚）。同一件事、同一个意思，说过一次就别再说了——换个说法、换个时间点，对他都是同一句废话：
+- 催睡、催回家、问到家了没：一个晚上最多一次
+- 「我改好了」「你试试」「还差一点」这类进度话：说一次就够
+- 问他在忙什么、那个文件还在动之类的：问过一次就别再问
+${said.said || "（这期间你还没说过什么）"}
+${said.silent}
+他心里没回你，多半是在忙或者已经睡下了。这会儿要开口，只能是真正新的由头（他提过的事到点了、你刚发现的新情况），否则就 send=false。他想起来的时候会自己来找你。
 ${
   canImprove
     ? `
@@ -105,14 +117,21 @@ ${
     ]);
 
     if (r.send && r.message?.trim()) {
-      postAssistant(r.message.trim());
-      const id = (d.prepare("SELECT MAX(id) m FROM messages").get() as { m: number }).m;
-      setKv("proactive_last_id", String(id));
-      setKv("proactive_last_at", String(now));
-      setKv("proactive_day", today);
-      setKv("proactive_count", String(todayCount + 1));
-      notify(r.message.trim());
-      console.log(`[dongni] 主动发消息：${r.message.trim()}`);
+      const text = r.message.trim();
+      // 发之前再自己对一遍：这句话最近说过，就不发（模型常常不听提示词，硬拦一道）
+      const repeat = repeatedAlready(text, quiet);
+      if (repeat.repeated) {
+        console.log(`[dongni] 主动消息没发：${repeat.why}——${text}`);
+      } else {
+        postAssistant(text);
+        const id = (d.prepare("SELECT MAX(id) m FROM messages").get() as { m: number }).m;
+        setKv("proactive_last_id", String(id));
+        setKv("proactive_last_at", String(now));
+        setKv("proactive_day", today);
+        setKv("proactive_count", String(todayCount + 1));
+        notify(text);
+        console.log(`[dongni] 主动发消息：${text}`);
+      }
     }
     if (canImprove && r.improve?.trim()) {
       setKv("improve_last_at", String(now));
