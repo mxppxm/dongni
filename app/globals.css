@@ -706,8 +706,22 @@ a.card:hover,
   background: var(--hover);
 }
 .voice-note {
+  height: 22px;
+  padding: 0 7px;
+  border-radius: 999px;
   font-size: 12px;
   color: var(--faint);
+  transition:
+    color 0.2s,
+    background 0.2s;
+}
+/* 念不出来／被拦着，得让人一眼看见，不能靠鼠标移上去才露出来 */
+.msg-actions:has(.voice-note) {
+  opacity: 1;
+}
+.voice-note:hover {
+  color: var(--dot);
+  background: var(--hover);
 }
 
 .attach {

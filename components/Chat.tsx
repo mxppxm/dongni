@@ -496,7 +496,7 @@ export default function Chat() {
                       )}
                       {m.status === "done" && !!m.id && hasSpeakable(m.content) && (
                         <div className="msg-actions">
-                          <VoiceButton id={m.id} />
+                          <VoiceButton id={m.id} fresh={!!m.fresh} />
                         </div>
                       )}
                     </div>
