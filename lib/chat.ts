@@ -1,7 +1,7 @@
 import "server-only";
 import { db, type MessageRow } from "./db";
 import { streamChat, type ChatMessage } from "./llm";
-import { runTool, toolLabel, TOOLS } from "./tools";
+import { runTool, TOOLS } from "./tools";
 import { formatMemories, getProfile, nowText, relevantMemories, scheduleExtraction } from "./memory";
 import { INTRO, PERSONA, SPEAKING } from "./persona";
 import { startReminders } from "./reminders";
@@ -18,7 +18,7 @@ ${PERSONA}
 
 ${SPEAKING}
 
-你能查看对方这台 Mac（只读）：列文件夹、读文件、搜文件、看最近改过的文件、看电脑状态。对方问到电脑、文件、最近在弄什么时就去查，查到了用大白话说结论，别贴一大串路径。没被问到就别主动翻。调用工具前不用先说「我来看看」。
+你能查看对方这台 Mac（只读）：列文件夹、读文件、搜文件、看最近改过的文件、看电脑状态。对方问到电脑、文件、最近在弄什么时就去查，查到了用大白话说结论。没被问到就别主动翻。查的过程对方是看不见的：回复里不要提你在查什么、用了什么工具，不要贴路径、文件名或报错原文，更不要说「我看看」「正在读取」这类话，只说结果；查不到或出错就简单说一句。
 
 你还能修改你自己（这个聊天应用的代码）：对方说你哪里不好用、让你加功能、修毛病、改样子、改说话方式时，用 repair_self 把要求写具体交出去，然后简单告诉对方「我去改，好了跟你说」。改完会自动重启，期间你会离线一小会儿。只是闲聊抱怨、没让你改的，别动。
 
@@ -58,7 +58,6 @@ function history(beforeOrAtId: number): ChatMessage[] {
 export type ChatEvent =
   | { type: "meta"; userId: number; assistantId: number }
   | { type: "delta"; text: string }
-  | { type: "tool"; label: string }
   | { type: "reset" }
   | { type: "follow" }
   | { type: "done" };
@@ -153,14 +152,25 @@ async function generate(assistantId: number, userRow: MessageRow, onEvent: (e: C
         }
       }
       try {
-        await oneReply(assistantId, userRow, (t) => {
-          text += t;
-          emit({ type: "delta", text: t });
-          if (Date.now() - lastSave > 400) {
+        await oneReply(
+          assistantId,
+          userRow,
+          (t) => {
+            text += t;
+            emit({ type: "delta", text: t });
+            if (Date.now() - lastSave > 400) {
+              save("streaming");
+              lastSave = Date.now();
+            }
+          },
+          () => {
+            // 这一轮只是调工具前的铺垫话（「我看看」这类），不留在对话里、也不存库
+            text = "";
             save("streaming");
             lastSave = Date.now();
-          }
-        }, (label) => emit({ type: "tool", label }));
+            emit({ type: "reset" });
+          },
+        );
         if (!text.trim()) throw new Error("模型返回为空");
         save("done");
         emit({ type: "done" });
@@ -175,9 +185,13 @@ async function generate(assistantId: number, userRow: MessageRow, onEvent: (e: C
   }
 }
 
-async function oneReply(assistantId: number, userRow: MessageRow, onText: (t: string) => void, onTool: (label: string) => void) {
+async function oneReply(
+  assistantId: number,
+  userRow: MessageRow,
+  onText: (t: string) => void,
+  onDiscard: () => void,
+) {
   const msgs: ChatMessage[] = [{ role: "system", content: systemPrompt(userRow.content) }, ...history(userRow.id)];
-  let any = false;
   for (let round = 0; round < 8; round++) {
     let roundText = "";
     let calls = null;
@@ -188,23 +202,18 @@ async function oneReply(assistantId: number, userRow: MessageRow, onText: (t: st
         continue;
       }
       roundText += ev.text;
-      any = true;
       onText(ev.text);
     }
     console.log(
-      `[dongni] #${assistantId} 第 ${round + 1} 轮 ${Date.now() - t0}ms，文字 ${roundText.length}，工具 ${calls?.map((c) => c.function.name + c.function.arguments).join(" ") ?? "无"}`,
+      `[dongni] #${assistantId} 第 ${round + 1} 轮 ${Date.now() - t0}ms，文字 ${roundText.length}，工具 ${calls?.map((c) => c.function.name).join(" ") ?? "无"}`,
     );
     if (!calls) return;
+    // 工具照常执行，但界面上不出现任何调用痕迹：铺垫话丢掉，只留最终回答
+    if (roundText.trim()) onDiscard();
     msgs.push({ role: "assistant", content: roundText, tool_calls: calls });
     for (const c of calls) {
-      let args: Record<string, unknown> = {};
-      try {
-        args = JSON.parse(c.function.arguments || "{}");
-      } catch {}
-      onTool(toolLabel(c.function.name, args));
       msgs.push({ role: "tool", tool_call_id: c.id, content: await runTool(c.function.name, c.function.arguments) });
     }
-    if (any && roundText && !/\s$/.test(roundText)) onText("\n\n");
   }
 }
 

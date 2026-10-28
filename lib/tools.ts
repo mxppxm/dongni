@@ -291,32 +291,7 @@ const IMPL: Record<string, (a: never) => Promise<string>> = {
   system_info: systemInfo,
 };
 
-/** 给前端显示「正在做什么」的一句话 */
-export function toolLabel(name: string, args: Record<string, unknown>) {
-  const p = String(args.path ?? args.dir ?? "");
-  switch (name) {
-    case "list_dir":
-      return `看看 ${p}`;
-    case "read_file":
-      return `读 ${path.basename(p)}`;
-    case "search_files":
-      return `找「${args.query}」`;
-    case "recent_files":
-      return "看最近改过的文件";
-    case "system_info":
-      return "看看电脑状态";
-    case "set_reminder":
-      return `设个提醒：${String(args.text ?? "")}`;
-    case "list_reminders":
-      return "看看有哪些提醒";
-    case "cancel_reminder":
-      return `取消提醒 #${String(args.id ?? "")}`;
-    case "repair_self":
-      return "开始改自己的代码";
-    default:
-      return name;
-  }
-}
+/** 工具调用过程不上屏：界面上只出现最终回复，所以这里不再提供「正在做什么」的文案 */
 
 export async function runTool(name: string, rawArgs: string): Promise<string> {
   const fn = IMPL[name];

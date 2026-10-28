@@ -19,7 +19,6 @@ type Msg = {
   status: Status;
   createdAt: number;
   fresh?: boolean;
-  tool?: string;
 };
 type ServerMsg = { id: number; clientId: string | null; role: "user" | "assistant"; content: string; status: Status; createdAt: number };
 type Outbox = { clientId: string; content: string; createdAt: number };
@@ -159,15 +158,13 @@ export default function Chat() {
                 writeOutbox(readOutbox().filter((o) => o.clientId !== item.clientId));
                 patch(uKey, (m) => ({ ...m, id: e.userId, status: "done" }));
                 patch(aKey, (m) => ({ ...m, id: e.assistantId }));
-              } else if (e.type === "tool") {
-                patch(aKey, (m) => ({ ...m, tool: e.label }));
               } else if (e.type === "reset") {
-                patch(aKey, (m) => ({ ...m, status: "waiting", content: "", tool: undefined }));
+                patch(aKey, (m) => ({ ...m, status: "waiting", content: "" }));
               } else if (e.type === "delta") {
-                patch(aKey, (m) => ({ ...m, status: "streaming", tool: undefined, content: m.content + e.text }));
+                patch(aKey, (m) => ({ ...m, status: "streaming", content: m.content + e.text }));
               } else if (e.type === "done") {
                 finished = true;
-                patch(aKey, (m) => ({ ...m, status: "done", tool: undefined }));
+                patch(aKey, (m) => ({ ...m, status: "done" }));
                 [6000, 15000, 30000].forEach((ms) => setTimeout(checkMemories, ms));
               }
             }
@@ -396,16 +393,9 @@ export default function Chat() {
                       {m.status === "waiting" ? (
                         <span className="inline-flex items-center gap-2.5">
                           <span className="breathe inline-block h-2 w-2 rounded-full bg-[var(--dot)] shadow-[0_0_12px_var(--dot)]" />
-                          {m.tool && <span className="text-[13px] text-[var(--faint)]">{m.tool}…</span>}
                         </span>
                       ) : (
                         <Markdown text={m.content} animate={m.status === "streaming" || !!m.fresh} />
-                      )}
-                      {m.status === "streaming" && m.tool && (
-                        <span className="mt-1 flex items-center gap-2.5 text-[13px] text-[var(--faint)]">
-                          <span className="breathe inline-block h-1.5 w-1.5 rounded-full bg-[var(--dot)]" />
-                          {m.tool}…
-                        </span>
                       )}
                     </div>
                   )}
