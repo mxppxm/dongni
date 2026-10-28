@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { diaryOf } from "@/lib/diary";
 import { listPhotos, OUTFITS, today, wardrobeFile } from "@/lib/wardrobe";
 
 export const dynamic = "force-dynamic";
@@ -15,6 +16,6 @@ export async function GET() {
     })),
     photos: listPhotos()
       .filter((p) => wardrobeFile(p.file) && fs.existsSync(wardrobeFile(p.file)!))
-      .map((p) => ({ date: p.date, outfit: p.outfit, weather: p.weather, caption: p.caption, url: `/api/wardrobe/${p.file}` })),
+      .map((p) => ({ date: p.date, outfit: p.outfit, weather: p.weather, caption: p.caption, diary: diaryOf(p.date), url: `/api/wardrobe/${p.file}` })),
   });
 }

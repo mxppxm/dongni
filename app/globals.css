@@ -916,3 +916,12 @@ a.card:hover,
   line-height: 1.5;
   color: var(--faint);
 }
+.pc-diary {
+  margin-top: 6px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+  font-size: 13px;
+  line-height: 1.75;
+  color: var(--dim);
+  white-space: pre-wrap;
+}

@@ -22,6 +22,10 @@ export async function register() {
 
   // 衣橱：缺的定妆照补上；相册：白天他来过就拍今天这张
   const { ensureWardrobe, dailyTick } = await import("./lib/wardrobe");
-  void ensureWardrobe().then(() => dailyTick());
-  setInterval(() => void dailyTick(), 15 * 60_000);
+  void ensureWardrobe()
+    .then(() => dailyTick())
+    .then(async () => (await import("./lib/diary")).diaryTick());
+  // 她自己的日记：每天一篇
+  const { diaryTick } = await import("./lib/diary");
+  setInterval(() => void dailyTick().then(() => diaryTick()), 15 * 60_000);
 }

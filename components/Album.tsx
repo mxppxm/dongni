@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 
 /** 相册（一天一张，像能翻的日记）和衣橱（几套固定造型，今天穿哪套） */
 type Outfit = { key: string; name: string; when: string; url: string | null };
-type Photo = { date: string; outfit: string; weather: string; caption: string; url: string };
+type Photo = { date: string; outfit: string; weather: string; caption: string; diary: string | null; url: string };
 type Data = { today: { outfit: string }; outfits: Outfit[]; photos: Photo[] };
 
 const dateText = (d: string) => {
@@ -81,6 +81,7 @@ export default function Album({ onClose }: { onClose: () => void }) {
                     <span className="pc-meta">
                       {dateText(p.date)} · {p.weather} · {p.outfit}
                     </span>
+                    {p.diary && <span className="pc-diary">{p.diary}</span>}
                   </figcaption>
                 </motion.figure>
               ))}

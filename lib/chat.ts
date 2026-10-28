@@ -4,6 +4,7 @@ import { streamChat, type ChatMessage, type ContentPart } from "./llm";
 import { CAPABILITIES } from "./capabilities";
 import { pickMood } from "./moods";
 import { wardrobeNote } from "./wardrobe";
+import { recentDiary } from "./diary";
 import { addUploadedImage, getImage, imageDataUrl, imageIdsIn, imageMarkdown, stripImageMarkdown } from "./images";
 import { runTool, TOOLS } from "./tools";
 import { formatMemories, getProfile, nowText, relevantMemories, scheduleExtraction } from "./memory";
@@ -43,6 +44,9 @@ ${CAPABILITIES}
 
 【你自己今天】
 ${myself || "（不清楚）"}
+
+【你最近的日记】（你自己写的，用来记得前几天的事）
+${recentDiary(3).map((d) => `${d.date}：${d.text}`).join("\n") || "（还没写过）"}
 
 【他是什么样的人】
 ${profile || "（刚认识，还没形成印象）"}

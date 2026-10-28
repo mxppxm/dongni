@@ -65,7 +65,9 @@ export async function getWeather(): Promise<Weather | null> {
     const SNOW = [179, 227, 230, 323, 326, 329, 332, 335, 338, 350, 368, 371, 374, 377, 392, 395];
     const kind: Weather["kind"] =
       code === 113 ? "sun" : [116, 119, 122, 143, 248, 260].includes(code) ? "cloud" : SNOW.includes(code) ? "snow" : "rain";
-    const text = c.lang_zh?.[0]?.value || c.weatherDesc?.[0]?.value || "";
+    const FOG = [143, 248, 260];
+    const text =
+      code === 113 ? "晴" : code === 116 ? "多云" : code === 119 || code === 122 ? "阴" : FOG.includes(code) ? "有雾" : kind === "snow" ? "下雪" : "下雨";
     const w: Weather = { city, temp: Number(c.temp_C), text, kind };
     weatherCache = { at: Date.now(), city, w };
     return w;
