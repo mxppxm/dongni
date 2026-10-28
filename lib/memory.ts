@@ -82,7 +82,7 @@ export function formatMemories(mems: MemoryRow[]) {
 /* ---------------- 记忆整理（后台） ---------------- */
 
 type ExtractResult = {
-  add?: { content: string; category: string; links?: { to: string | number; reason?: string }[] }[];
+  add?: { content: string; category: string; source?: number; links?: { to: string | number; reason?: string }[] }[];
   update?: { id: number; content?: string; category?: string }[];
   remove?: number[];
   links?: { a: number; b: number; reason?: string }[];
@@ -98,10 +98,11 @@ const EXTRACT_PROMPT = (today: string) => `你是一个记忆整理员。用户�
 5. 已有记忆失效、被用户否认，或用户要求忘掉/别记，用 remove 删掉对应的记忆。用户要求忘掉的内容也不要再 add。
 6. 每条新记忆，从已有记忆里找真正相关的连上（同一个人、因果、同一件事的不同方面、相互矛盾），写进 links，reason 不超过 8 个字。不要为了连而连。新记忆之间互连用 "new:序号"（序号从 0 开始）。
 7. 已有记忆之间如果因为这段对话发现了新的关联，写进顶层 links。
-8. 没有值得记的，就返回空数组。
+8. 每条新记忆的 source 填它出自哪条用户消息的编号（新对话里「用户[#编号]」的那个数字）。
+9. 没有值得记的，就返回空数组。
 
 只输出 JSON：
-{"add":[{"content":"","category":"人|偏好|经历|近况|想法","links":[{"to":12,"reason":""},{"to":"new:1","reason":""}]}],"update":[{"id":12,"content":"","category":""}],"remove":[12],"links":[{"a":3,"b":9,"reason":""}]}`;
+{"add":[{"content":"","category":"人|偏好|经历|近况|想法","source":34,"links":[{"to":12,"reason":""},{"to":"new:1","reason":""}]}],"update":[{"id":12,"content":"","category":""}],"remove":[12],"links":[{"a":3,"b":9,"reason":""}]}`;
 
 // instrumentation 和路由在 Next 里是不同的模块实例，状态挂在 globalThis 上才能共用，避免同一批被整理两次
 const state = ((globalThis as unknown as { __dongniWorker?: { running: boolean; failures: number; timer: NodeJS.Timeout | null } })
@@ -163,7 +164,7 @@ async function extractBatch(pending: MessageRow[]) {
     .all(firstId, lastId) as MessageRow[];
 
   const fmt = (ms: MessageRow[]) =>
-    ms.map((m) => `${m.role === "user" ? "用户" : "AI"}（${nowText(m.created_at)}）：${m.content}`).join("\n");
+    ms.map((m) => `${m.role === "user" ? `用户[#${m.id}]` : "AI"}（${nowText(m.created_at)}）：${m.content}`).join("\n");
   const newText = batch.map((m) => m.content).join("\n");
   const existing = relevantMemories(newText, 150);
 
@@ -175,12 +176,12 @@ async function extractBatch(pending: MessageRow[]) {
     },
   ]);
 
-  applyResult(result, lastId);
+  applyResult(result, lastId, new Set(batch.filter((m) => m.role === "user").map((m) => m.id)));
   const ids = pending.map((m) => m.id);
   db().prepare(`UPDATE messages SET extracted = 1 WHERE id IN (${ids.map(() => "?").join(",")})`).run(...ids);
 }
 
-function applyResult(r: ExtractResult, sourceId: number) {
+function applyResult(r: ExtractResult, sourceId: number, userIds: Set<number>) {
   const d = db();
   const now = Date.now();
   const exists = (id: number) => !!d.prepare("SELECT 1 FROM memories WHERE id = ? AND status = 'active'").get(id);
@@ -215,7 +216,8 @@ function applyResult(r: ExtractResult, sourceId: number) {
         newIds.push(-1);
         continue;
       }
-      newIds.push(Number(ins.run(a.content.trim(), cat(a.category), sourceId, now, now).lastInsertRowid));
+      const src = userIds.has(Number(a.source)) ? Number(a.source) : sourceId;
+      newIds.push(Number(ins.run(a.content.trim(), cat(a.category), src, now, now).lastInsertRowid));
     }
     const resolve = (to: string | number) => {
       if (typeof to === "string" && to.startsWith("new:")) return newIds[Number(to.slice(4))] ?? -1;

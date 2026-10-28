@@ -3,8 +3,10 @@ export async function register() {
   const { backupDaily } = await import("./lib/db");
   const { runExtraction } = await import("./lib/memory");
   const { resumePending } = await import("./lib/chat");
-  const { reportRebuild } = await import("./lib/selfrepair");
+  const { reportRebuild, drainRepairQueue } = await import("./lib/selfrepair");
   reportRebuild();
+  // 排队中的自我修改，等服务稳定后接着做（重编译脚本要先做完体检）
+  setTimeout(drainRepairQueue, 90_000);
   resumePending();
   const tick = () => {
     backupDaily().catch((e) => console.error("[dongni] 备份失败：", e));

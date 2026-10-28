@@ -109,9 +109,30 @@ export function repairRunning() {
   return state.running;
 }
 
+/** 改动排队：正在改的时候来的新要求先存起来（存库里，重启也不丢），一个改完接着下一个 */
+function queue(): string[] {
+  try {
+    return JSON.parse(getKv("repair_queue") || "[]");
+  } catch {
+    return [];
+  }
+}
+
+export function drainRepairQueue() {
+  if (state.running) return;
+  const q = queue();
+  const next = q.shift();
+  setKv("repair_queue", JSON.stringify(q));
+  if (next) startRepair(next);
+}
+
 export function startRepair(request: string): string {
-  if (state.running) return `已经在改了（${state.running}），等这次改完再说。`;
+  if (state.running) {
+    setKv("repair_queue", JSON.stringify([...queue(), request]));
+    return "前面还有一处正在改，这个已经排上队了：前一个改完（可能会重启一下）就接着改这个。如实告诉对方要排一会儿。";
+  }
   state.running = request.slice(0, 40);
+  let restarting = false;
   void (async () => {
     let good = "";
     try {
@@ -143,6 +164,7 @@ export function startRepair(request: string): string {
       postAssistant(`${summary}\n\n我重启一下，半分钟左右回来。`);
       log("提交完成，后台重新编译并重启");
       // 新起一个进程组去编译重启，自己被重启也不影响它
+      restarting = true;
       const child = spawn("/bin/bash", [path.join(ROOT, "scripts", "rebuild.sh"), good], {
         cwd: ROOT,
         env: process.env,
@@ -157,6 +179,8 @@ export function startRepair(request: string): string {
       postAssistant(`这次没改成，已经退回原样了。原因：${msg.slice(0, 200)}`);
     } finally {
       state.running = null;
+      // 要重启的话交给重启后的新进程接着改，否则这里直接接着改下一个
+      if (!restarting) setTimeout(drainRepairQueue, 1000);
     }
   })();
   return "已经开始改了。改代码要几分钟，改好会在对话里告诉对方，然后自动重启。";

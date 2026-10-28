@@ -6,7 +6,14 @@ import { Trash2, UserRound, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { categoryColors, type Theme } from "./Starfield";
 
-type Memory = { id: number; content: string; category: string; createdAt: number; updatedAt: number };
+type Memory = {
+  id: number;
+  content: string;
+  category: string;
+  createdAt: number;
+  updatedAt: number;
+  source: { text: string; at: number; reply: string | null } | null;
+};
 type NodeData = Memory & { deg: number };
 type LinkData = { reason: string };
 type Node = NodeObject<NodeData>;
@@ -15,7 +22,9 @@ type Data = { profile: string; memories: Memory[]; links: { a: number; b: number
 
 const dateText = (ts: number) => {
   const d = new Date(ts);
-  return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`;
+  const hm = d.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
+  const sameYear = d.getFullYear() === new Date().getFullYear();
+  return `${sameYear ? "" : `${d.getFullYear()}年`}${d.getMonth() + 1}月${d.getDate()}日 ${hm}`;
 };
 const short = (s: string) => (s.length > 14 ? s.slice(0, 13) + "…" : s);
 const nid = (x: unknown) => (typeof x === "object" && x ? (x as Node).id : x) as number;
@@ -31,6 +40,7 @@ export default function MemoryMap({ onClose, theme }: { onClose: () => void; the
   const [data, setData] = useState<Data | null>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
   const [hover, setHover] = useState<Node | null>(null);
+  const [mouse, setMouse] = useState({ x: 0, y: 0 });
   const [selected, setSelected] = useState<Node | null>(null);
   const [showProfile, setShowProfile] = useState(false);
   const fg = useRef<ForceGraphMethods<NodeData, LinkData>>(undefined);
@@ -196,6 +206,7 @@ export default function MemoryMap({ onClose, theme }: { onClose: () => void; the
       exit={{ opacity: 0, scale: 1.03 }}
       transition={{ duration: 0.35, ease: [0.2, 0.8, 0.2, 1] }}
       className="fixed inset-0 z-30 bg-[image:var(--map-bg)]"
+      onMouseMove={(e) => setMouse({ x: e.clientX, y: e.clientY })}
     >
       {size.w > 0 && data && data.memories.length > 0 && (
         <ForceGraph2D<NodeData, LinkData>
@@ -253,6 +264,36 @@ export default function MemoryMap({ onClose, theme }: { onClose: () => void; the
           <X size={20} strokeWidth={1.6} />
         </button>
       </div>
+
+      <AnimatePresence>
+        {hover && hover.id !== selected?.id && (
+          <motion.div
+            key={hover.id}
+            initial={{ opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.15 }}
+            className="pointer-events-none fixed z-40 w-[300px] rounded-2xl border bg-[var(--panel)] p-4 shadow-[var(--shadow)] backdrop-blur-xl"
+            style={{
+              left: Math.min(mouse.x + 18, size.w - 316),
+              top: Math.min(mouse.y + 18, size.h - 220),
+              borderColor: (COLORS[hover.category] ?? "#9fb3c8") + "55",
+            }}
+          >
+            <div className="mb-1.5 flex items-center justify-between text-xs text-[var(--dim)]">
+              <span style={{ color: COLORS[hover.category] }}>{hover.category}</span>
+              <span>{dateText(hover.source?.at ?? hover.createdAt)}</span>
+            </div>
+            <div className="text-[14px] leading-relaxed text-[var(--text-strong)]">{hover.content}</div>
+            {hover.source && (
+              <div className="mt-3 space-y-1.5 border-t border-[var(--border)] pt-3 text-[13px] leading-relaxed">
+                <div className="line-clamp-3 text-[var(--text)]">你说：{hover.source.text}</div>
+                {hover.source.reply && <div className="line-clamp-2 text-[var(--dim)]">她回：{hover.source.reply}</div>}
+              </div>
+            )}
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {legend.length > 0 && (
         <div className="absolute bottom-5 left-5 flex gap-4 text-xs text-[var(--dim)] select-none">
