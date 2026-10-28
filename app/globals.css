@@ -1,5 +1,22 @@
 @import "tailwindcss";
 
+/* ---------- 字体与排版尺度 ---------- */
+/* 正文用笔画干净的中文黑体（苹方优先）；标题单独用一支略圆润的圆体，
+   层次靠字族、字号和留白拉开，不靠加粗硬撑。代码永远是等宽字体。 */
+:root {
+  --font-sans: "PingFang SC", "Hiragino Sans GB", "Source Han Sans SC", "Noto Sans SC", "Microsoft YaHei",
+    -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  --font-display: "Yuanti SC", "圆体-简", "Hiragino Maru Gothic ProN", "PingFang SC", "Hiragino Sans GB",
+    "Source Han Sans SC", system-ui, sans-serif;
+  --font-mono: "SF Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Noto Sans Mono", monospace;
+
+  --fs-body: 16px;
+  --lh-body: 1.9;
+  --fs-h1: 1.55em;
+  --fs-h2: 1.3em;
+  --fs-h3: 1.14em;
+}
+
 :root,
 :root[data-theme="dark"] {
   color-scheme: dark;
@@ -83,8 +100,20 @@ body {
   background: var(--bg);
   color: var(--text);
   transition: background-color 0.4s ease;
-  font-family: "PingFang SC", "Hiragino Sans GB", -apple-system, system-ui, sans-serif;
+  font-family: var(--font-sans);
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+  letter-spacing: 0.01em;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* 代码永远等宽，不跟着正文换 */
+code,
+pre,
+kbd,
+samp {
+  font-family: var(--font-mono);
 }
 
 ::selection {
@@ -113,51 +142,89 @@ body {
 }
 
 /* ---------- Markdown 排版 ---------- */
+/* 正文 16px / 行高 1.9；标题用圆体，字号、行高、留白各差一档 */
 .md {
   min-width: 0;
   max-width: 100%;
   overflow-wrap: anywhere;
+  font-family: var(--font-sans);
+  font-size: inherit;
+  line-height: var(--lh-body);
+  letter-spacing: 0.01em;
+  font-variant-numeric: tabular-nums;
 }
 .md > * + * {
-  margin-top: 0.8em;
+  margin-top: 0.95em;
+}
+.md > .md-head {
+  margin-top: 1.55em;
+}
+.md > .md-head:first-child {
+  margin-top: 0;
 }
 .md-head {
-  margin-top: 1.15em;
-  font-weight: 600;
-  line-height: 1.5;
+  font-family: var(--font-display);
+  font-weight: 500;
+  line-height: 1.35;
+  letter-spacing: 0.005em;
   color: var(--text-strong);
 }
+.md > .md-head + * {
+  margin-top: 0.55em;
+}
 .md-head-1 {
-  font-size: 1.22em;
+  font-size: var(--fs-h1);
+  line-height: 1.28;
+  letter-spacing: 0;
 }
 .md-head-2 {
-  font-size: 1.14em;
+  font-size: var(--fs-h2);
+  line-height: 1.4;
 }
 .md-head-3 {
-  font-size: 1.06em;
+  font-size: var(--fs-h3);
+  line-height: 1.5;
 }
-.md-head-4,
+.md-head-4 {
+  font-size: 1em;
+  line-height: 1.6;
+  font-family: var(--font-sans);
+  font-weight: 600;
+}
 .md-head-5,
 .md-head-6 {
-  font-size: 1em;
+  font-size: 0.94em;
+  line-height: 1.6;
+  font-family: var(--font-sans);
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: var(--dim);
+}
+.md strong {
+  font-weight: 600;
 }
 .md-list {
   list-style: disc;
-  padding-left: 1.3em;
+  padding-left: 1.35em;
+  line-height: 1.85;
 }
 ol.md-list {
   list-style: decimal;
 }
 .md-list li {
-  margin: 0.2em 0;
+  margin: 0.32em 0;
 }
 .md-list li::marker {
   color: var(--dim);
 }
 .md-quote {
   margin: 0;
-  padding-left: 12px;
-  border-left: 2px solid var(--border);
+  padding: 0.55em 0.9em;
+  border-left: 2px solid var(--faint);
+  border-radius: 0 10px 10px 0;
+  background: var(--hover);
+  font-size: 0.97em;
+  line-height: 1.85;
   color: var(--dim);
 }
 .md-hr {
@@ -170,11 +237,12 @@ ol.md-list {
   text-underline-offset: 2px;
 }
 .md .md-code {
-  padding: 0.1em 0.35em;
-  border-radius: 5px;
+  padding: 0.12em 0.4em;
+  border-radius: 6px;
   background: var(--code-inline-bg);
-  font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 0.88em;
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  letter-spacing: 0;
   white-space: break-spaces;
 }
 .md-pre {
@@ -189,9 +257,11 @@ ol.md-list {
 }
 .md-pre code {
   display: block;
-  font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 13px;
-  line-height: 1.65;
+  line-height: 1.7;
+  letter-spacing: 0;
+  font-variant-ligatures: none;
   color: var(--code-fg);
   white-space: pre;
   tab-size: 2;
@@ -350,17 +420,19 @@ ol.md-list {
 .md-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 14px;
-  line-height: 1.6;
+  font-size: 13.5px;
+  line-height: 1.7;
+  letter-spacing: 0.01em;
 }
 .md-table th,
 .md-table td {
-  padding: 7px 12px;
+  padding: 8px 12px;
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
 }
 .md-table th {
-  font-weight: 600;
+  font-weight: 500;
+  letter-spacing: 0.02em;
   color: var(--text-strong);
   background: var(--hover);
 }

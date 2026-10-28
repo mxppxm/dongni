@@ -448,7 +448,7 @@ export default function Chat() {
             const showTime = !prev || m.createdAt - prev.createdAt > 3600_000;
             return (
               <div key={m.key}>
-                {showTime && <div className="my-6 text-center text-xs text-[var(--faint)] select-none">{timeLabel(m.createdAt)}</div>}
+                {showTime && <div className="my-6 text-center text-xs tracking-wide text-[var(--faint)] tabular-nums select-none">{timeLabel(m.createdAt)}</div>}
                 <motion.div
                   initial={m.fresh ? { opacity: 0, y: m.role === "user" ? 14 : 6 } : false}
                   animate={{ opacity: 1, y: 0 }}
@@ -462,7 +462,7 @@ export default function Chat() {
                   ) : m.role === "user" ? (
                     <div className="flex max-w-[85%] items-center gap-2">
                       <div
-                        className={`min-w-0 rounded-2xl rounded-br-md border border-[var(--bubble-border)] bg-[var(--bubble)] px-4 py-2.5 text-[15px] leading-relaxed text-[var(--text)] shadow-[var(--bubble-shadow)] transition-opacity ${
+                        className={`min-w-0 rounded-2xl rounded-br-md border border-[var(--bubble-border)] bg-[var(--bubble)] px-4 py-2.5 text-[15.5px] leading-[1.75] text-[var(--text)] shadow-[var(--bubble-shadow)] transition-opacity ${
                           m.status === "sending" ? "opacity-70" : ""
                         }`}
                       >
@@ -478,7 +478,7 @@ export default function Chat() {
                       </div>
                     </div>
                   ) : (
-                    <div className="group min-w-0 text-[16px] leading-[1.85] text-[var(--text)]">
+                    <div className="group min-w-0 text-[16px] text-[var(--text)]">
                       {m.status === "waiting" ? (
                         <Mood mood={m.mood} />
                       ) : (
