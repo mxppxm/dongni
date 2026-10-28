@@ -67,15 +67,22 @@ export type StreamEvent = { type: "text"; text: string } | { type: "tools"; call
 
 /**
  * 超时：不是为了催模型，是为了别让连接挂着不动还一直等。
+ * 分三段看，别混成一个：
+ * - 首包：发出去多久一个字都没来（换模型、模型忙的时候第一句就是会慢，给到 30 秒）；
+ * - 中途停顿：已经在说话了，突然没声了；
+ * - 总时长：整轮最多这么久，不能无限等。
  * 每收到一段内容就重新拨钟，所以只有「真的一声不吭」才会超时。
  */
+const FIRST_MS = 30_000;
 const IDLE_MS = 60_000;
-const TOTAL_MS = 150_000;
+const TOTAL_MS = 180_000;
 
-function timeoutError(message: string) {
+export type TimeoutPhase = "first" | "idle" | "total";
+
+function timeoutError(message: string, phase: TimeoutPhase) {
   const e = new Error(message);
   e.name = "TimeoutError";
-  return e;
+  return Object.assign(e, { phase });
 }
 
 /** 流式对话一轮。模型要用工具时，最后吐出一个 tools 事件。 */
@@ -86,16 +93,27 @@ export async function* streamChat(messages: ChatMessage[], tools?: unknown[]): A
 async function* streamOnce(messages: ChatMessage[], tools?: unknown[]): AsyncGenerator<StreamEvent> {
   const ac = new AbortController();
   const started = Date.now();
+  let gotFirst = false; // 模型吐过第一个字没有：决定现在算「首包超时」还是「停住了」
   let timer: ReturnType<typeof setTimeout> | undefined;
   const arm = () => {
     if (timer) clearTimeout(timer);
-    const left = TOTAL_MS - (Date.now() - started);
+    const elapsed = Date.now() - started;
+    const left = TOTAL_MS - elapsed;
     if (left <= 0) {
-      ac.abort(timeoutError(`模型这一轮太久没说完（超过 ${TOTAL_MS / 1000} 秒）`));
+      ac.abort(timeoutError(`模型这一轮太久没说完（超过 ${TOTAL_MS / 1000} 秒）`, "total"));
+      return;
+    }
+    if (!gotFirst) {
+      const first = FIRST_MS - elapsed;
+      if (first <= 0) {
+        ac.abort(timeoutError(`${Math.round(elapsed / 1000)} 秒还没等到模型开口`, "first"));
+        return;
+      }
+      timer = setTimeout(() => ac.abort(timeoutError(`${FIRST_MS / 1000} 秒还没等到模型开口`, "first")), Math.min(first, left));
       return;
     }
     timer = setTimeout(
-      () => ac.abort(timeoutError(`${Math.round((Date.now() - started) / 1000)} 秒没等到模型的新内容`)),
+      () => ac.abort(timeoutError(`${IDLE_MS / 1000} 秒没等到模型的新内容`, "idle")),
       Math.min(IDLE_MS, left),
     );
   };
@@ -112,6 +130,7 @@ async function* streamOnce(messages: ChatMessage[], tools?: unknown[]): AsyncGen
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
+      gotFirst = true; // 开口了，之后按「停住了」算
       arm(); // 有动静了，闹钟往后拨
       buf += decoder.decode(value, { stream: true });
       let idx;
@@ -140,21 +159,25 @@ async function* streamOnce(messages: ChatMessage[], tools?: unknown[]): AsyncGen
     if (done.length) yield { type: "tools", calls: done };
   } catch (e) {
     // 超时统一报成一句能看懂的话，日志里不再是一团 AbortError
-    if (ac.signal.aborted) throw ac.signal.reason instanceof Error ? ac.signal.reason : timeoutError("模型超时");
+    if (ac.signal.aborted) throw ac.signal.reason instanceof Error ? ac.signal.reason : timeoutError("模型超时", "total");
     throw e;
   } finally {
     if (timer) clearTimeout(timer);
   }
 }
 
-/** 要 JSON 结果的后台任务（记忆整理、画像） */
+/** 要 JSON 结果的后台任务（记忆整理、画像）：超时自己报清楚，不然日志里只有一句 aborted */
+const JSON_MS = 180_000;
+
 export async function completeJson<T>(messages: ChatMessage[], maxTokens = 6000, effort = "low"): Promise<T> {
   let lastErr: unknown;
   for (let attempt = 0; attempt < 2; attempt++) {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(timeoutError(`${JSON_MS / 1000} 秒没等到模型的答案`, "total")), JSON_MS);
     try {
       const res = await post(
         { messages, response_format: { type: "json_object" }, reasoning_effort: effort, max_tokens: maxTokens, temperature: 0.2 },
-        AbortSignal.timeout(180_000),
+        ac.signal,
       );
       const json = await res.json();
       const text: string = json.choices?.[0]?.message?.content ?? "";
@@ -163,6 +186,8 @@ export async function completeJson<T>(messages: ChatMessage[], maxTokens = 6000,
       return JSON.parse(text.slice(start, end + 1)) as T;
     } catch (e) {
       lastErr = e;
+    } finally {
+      clearTimeout(timer);
     }
   }
   throw lastErr;

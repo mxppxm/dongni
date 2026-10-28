@@ -14,11 +14,26 @@ import { startReminders } from "./reminders";
 const HISTORY = 40;
 const GAP_MS = 3 * 3600_000;
 
-/** 第一次没答上来时重试一次；两次都不成就承认卡住了 */
-const TRIES = 2;
-const RETRY_WAIT_MS = 1500;
+/** 第一次没答上来就重试，最多再试两次（一共三次）；每次隔 300ms 左右，别让他干等 */
+const TRIES = 3;
+const RETRY_WAIT_MS = 300;
 /** 兜底的那一句：短、像人话，不装作没事，也不留下空白 */
-const STUCK_LINE = "诶，我这儿卡住了，话没接上——你再喊我一声，我马上再试。";
+const STUCK_LINE = "卡了一下，我再来——你再喊我一声就行。";
+
+/** 模型这轮一个字都没说（工具跑完没接上话、回包被吞）：跟超时一样算可重试的错 */
+function emptyReply() {
+  return new Error("模型返回为空");
+}
+
+/** 日志里分清是首包没来、说到一半停了，还是整轮超时 */
+function errText(e: unknown) {
+  if (!(e instanceof Error)) return String(e);
+  const phase = (e as { phase?: string }).phase;
+  if (phase === "first") return `首包超时——${e.message}`;
+  if (phase === "idle") return `中途停住——${e.message}`;
+  if (phase === "total") return `总超时——${e.message}`;
+  return e.message;
+}
 
 /**
  * 他这句话多长，回复就多长。笼统地说「短一点」模型不当回事，直接给数字才管用。
@@ -205,7 +220,14 @@ async function generate(assistantId: number, userRow: MessageRow, onEvent: (e: C
   };
   let text = "";
   let lastSave = 0;
-  const save = (status: string) => d.prepare("UPDATE messages SET content = ?, status = ? WHERE id = ?").run(text, status, assistantId);
+  // 写库偶尔会撞锁：记一笔继续，不能因为存不进去就把这句回复也丢了
+  const save = (status: string) => {
+    try {
+      d.prepare("UPDATE messages SET content = ?, status = ? WHERE id = ?").run(text, status, assistantId);
+    } catch (e) {
+      console.error(`[dongni] #${assistantId} 写库失败：`, errText(e));
+    }
+  };
   save("streaming");
   // 一边想怎么回，一边看对方这句话挑一个等待的样子（很快，不耽误回复）
   const recent = history(userRow.id)
@@ -213,6 +235,7 @@ async function generate(assistantId: number, userRow: MessageRow, onEvent: (e: C
     .map((m) => `${m.role === "user" ? "他" : "你"}：${typeof m.content === "string" ? m.content.slice(0, 200) : "[图片]"}`)
     .join("\n");
   let working = false; // 已经去跑腿/画画了，挑出来的心情就别盖掉它
+  let worked = false; // 这轮真的跑过腿/画过图：重试时不再跑一通，免得重复发提醒、重复画画
   void pickMood(stripImageMarkdown(userRow.content) || "[发了一张图]", recent).then((mood) => {
     if (!text && !working) emit({ type: "mood", mood });
   });
@@ -220,7 +243,7 @@ async function generate(assistantId: number, userRow: MessageRow, onEvent: (e: C
     for (let attempt = 0; attempt < TRIES; attempt++) {
       if (attempt) {
         const wait = RETRY_WAIT_MS;
-        console.warn(`[dongni] #${assistantId} ${wait / 1000}s 后重试`);
+        console.warn(`[dongni] #${assistantId} ${wait}ms 后重试`);
         await new Promise((r) => setTimeout(r, wait));
         // 上次出了半截字的，清掉重来
         if (text) {
@@ -250,19 +273,26 @@ async function generate(assistantId: number, userRow: MessageRow, onEvent: (e: C
           },
           (mood) => {
             working = true;
+            worked = true;
             emit({ type: "mood", mood });
           },
+          // 前面已经动过手了：重试只管把话说出来，不再重复跑腿
+          !attempt || !worked,
         );
-        if (!text.trim()) throw new Error("模型返回为空");
+        // 空回复跟超时一样是可重试的错，不当作「答完了」
+        if (!text.trim()) throw emptyReply();
         save("done");
         emit({ type: "done" });
         return;
       } catch (e) {
-        console.error(`[dongni] #${assistantId} 第 ${attempt + 1} 次回复失败：`, e instanceof Error ? e.message : e);
+        console.error(`[dongni] #${assistantId} 第 ${attempt + 1} 次回复失败：`, errText(e));
+        // key 失效、权限这类错，再试也一样，直接给他一句
+        if ((e as { fatal?: boolean }).fatal) break;
       }
     }
     // 没答上来也不能留空：用自己的口吻先说一句，他就不用干等着猜
     text = STUCK_LINE;
+    emit({ type: "reset" }); // 上一次留下的半截话清掉，别和这句拼在一起
     save("done");
     emit({ type: "delta", text });
     emit({ type: "done" });
@@ -278,6 +308,7 @@ async function oneReply(
   onText: (t: string) => void,
   onDiscard: () => void,
   onMood: (mood: string) => void,
+  allowTools = true,
 ) {
   const myself = await Promise.race([wardrobeNote().catch(() => ""), new Promise<string>((ok) => setTimeout(() => ok(""), 1500))]);
   const msgs: ChatMessage[] = [
@@ -299,7 +330,7 @@ async function oneReply(
     let roundText = "";
     let calls = null;
     const t0 = Date.now();
-    for await (const ev of streamChat(msgs, round < 7 ? TOOLS : undefined)) {
+    for await (const ev of streamChat(msgs, allowTools && round < 7 ? TOOLS : undefined)) {
       if (ev.type === "tools") {
         calls = ev.calls;
         continue;
