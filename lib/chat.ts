@@ -12,6 +12,19 @@ import { startReminders } from "./reminders";
 const HISTORY = 40;
 const GAP_MS = 3 * 3600_000;
 
+/**
+ * 他这句话多长，回复就多长。笼统地说「短一点」模型不当回事，直接给数字才管用。
+ * 这句话放在提示词最末尾——离回复最近，最容易被照做。
+ */
+function lengthRule(text: string) {
+  const n = stripImageMarkdown(text).replace(/\s+/g, "").length;
+  if (!n) return "【这回的尺子】他没写字，只发了图或什么都没说：一两句就够，别铺开。";
+  if (n <= 12) return `【这回的尺子】他这句话 ${n} 个字，随口一说：回一两句，不超过四十字，不许分段。`;
+  if (n <= 45) return `【这回的尺子】他这句话 ${n} 个字：回两到四句、四十到九十个字，最多一段。`;
+  if (n <= 120) return `【这回的尺子】他这句话 ${n} 个字，在正经说事：可以多说几句，但不超过一百五十字、最多两段。`;
+  return `【这回的尺子】他写了 ${n} 个字，愿意跟你多讲：你也多说几句，但仍然是说话——不分点、不总结、不超过两百五十字。`;
+}
+
 function systemPrompt(query: string) {
   const profile = getProfile();
   const mems = relevantMemories(query);
@@ -33,9 +46,11 @@ ${formatMemories(mems) || "（还没有）"}
 
 ${PERSONA}
 
+现在是：${nowText()}
+
 ${SPEAKING}
 
-现在是：${nowText()}`;
+${lengthRule(query)}`;
 }
 
 const IMAGE_TURNS = 2; // 只把最近两条带图的消息真的发图给模型，更早的只留「[图片]」

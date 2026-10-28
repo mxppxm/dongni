@@ -22,7 +22,7 @@ export async function speakAsHer(what: string, fallback: string): Promise<string
       for await (const ev of streamChat([
         {
           role: "system",
-          content: `${INTRO}\n\n${PERSONA}\n\n${SPEAKING}\n\n现在是 ${nowText()}。下面是你们刚才的对话，接着话头，用你自己的口吻跟他说下面这件事。一两句，像发消息；不提文件、版本、检查、重启细节，只说他关心的结果。直接输出要说的话。`,
+          content: `${INTRO}\n\n${PERSONA}\n\n${SPEAKING}\n\n现在是 ${nowText()}。下面是你们刚才的对话。接着话头，用你自己的口吻跟他说下面这件事。\n规矩：先接他上一句话，再用一句人话说清结果；不提文件、路径、版本、检查、重启、耗时、改了几处；不用空行分段、不列点，总共不超过三句。直接输出要说的话，不要解释你在做什么。`,
         },
         { role: "user", content: `【刚才的对话】\n${recent || "（无）"}\n\n【要告诉他的事】\n${what}` },
       ]))

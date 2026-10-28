@@ -68,7 +68,8 @@ export type StreamEvent = { type: "text"; text: string } | { type: "tools"; call
 const IDLE_MS = 25_000;
 
 /**
- * 流式对话一轮。开深度思考（简单的话模型自己想得少，首字约 1 秒）。模型要用工具时，最后吐出一个 tools 事件。
+ * 流式对话一轮。思考量压到最低：想太久就会把回复组织成条目、报告，说出的话也变硬；
+ * 少想一点，先开口接人，才像在聊天，首字也更快。模型要用工具时，最后吐出一个 tools 事件。
  * 接口偶尔会接上了却一直不出字：25 秒没有任何数据就断开；还没出字的话自动重来，最多 3 次。
  */
 export async function* streamChat(messages: ChatMessage[], tools?: unknown[]): AsyncGenerator<StreamEvent> {
@@ -96,7 +97,7 @@ async function* streamOnce(messages: ChatMessage[], tools?: unknown[]): AsyncGen
   };
   try {
     const res = await post(
-      { messages, stream: true, reasoning_effort: process.env.DONGNI_CHAT_REASONING || "high", max_tokens: 16000, temperature: 0.8, ...(tools ? { tools } : {}) },
+      { messages, stream: true, reasoning_effort: process.env.DONGNI_CHAT_REASONING || "low", max_tokens: 16000, temperature: 0.85, ...(tools ? { tools } : {}) },
       ctrl.signal,
     );
     const reader = res.body!.getReader();
