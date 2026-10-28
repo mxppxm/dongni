@@ -14,8 +14,9 @@ import { startReminders } from "./reminders";
 const HISTORY = 40;
 const GAP_MS = 3 * 3600_000;
 
-/** 第一次没答上来就重试，最多再试两次（一共三次）；每次隔 300ms 左右，别让他干等 */
-const TRIES = 3;
+/** 模型空回复最多再补两次（一共三次请求）；每次隔 300ms 左右，别让他干等 */
+const EMPTY_RETRIES = 2;
+const TRIES = 1 + EMPTY_RETRIES;
 const RETRY_WAIT_MS = 300;
 /** 兜底的那一句：短、像人话，不装作没事，也不留下空白 */
 const STUCK_LINE = "卡了一下，我再来";
@@ -228,23 +229,34 @@ async function generate(assistantId: number, userRow: MessageRow, onEvent: (e: C
       console.error(`[dongni] #${assistantId} 写库失败：`, errText(e));
     }
   };
-  save("streaming");
-  // 一边想怎么回，一边看对方这句话挑一个等待的样子（很快，不耽误回复）
-  const recent = history(userRow.id)
-    .slice(-5, -1)
-    .map((m) => `${m.role === "user" ? "他" : "你"}：${typeof m.content === "string" ? m.content.slice(0, 200) : "[图片]"}`)
-    .join("\n");
+  // 收尾只做一次：几次都没接上话、或者半路出了别的岔子，最后都落到这一句上，绝不留白
+  let finished = false;
+  const finishStuck = () => {
+    if (finished) return;
+    finished = true;
+    console.warn(`[dongni] #${assistantId} 几次都没接上话，用兜底那一句接住`);
+    text = STUCK_LINE;
+    emit({ type: "reset" }); // 上一次留下的半截话清掉，别和这句拼在一起
+    save("done");
+    emit({ type: "delta", text });
+    emit({ type: "done" });
+  };
   let working = false; // 已经去跑腿/画画了，挑出来的心情就别盖掉它
   let worked = false; // 这轮真的跑过腿/画过图：重试时不再跑一通，免得重复发提醒、重复画画
-  void pickMood(stripImageMarkdown(userRow.content) || "[发了一张图]", recent).then((mood) => {
-    if (!text && !working) emit({ type: "mood", mood });
-  });
   try {
+    save("streaming");
+    // 一边想怎么回，一边看对方这句话挑一个等待的样子（很快，不耽误回复）
+    const recent = history(userRow.id)
+      .slice(-5, -1)
+      .map((m) => `${m.role === "user" ? "他" : "你"}：${typeof m.content === "string" ? m.content.slice(0, 200) : "[图片]"}`)
+      .join("\n");
+    void pickMood(stripImageMarkdown(userRow.content) || "[发了一张图]", recent).then((mood) => {
+      if (!text && !working) emit({ type: "mood", mood });
+    });
     for (let attempt = 0; attempt < TRIES; attempt++) {
       if (attempt) {
-        const wait = RETRY_WAIT_MS;
-        console.warn(`[dongni] #${assistantId} ${wait}ms 后重试`);
-        await new Promise((r) => setTimeout(r, wait));
+        console.warn(`[dongni] #${assistantId} 没接上话，${RETRY_WAIT_MS}ms 后第 ${attempt + 1} 次尝试`);
+        await new Promise((r) => setTimeout(r, RETRY_WAIT_MS));
         // 上次出了半截字的，清掉重来
         if (text) {
           text = "";
@@ -282,6 +294,7 @@ async function generate(assistantId: number, userRow: MessageRow, onEvent: (e: C
         // 空回复跟超时一样是可重试的错，不当作「答完了」
         if (!text.trim()) throw emptyReply();
         save("done");
+        finished = true;
         emit({ type: "done" });
         return;
       } catch (e) {
@@ -295,13 +308,11 @@ async function generate(assistantId: number, userRow: MessageRow, onEvent: (e: C
         if ((e as { fatal?: boolean }).fatal) break;
       }
     }
-    // 没答上来也不能留空：用自己的口吻先说一句，他就不用干等着猜
-    console.warn(`[dongni] #${assistantId} 几次都没接上话，用兜底那一句接住`);
-    text = STUCK_LINE;
-    emit({ type: "reset" }); // 上一次留下的半截话清掉，别和这句拼在一起
-    save("done");
-    emit({ type: "delta", text });
-    emit({ type: "done" });
+    finishStuck();
+  } catch (e) {
+    // 连这一轮怎么回都没准备好（读画像、挑心情、写库这类出错）：也不能让对话留白
+    console.error(`[dongni] #${assistantId} 这一轮没跑起来：`, errText(e));
+    finishStuck();
   } finally {
     active.delete(assistantId);
     scheduleExtraction();
@@ -332,11 +343,13 @@ async function oneReply(
   const flush = () => {
     if (attachments.length) onText(`\n\n${attachments.splice(0).join("\n\n")}`);
   };
-  for (let round = 0; round < 8; round++) {
+  const ROUNDS = 8;
+  let usedTool = false; // 这次真动过手：只有动过手，最后那句「别动手了，直接说」才有意义
+  for (let round = 0; round < ROUNDS; round++) {
     let roundText = "";
     let calls = null;
     const t0 = Date.now();
-    for await (const ev of streamChat(msgs, allowTools && round < 7 ? TOOLS : undefined)) {
+    for await (const ev of streamChat(msgs, allowTools && round < ROUNDS - 1 ? TOOLS : undefined)) {
       if (ev.type === "tools") {
         calls = ev.calls;
         continue;
@@ -348,6 +361,7 @@ async function oneReply(
       `[dongni] #${assistantId} 第 ${round + 1} 轮 ${Date.now() - t0}ms，文字 ${roundText.length}，工具 ${calls?.map((c) => c.function.name).join(" ") ?? "无"}`,
     );
     if (!calls) return flush();
+    usedTool = true;
     // 工具照常执行，但界面上不出现任何调用痕迹：铺垫话丢掉，只留最终回答
     if (roundText.trim()) onDiscard();
     msgs.push({ role: "assistant", content: roundText, tool_calls: calls });
@@ -362,6 +376,19 @@ async function oneReply(
       seen = [];
       if (parts.length) msgs.push({ role: "user", content: [{ type: "text", text: "（这是你刚刚打开的图片，只有你看得到）" }, ...parts] });
     }
+  }
+  // 一整轮都在翻东西、始终没张嘴（日志里连着好几轮「文字 0」就是这样）：最后不给工具，
+  // 让它就着已经拿到的结果把话说出来。这是空回复的正根儿——光靠整轮重来，前面查到的还全丢了。
+  if (usedTool) {
+    msgs.push({ role: "user", content: "（别再动手查了，就着上面拿到的，用一两句话直接回我。）" });
+    let roundText = "";
+    const t0 = Date.now();
+    for await (const ev of streamChat(msgs, undefined)) {
+      if (ev.type === "tools") continue;
+      roundText += ev.text;
+      onText(ev.text);
+    }
+    console.log(`[dongni] #${assistantId} 收尾一轮 ${Date.now() - t0}ms，文字 ${roundText.length}，工具 无`);
   }
   flush();
 }

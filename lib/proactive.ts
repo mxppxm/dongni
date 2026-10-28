@@ -1,5 +1,6 @@
 import "server-only";
-import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
 import { myName, notify } from "./notify";
 import { db, getKv, setKv, type MessageRow } from "./db";
 import { completeJson } from "./llm";
@@ -18,10 +19,29 @@ import { runTool } from "./tools";
 const state = ((globalThis as unknown as { __dongniProactive?: { running: boolean } }).__dongniProactive ??= { running: false });
 
 
+/**
+ * 只看「上次看完之后」新写进去的日志。
+ * 以前每次都扫全文件，早就修好的老错误（模型返回为空、TimeoutError）会一遍遍被捞出来，
+ * 于是每 15 分钟就重新「发现」同一个毛病、再改一遍，永远停不下来。
+ */
+const ERR_CAP = 64 * 1024;
+
 function recentErrors() {
+  const file = path.join(process.cwd(), "logs", "dongni.log");
   try {
-    const out = execFileSync("/usr/bin/grep", ["-E", "失败|Error|error", "logs/dongni.log"], { encoding: "utf8", maxBuffer: 10 << 20 });
-    return out.split("\n").filter(Boolean).slice(-15).join("\n");
+    const size = fs.statSync(file).size;
+    const seen = Number(getKv("log_scan_bytes") ?? -1);
+    // 没见过（刚装上这段代码）/日志被清空重写：从现在开始算，不回看旧账
+    const from = seen < 0 ? size : seen > size ? 0 : seen;
+    const buf = fs.readFileSync(file);
+    setKv("log_scan_bytes", String(size));
+    return buf
+      .subarray(Math.max(from, size - ERR_CAP))
+      .toString("utf8")
+      .split("\n")
+      .filter((l) => /失败|Error|error/.test(l))
+      .slice(-15)
+      .join("\n");
   } catch {
     return "";
   }
@@ -79,7 +99,7 @@ ${
       {
         role: "user",
         content: `【我眼中的对方】\n${getProfile() || "（还不太了解）"}\n\n【关于对方的记忆】\n${formatMemories(activeMemories()) || "（无）"}\n\n【最近的对话】\n${chat}\n\n【对方今天改过的文件】\n${files}${
-          canImprove ? `\n\n【最近的运行错误】\n${recentErrors() || "（无）"}` : ""
+          canImprove ? `\n\n【上次看过之后新出现的运行错误】\n${recentErrors() || "（无）"}` : ""
         }`,
       },
     ]);
