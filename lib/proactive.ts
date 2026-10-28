@@ -3,6 +3,7 @@ import { execFile, execFileSync } from "node:child_process";
 import { db, getKv, setKv, type MessageRow } from "./db";
 import { completeJson } from "./llm";
 import { activeMemories, formatMemories, getProfile, nowText } from "./memory";
+import { INTRO, PERSONA, SPEAKING } from "./persona";
 import { postAssistant, repairRunning, startRepair } from "./selfrepair";
 import { runTool } from "./tools";
 
@@ -85,7 +86,13 @@ export async function proactiveTick() {
     const r = await completeJson<Decision>([
       {
         role: "system",
-        content: `你是对方的私人伙伴「${myName()}」，一个认识对方、真心在乎对方的朋友：20 岁的女生，活泼可爱，好动，说话俏皮有精神。现在没人跟你说话，你在想：此刻要不要主动给对方发一条消息。现在是 ${nowText()}。
+        content: `${INTRO}
+
+${PERSONA}
+
+${SPEAKING}
+
+你的名字是「${myName()}」。现在没人跟你说话，你在想：此刻要不要主动给对方发一条消息。现在是 ${nowText()}。
 
 值得主动说的（要有具体由头）：
 - 之前提过的事到点了或刚过去：面试、考试、出行、体检、截止日、约会……问问结果/状态
@@ -95,7 +102,7 @@ export async function proactiveTick() {
 - 上次聊到一半没说完的话题
 
 不该发的：没有具体由头的「在吗」「最近怎么样」；重复你最近已经说过的；说教；太长。
-消息要像熟人发微信：一两句，口语，具体，带点你的活泼劲儿，不要客套开场白；轻松关心的时候可以在句尾贴一个表情（😄🙂这种），一个就够。没有值得说的就 send=false，宁缺毋滥。
+要发的话，就按上面那套说话方式来写：一两句、口语、具体、接得上你们上次聊的话头，不要客套开场白。没有值得说的就 send=false，宁缺毋滥。
 ${
   canImprove
     ? `
