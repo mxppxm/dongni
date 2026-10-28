@@ -65,16 +65,45 @@ async function post(body: Record<string, unknown>, signal?: AbortSignal) {
 
 export type StreamEvent = { type: "text"; text: string } | { type: "tools"; calls: ToolCall[] };
 
-/** 流式对话一轮。模型要用工具时，最后吐出一个 tools 事件。（不设超时：对方要求不加限制） */
+/**
+ * 超时：不是为了催模型，是为了别让连接挂着不动还一直等。
+ * 每收到一段内容就重新拨钟，所以只有「真的一声不吭」才会超时。
+ */
+const IDLE_MS = 60_000;
+const TOTAL_MS = 150_000;
+
+function timeoutError(message: string) {
+  const e = new Error(message);
+  e.name = "TimeoutError";
+  return e;
+}
+
+/** 流式对话一轮。模型要用工具时，最后吐出一个 tools 事件。 */
 export async function* streamChat(messages: ChatMessage[], tools?: unknown[]): AsyncGenerator<StreamEvent> {
   yield* streamOnce(messages, tools);
 }
 
 async function* streamOnce(messages: ChatMessage[], tools?: unknown[]): AsyncGenerator<StreamEvent> {
-  {
+  const ac = new AbortController();
+  const started = Date.now();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const arm = () => {
+    if (timer) clearTimeout(timer);
+    const left = TOTAL_MS - (Date.now() - started);
+    if (left <= 0) {
+      ac.abort(timeoutError(`模型这一轮太久没说完（超过 ${TOTAL_MS / 1000} 秒）`));
+      return;
+    }
+    timer = setTimeout(
+      () => ac.abort(timeoutError(`${Math.round((Date.now() - started) / 1000)} 秒没等到模型的新内容`)),
+      Math.min(IDLE_MS, left),
+    );
+  };
+  try {
+    arm();
     const res = await post(
       { messages, stream: true, reasoning_effort: process.env.DONGNI_CHAT_REASONING || "low", max_tokens: 16000, temperature: 0.85, ...(tools ? { tools } : {}) },
-      undefined,
+      ac.signal,
     );
     const reader = res.body!.getReader();
     const decoder = new TextDecoder();
@@ -83,6 +112,7 @@ async function* streamOnce(messages: ChatMessage[], tools?: unknown[]): AsyncGen
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
+      arm(); // 有动静了，闹钟往后拨
       buf += decoder.decode(value, { stream: true });
       let idx;
       while ((idx = buf.indexOf("\n")) >= 0) {
@@ -108,6 +138,12 @@ async function* streamOnce(messages: ChatMessage[], tools?: unknown[]): AsyncGen
     }
     const done = calls.filter(Boolean);
     if (done.length) yield { type: "tools", calls: done };
+  } catch (e) {
+    // 超时统一报成一句能看懂的话，日志里不再是一团 AbortError
+    if (ac.signal.aborted) throw ac.signal.reason instanceof Error ? ac.signal.reason : timeoutError("模型超时");
+    throw e;
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 

@@ -14,6 +14,12 @@ import { startReminders } from "./reminders";
 const HISTORY = 40;
 const GAP_MS = 3 * 3600_000;
 
+/** 第一次没答上来时重试一次；两次都不成就承认卡住了 */
+const TRIES = 2;
+const RETRY_WAIT_MS = 1500;
+/** 兜底的那一句：短、像人话，不装作没事，也不留下空白 */
+const STUCK_LINE = "诶，我这儿卡住了，话没接上——你再喊我一声，我马上再试。";
+
 /**
  * 他这句话多长，回复就多长。笼统地说「短一点」模型不当回事，直接给数字才管用。
  * 这句话放在提示词最末尾——离回复最近，最容易被照做。
@@ -183,7 +189,7 @@ export function resumePending() {
   }
 }
 
-/** 生成一条回复：失败就一直重试（2s、4s、8s… 最长隔 30s），直到成功 */
+/** 生成一条回复：失败就再试一次，两次都不成就说一句短的，不让他对着空白干等 */
 async function generate(assistantId: number, userRow: MessageRow, onEvent: (e: ChatEvent) => void = () => {}) {
   if (active.has(assistantId)) return;
   active.add(assistantId);
@@ -211,10 +217,10 @@ async function generate(assistantId: number, userRow: MessageRow, onEvent: (e: C
     if (!text && !working) emit({ type: "mood", mood });
   });
   try {
-    for (let attempt = 0; ; attempt++) {
+    for (let attempt = 0; attempt < TRIES; attempt++) {
       if (attempt) {
-        const wait = Math.min(30_000, 2000 * 2 ** (attempt - 1));
-        console.warn(`[dongni] #${assistantId} ${wait / 1000}s 后第 ${attempt + 1} 次重试`);
+        const wait = RETRY_WAIT_MS;
+        console.warn(`[dongni] #${assistantId} ${wait / 1000}s 后重试`);
         await new Promise((r) => setTimeout(r, wait));
         // 上次出了半截字的，清掉重来
         if (text) {
@@ -252,9 +258,14 @@ async function generate(assistantId: number, userRow: MessageRow, onEvent: (e: C
         emit({ type: "done" });
         return;
       } catch (e) {
-        console.error(`[dongni] #${assistantId} 回复失败：`, e instanceof Error ? e.message : e);
+        console.error(`[dongni] #${assistantId} 第 ${attempt + 1} 次回复失败：`, e instanceof Error ? e.message : e);
       }
     }
+    // 没答上来也不能留空：用自己的口吻先说一句，他就不用干等着猜
+    text = STUCK_LINE;
+    save("done");
+    emit({ type: "delta", text });
+    emit({ type: "done" });
   } finally {
     active.delete(assistantId);
     scheduleExtraction();
