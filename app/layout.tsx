@@ -1,7 +1,17 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
 
-export const metadata: Metadata = { title: "懂你" };
+export const metadata: Metadata = {
+  title: "懂你",
+  icons: {
+    icon: [
+      { url: "/favicon.svg", type: "image/svg+xml" },
+      { url: "/favicon-32.png", sizes: "32x32", type: "image/png" },
+      { url: "/favicon.ico", sizes: "32x32" },
+    ],
+    shortcut: "/favicon.ico",
+  },
+};
 export const viewport: Viewport = { width: "device-width", initialScale: 1 };
 
 // 在首帧前定好主题，避免闪一下

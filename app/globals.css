@@ -345,6 +345,9 @@ ol.md-list {
   --card-bg: rgba(255, 255, 255, 0.04);
   --paper-bg: linear-gradient(158deg, rgba(255, 255, 255, 0.09), rgba(255, 255, 255, 0.035));
   --paper-border: rgba(255, 255, 255, 0.13);
+  --paper-tile: rgba(255, 255, 255, 0.07);
+  --paper-ink: #ffffff;
+  --paper-sub: rgba(255, 255, 255, 0.34);
   --paper-shadow: 0 1px 2px rgba(0, 0, 0, 0.18), 0 6px 18px rgba(0, 0, 0, 0.26);
   --paper-shadow-hover: 0 2px 4px rgba(0, 0, 0, 0.2), 0 12px 28px rgba(0, 0, 0, 0.38);
 }
@@ -356,10 +359,13 @@ ol.md-list {
   --chart-5: #6aa9e8;
   --chart-dot: #fffdfa;
   --card-bg: rgba(255, 255, 255, 0.7);
-  --paper-bg: linear-gradient(158deg, #fffefc, #fbf6ef);
-  --paper-border: rgba(120, 90, 60, 0.16);
-  --paper-shadow: 0 1px 2px rgba(120, 90, 60, 0.06), 0 5px 14px rgba(120, 90, 60, 0.09);
-  --paper-shadow-hover: 0 2px 4px rgba(120, 90, 60, 0.08), 0 12px 26px rgba(120, 90, 60, 0.16);
+  --paper-bg: linear-gradient(158deg, #fffdf8, #fbf4ea);
+  --paper-border: rgba(120, 90, 60, 0.14);
+  --paper-tile: rgba(214, 146, 108, 0.13);
+  --paper-ink: #2b241f;
+  --paper-sub: rgba(58, 47, 40, 0.48);
+  --paper-shadow: 0 1px 2px rgba(120, 90, 60, 0.05), 0 3px 10px rgba(120, 90, 60, 0.07);
+  --paper-shadow-hover: 0 2px 4px rgba(120, 90, 60, 0.07), 0 8px 20px rgba(120, 90, 60, 0.1);
 }
 
 .md-imgs {
@@ -566,7 +572,7 @@ a.card:hover,
   color: var(--text-strong);
 }
 
-/* 文件卡片：单独一张纸，不套外层气泡，也不在里层再包一层灰底 */
+/* 文件卡片：整块就是一张纸——图标、文件名、小字、右下角一个小动作，没有第二层壳 */
 .filecard {
   display: flex;
   box-sizing: border-box;
@@ -574,12 +580,12 @@ a.card:hover,
   min-width: 0;
   align-items: flex-start;
   gap: 11px;
-  padding: 12px 14px;
+  padding: 12px 13px 11px;
   border: 1px solid var(--paper-border);
-  border-radius: 14px;
+  border-radius: 15px;
   background: var(--paper-bg);
   box-shadow: var(--paper-shadow);
-  color: var(--text);
+  color: var(--paper-ink);
   transition:
     transform 0.2s,
     box-shadow 0.2s,
@@ -589,13 +595,16 @@ a.card:hover,
   transform: translateY(-1px);
   box-shadow: var(--paper-shadow-hover);
 }
+/* 左边只放一个类型图标，一块淡淡的底，不占空白 */
 .filecard-icon {
   display: flex;
-  width: 18px;
-  height: 19.5px;
+  width: 34px;
+  height: 34px;
   flex: none;
   align-items: center;
   justify-content: center;
+  border-radius: 10px;
+  background: var(--paper-tile);
   color: var(--dot);
 }
 .filecard-main {
@@ -603,34 +612,34 @@ a.card:hover,
   min-width: 0;
   flex: 1;
   flex-direction: column;
-  gap: 2px;
+  gap: 3px;
 }
 .filecard-name {
   display: flex;
   min-width: 0;
   align-items: baseline;
-  font-size: 14.5px;
+  font-size: 15px;
   line-height: 1.35;
-  color: var(--text-strong);
+  color: var(--paper-ink);
 }
 .filecard-name-main {
   overflow: hidden;
   min-width: 0;
+  font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .filecard-ext {
   flex: none;
-  font-size: 12px;
+  font-size: 11.5px;
   line-height: 1.35;
   letter-spacing: 0;
-  color: var(--dim);
+  color: var(--faint);
 }
 .filecard-sub {
   display: flex;
   min-width: 0;
-  min-height: 19px;
-  align-items: baseline;
+  align-items: center;
   gap: 10px;
   font-size: 12px;
   line-height: 1.4;
@@ -641,28 +650,30 @@ a.card:hover,
   text-overflow: ellipsis;
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
-  color: var(--dim);
+  color: var(--paper-sub);
 }
-/* 「在 Finder 中显示」：右下角一行安静的小字，不抢主信息，但看得见能点 */
+/* 「在 Finder 中显示」：贴右下角的一个小动作，只有一点淡边，不占一整行 */
 .filecard-act {
   flex: none;
-  margin: -3px -7px -3px auto;
-  padding: 3px 7px;
-  border: 0;
-  border-radius: 7px;
-  background: none;
+  margin: 0 -3px -2px auto;
+  padding: 2px 8px;
+  border: 1px solid var(--paper-border);
+  border-radius: 999px;
+  background: transparent;
   font: inherit;
-  font-size: 12px;
-  line-height: 1.4;
+  font-size: 11.5px;
+  line-height: 1.45;
   white-space: nowrap;
-  color: var(--dim);
+  color: var(--paper-sub);
   transition:
     color 0.2s,
-    background 0.2s;
+    background 0.2s,
+    border-color 0.2s;
 }
 .filecard-act:hover {
-  color: var(--dot);
-  background: var(--hover);
+  color: var(--paper-ink);
+  border-color: var(--dot);
+  background: var(--paper-tile);
 }
 
 /* 每条回复下面的小操作：平时几乎看不见，鼠标移上去才亮 */

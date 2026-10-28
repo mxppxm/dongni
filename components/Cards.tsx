@@ -82,11 +82,11 @@ const ARCHIVE_EXT = ["zip", "rar", "7z", "tar", "gz", "dmg", "pkg"];
 
 function iconFor(name: string) {
   const ext = name.split(".").pop()?.toLowerCase() ?? "";
-  if (IMAGE_EXT.includes(ext)) return <FileImage size={18} strokeWidth={1.7} />;
-  if (ARCHIVE_EXT.includes(ext)) return <FileArchive size={18} strokeWidth={1.7} />;
+  if (IMAGE_EXT.includes(ext)) return <FileImage size={19} strokeWidth={1.7} />;
+  if (ARCHIVE_EXT.includes(ext)) return <FileArchive size={19} strokeWidth={1.7} />;
   if (["pdf", "doc", "docx", "txt", "md", "rtf", "pages", "key", "ppt", "pptx", "xls", "xlsx", "csv"].includes(ext))
-    return <FileText size={18} strokeWidth={1.7} />;
-  return <File size={18} strokeWidth={1.7} />;
+    return <FileText size={19} strokeWidth={1.7} />;
+  return <File size={19} strokeWidth={1.7} />;
 }
 
 /** 文件类型的小字：说人话，认得多少说多少 */
