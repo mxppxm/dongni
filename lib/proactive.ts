@@ -3,10 +3,11 @@ import fs from "node:fs";
 import path from "node:path";
 import { myName, notify } from "./notify";
 import { db, getKv, setKv, type MessageRow } from "./db";
-import { repeatContext, repeatedAlready, silence } from "./dedupe";
+import { repeatContext, repeatedAlready, silence, type Silence } from "./dedupe";
 import { completeJson } from "./llm";
 import { activeMemories, formatMemories, getProfile, nowText } from "./memory";
 import { INTRO, PERSONA, SPEAKING } from "./persona";
+import { pendingReminders } from "./reminders";
 import { postAssistant, startRepair } from "./selfrepair";
 import { runTool } from "./tools";
 
@@ -26,6 +27,8 @@ const state = ((globalThis as unknown as { __dongniProactive?: { running: boolea
  * 于是每 15 分钟就重新「发现」同一个毛病、再改一遍，永远停不下来。
  */
 const ERR_CAP = 64 * 1024;
+/** 工具参数正文里也会出现「失败」「Error」，那是请求内容而不是出错，别当由头 */
+const ERR_NOISE = /repair_self\{|工具 [a-z_]+\{/;
 
 function recentErrors() {
   const file = path.join(process.cwd(), "logs", "dongni.log");
@@ -40,7 +43,7 @@ function recentErrors() {
       .subarray(Math.max(from, size - ERR_CAP))
       .toString("utf8")
       .split("\n")
-      .filter((l) => /失败|Error|error/.test(l))
+      .filter((l) => /失败|Error|error/.test(l) && !ERR_NOISE.test(l))
       .slice(-15)
       .join("\n");
   } catch {
@@ -49,6 +52,31 @@ function recentErrors() {
 }
 
 type Decision = { send?: boolean; message?: string; improve?: string };
+
+/**
+ * 他已经走了的判定：多久没说话、这之后自己连说了几条。
+ * 光靠提示词拦不住——他五小时没回、明显不在电脑前，还是会被连着发二十多条催睡。
+ * 所以先在这里用记录卡一道：连说两条都没回、且距他最后一句超过 40 分钟，就不再开口。
+ */
+const AWAY_MS = 40 * 60_000;
+const AWAY_ROUNDS = 2;
+/** 他说过的事在这一小时内到点，算新由头 */
+const DUE_WINDOW_MS = 60 * 60_000;
+
+/** 这轮还非说不可的理由：日志里真有新报错，或者他说过的事到点了。没有就是 null */
+function freshReason(errors: string): string | null {
+  if (errors.trim()) return "运行日志里出现了新的报错";
+  const now = Date.now();
+  const due = pendingReminders().find((r) => r.at - now <= DUE_WINDOW_MS);
+  return due ? `他说过的事到点了：${due.text}` : null;
+}
+
+/** 他不在、又没有新由头：这轮不该发 */
+export function awayGate(s: Silence, errors: string): { blocked: boolean; reason: string | null } | null {
+  if (!(s.sinceMs >= AWAY_MS && s.streak >= AWAY_ROUNDS)) return null;
+  const reason = freshReason(errors);
+  return { blocked: !reason, reason };
+}
 
 export async function proactiveTick() {
   if (state.running) return;
@@ -71,6 +99,9 @@ export async function proactiveTick() {
     // 去重用的上下文：他上一条之后她说过什么、他沉默多久了
     const quiet = silence();
     const said = repeatContext(quiet);
+    // 日志只看一次：既当「新由头」用，也贴进提示词；先看掉后面就捞不着了
+    const errors = recentErrors();
+    const away = awayGate(quiet, errors);
 
     const r = await completeJson<Decision>([
       {
@@ -93,6 +124,7 @@ ${SPEAKING}
 不该发的：没有具体由头的「在吗」「最近怎么样」；重复你最近已经说过的；说教；太长。
 要发的话，就按上面那套说话方式来写：一两句、口语、具体、接得上你们上次聊的话头，不要客套开场白。没有值得说的就 send=false，宁缺毋滥。
 
+${away ? (away.blocked ? `【这轮别开口】${said.silent}连说两条他都没回，他多半已经不在电脑前、睡下了。这轮只能是 send=false，message 留空；除非有真正的新由头（他提过的事到点了、你刚发现的新报错），否则一个字都别发。\n` : `【这轮只能说这一件】${away.reason}——就着这个事说一句，别顺带催睡、催回家、问他还在不在。\n`) : ""}
 【别复读】下面是对方上一条消息之后你自己说过的话（从早到晚）。同一件事、同一个意思，说过一次就别再说了——换个说法、换个时间点，对他都是同一句废话：
 - 催睡、催回家、问到家了没：一个晚上最多一次
 - 「我改好了」「你试试」「还差一点」这类进度话：说一次就够
@@ -111,12 +143,16 @@ ${
       {
         role: "user",
         content: `【我眼中的对方】\n${getProfile() || "（还不太了解）"}\n\n【关于对方的记忆】\n${formatMemories(activeMemories()) || "（无）"}\n\n【最近的对话】\n${chat}\n\n【对方今天改过的文件】\n${files}${
-          canImprove ? `\n\n【上次看过之后新出现的运行错误】\n${recentErrors() || "（无）"}` : ""
+          canImprove ? `\n\n【上次看过之后新出现的运行错误】\n${errors || "（无）"}` : ""
         }`,
       },
     ]);
 
-    if (r.send && r.message?.trim()) {
+    if (r.send && r.message?.trim() && away?.blocked) {
+      // 模型不听话：他不在、也没新由头，硬拦下来
+      console.log(`[dongni] 主动消息没发：${said.silent}没新由头，不打扰他了`);
+    }
+    if (r.send && r.message?.trim() && !away?.blocked) {
       const text = r.message.trim();
       // 发之前再自己对一遍：这句话最近说过，就不发（模型常常不听提示词，硬拦一道）
       const repeat = repeatedAlready(text, quiet);
