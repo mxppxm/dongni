@@ -3,7 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { myName, notify } from "./notify";
 import { db, getKv, setKv, type MessageRow } from "./db";
-import { repeatContext, repeatedAlready, silence, type Silence } from "./dedupe";
+import { repeatContext, silence, type Silence } from "./dedupe";
+import { verdict } from "./send";
 import { completeJson } from "./llm";
 import { activeMemories, formatMemories, getProfile, nowText } from "./memory";
 import { INTRO, PERSONA, SPEAKING } from "./persona";
@@ -154,10 +155,10 @@ ${
     }
     if (r.send && r.message?.trim() && !away?.blocked) {
       const text = r.message.trim();
-      // 发之前再自己对一遍：这句话最近说过，就不发（模型常常不听提示词，硬拦一道）
-      const repeat = repeatedAlready(text, quiet);
-      if (repeat.repeated) {
-        console.log(`[dongni] 主动消息没发：${repeat.why}——${text}`);
+      // 发之前统一过一道闸：这句话最近说过、或者他沉默/睡着了还在自述，就不发（模型常常不听提示词，硬拦一道）
+      const v = verdict(text, quiet);
+      if (!v.ok) {
+        console.log(`[dongni] 主动消息没发：${v.why}——${text}`);
       } else {
         postAssistant(text);
         const id = (d.prepare("SELECT MAX(id) m FROM messages").get() as { m: number }).m;

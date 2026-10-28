@@ -1,6 +1,7 @@
 import "server-only";
 import { db, type MessageRow } from "./db";
 import { repeatContext, silence } from "./dedupe";
+import { suppress, verdict } from "./send";
 import { streamChat } from "./llm";
 import { nowText } from "./memory";
 import { INTRO, PERSONA, SPEAKING } from "./persona";
@@ -33,7 +34,16 @@ export async function speakAsHer(what: string, fallback: string): Promise<string
       return out.trim();
     })();
     const got = await Promise.race([run, new Promise<string>((ok) => setTimeout(() => ok(""), 30_000))]);
-    return got && got.length < 600 ? got : fallback;  } catch {
+    const text = got && got.length < 600 ? got : fallback;
+    // 自我修复那条路（内核文件）自己会把这句话写进对话，这里只能先判定、再把它登记掉：
+    // 说过一遍的、他连着几条没回的、凌晨他睡着时候的自述，一律不落到对话里。
+    const v = verdict(text);
+    if (!v.ok) {
+      suppress(text);
+      console.log(`[dongni] 这句话没发：${v.why}——${text}`);
+    }
+    return text;
+  } catch {
     return fallback;
   }
 }

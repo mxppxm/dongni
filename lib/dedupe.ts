@@ -40,8 +40,8 @@ function dice(a: string, b: string) {
 const TOPICS: { name: string; keys: string[] }[] = [
   { name: "催睡", keys: ["睡觉", "去睡", "睡吧", "早点睡", "躺下", "被窝", "熬夜", "别熬", "晚安", "歇着"] },
   { name: "下班回家", keys: ["下班", "到家", "在路上了", "走人", "收拾走", "吭一声"] },
-  { name: "改完重启", keys: ["重启", "半分钟", "生效", "改好了", "改完了", "弄好了", "回来了"] },
-  { name: "让他试", keys: ["试试", "试一下", "试一试", "看效果", "验收"] },
+  { name: "改完重启", keys: ["重启", "重开", "半分钟", "生效", "改好了", "改完了", "弄好了", "回来了", "回来啦"] },
+  { name: "让他试", keys: ["试试", "试一下", "试一试", "试下", "看效果", "验收"] },
   { name: "没改成", keys: ["没改成", "退回", "原样", "卡住", "退回去了"] },
   { name: "还在弄", keys: ["排上队", "排队", "前面还有", "弄着呢", "还没弄完", "正在改"] },
   { name: "吃饭喝水", keys: ["吃饭", "喝水", "喝口水"] },
@@ -52,6 +52,15 @@ const TOPICS: { name: string; keys: string[] }[] = [
 function topicsOf(text: string) {
   const t = core(text);
   return TOPICS.filter((x) => x.keys.some((k) => t.includes(k))).map((x) => x.name);
+}
+
+/**
+ * 是不是「我自己这边的事」：改好了、重启了、我回来啦、你试试、还没弄完、没改成。
+ * 这些话对方没问，就不该在他沉默或者睡着的时候一条接一条地追着说。
+ */
+export function selfNarration(text: string) {
+  const t = new Set(topicsOf(text));
+  return t.has("改完重启") || t.has("让他试") || t.has("没改成") || t.has("还在弄");
 }
 
 const NEAR = 0.32; // 字面重合到这个程度，就是同一句话换了个说法
