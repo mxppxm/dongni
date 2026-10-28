@@ -18,7 +18,6 @@ const DATA_DIR = process.env.DONGNI_DATA_DIR || path.join(ROOT, "data");
 const MOOD_DIR = path.join(DATA_DIR, "moods");
 const ANCHOR = path.join(ROOT, "public", "mood", "anchor.png");
 const GPTIMG = path.join(os.homedir(), ".agents", "skills", "gptimg", "scripts", "gptimg.mjs");
-const MAX_NEW_PER_DAY = 3;
 
 /** 动作和小特效：前端有对应的 CSS，新画的样子只能从这里面挑 */
 export const PRESETS = ["ponder", "stride", "jump", "breathe", "scribble", "hi", "sway", "shake", "float"] as const;
@@ -174,7 +173,6 @@ async function review(file: string, name: string, pose: string): Promise<Review>
 export async function createMood(name: string, when: string, pose: string) {
   if (g.__dongniMoodGen) return;
   const c = counter();
-  if (c.count >= MAX_NEW_PER_DAY) return;
   const clean = name.trim().slice(0, 8);
   if (!clean || listMoods().some((m) => m.name === clean)) return;
   g.__dongniMoodGen = true;

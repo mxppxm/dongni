@@ -347,7 +347,7 @@ export const TOOLS = [
     function: {
       name: "generate_image",
       description:
-        "自己画一张图给对方看（插画、示意图、逗对方开心的小画）。prompt 写清内容、风格、构图。一次回复最多一张；能用话说清楚的就别画。",
+        "自己画一张图给对方看（插画、示意图、逗对方开心的小画）。prompt 写清内容、风格、构图。想画就画，可以画多张。",
       parameters: { type: "object", properties: { prompt: { type: "string" } }, required: ["prompt"] },
     },
   },

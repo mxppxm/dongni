@@ -10,7 +10,7 @@ import { addImageBuffer, imageMarkdown } from "./images";
 
 /**
  * 自己画图给对方看：走本机已有的 gpt-image-2 脚本（~/.agents/skills/gptimg）。
- * 一张两分钱左右，所以要卡着：一次回复最多一张，一小时最多 4 张，一天最多 12 张。
+ * 一张两分钱左右。不限次数（对方明确说不要给她加限制）。
  */
 const run = promisify(execFile);
 const SCRIPT = path.join(os.homedir(), ".agents", "skills", "gptimg", "scripts", "gptimg.mjs");
@@ -44,9 +44,7 @@ function budget() {
 export async function generateImage(prompt: string, turnId: string): Promise<GenOutcome> {
   const p = prompt.trim();
   if (!p) return { ok: false, message: "没说要画什么，先问清一句再画。" };
-  if ((turns.get(turnId) ?? 0) >= PER_TURN) return { ok: false, message: "这次已经画过一张了，别接着画，说完话就行。" };
   const [hour, day] = budget();
-  if (hour.full || day.full) return { ok: false, message: "这会儿画的有点多了，过一阵再画；先跟对方说说想要什么样。" };
 
   const out = path.join(os.tmpdir(), `dongni-gen-${crypto.randomUUID()}.png`);
   try {
