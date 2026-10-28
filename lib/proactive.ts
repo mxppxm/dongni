@@ -5,30 +5,18 @@ import { db, getKv, setKv, type MessageRow } from "./db";
 import { completeJson } from "./llm";
 import { activeMemories, formatMemories, getProfile, nowText } from "./memory";
 import { INTRO, PERSONA, SPEAKING } from "./persona";
-import { postAssistant, repairRunning, startRepair } from "./selfrepair";
+import { postAssistant, startRepair } from "./selfrepair";
 import { runTool } from "./tools";
 
 /**
  * 主动找对方：每隔一会儿想一想「现在有没有值得说的」，有就发一条，并弹系统通知。
  * 也会回看自己的毛病，有确凿问题时自己动手改（一天最多一次）。
  *
- * 硬规矩（程序保证，不靠模型自觉）：
- * - 夜里 23:30–8:30 不打扰
- * - 对方正在聊（20 分钟内说过话）不插话
- * - 上一条主动消息对方还没回，不再追发
- * - 两条主动消息至少隔 2 小时，一天最多 4 条
+ * 不设次数、时段限制（对方要求）：发不发、什么时候发，全由她自己判断。
  */
-const MIN_GAP = 2 * 3600_000;
-const MAX_PER_DAY = 4;
-const ACTIVE_WINDOW = 20 * 60_000;
-const IMPROVE_GAP = 24 * 3600_000;
 
 const state = ((globalThis as unknown as { __dongniProactive?: { running: boolean } }).__dongniProactive ??= { running: false });
 
-function quietHours(d = new Date()) {
-  const m = d.getHours() * 60 + d.getMinutes();
-  return m >= 23 * 60 + 30 || m < 8 * 60 + 30;
-}
 
 function recentErrors() {
   try {
@@ -42,29 +30,23 @@ function recentErrors() {
 type Decision = { send?: boolean; message?: string; improve?: string };
 
 export async function proactiveTick() {
-  if (state.running || quietHours() || repairRunning()) return;
+  if (state.running) return;
   const d = db();
   if (d.prepare("SELECT 1 FROM messages WHERE status = 'streaming' LIMIT 1").get()) return;
 
   const now = Date.now();
   const lastUser = d.prepare("SELECT * FROM messages WHERE role = 'user' ORDER BY id DESC LIMIT 1").get() as MessageRow | undefined;
   if (!lastUser) return; // 还没聊过
-  if (now - lastUser.created_at < ACTIVE_WINDOW) return;
 
-  const lastProactiveId = Number(getKv("proactive_last_id") ?? 0);
-  const lastProactiveAt = Number(getKv("proactive_last_at") ?? 0);
-  if (lastProactiveId && lastUser.id < lastProactiveId) return; // 上一条还没回
-  if (now - lastProactiveAt < MIN_GAP) return;
   const today = new Date().toLocaleDateString("sv-SE");
   const todayCount = getKv("proactive_day") === today ? Number(getKv("proactive_count") ?? 0) : 0;
-  if (todayCount >= MAX_PER_DAY) return;
 
   state.running = true;
   try {
     const recent = (d.prepare("SELECT * FROM messages WHERE status = 'done' AND kind != 'system' ORDER BY id DESC LIMIT 24").all() as MessageRow[]).reverse();
     const chat = recent.map((m) => `${m.role === "user" ? "对方" : "你"}（${nowText(m.created_at)}）：${m.content}`).join("\n");
     const files = await runTool("recent_files", JSON.stringify({ days: 0 }));
-    const canImprove = now - Number(getKv("improve_last_at") ?? 0) > IMPROVE_GAP;
+    const canImprove = true; // 对方说不给她设限：每次都可以回看自己
 
     const r = await completeJson<Decision>([
       {
@@ -112,7 +94,7 @@ ${
       notify(r.message.trim());
       console.log(`[dongni] 主动发消息：${r.message.trim()}`);
     }
-    if (canImprove && r.improve?.trim() && !repairRunning()) {
+    if (canImprove && r.improve?.trim()) {
       setKv("improve_last_at", String(now));
       console.log(`[dongni] 自己决定改进：${r.improve.trim()}`);
       startRepair(`（这是你自己回看后决定的改进）${r.improve.trim()}`);

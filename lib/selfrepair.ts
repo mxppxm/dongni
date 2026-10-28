@@ -16,7 +16,6 @@ const ROOT = process.cwd();
 const PI = process.env.DONGNI_PI_BIN || path.join(os.homedir(), ".local", "bin", "pi");
 const LOG = path.join(ROOT, "logs", "self-repair.log");
 const RESULT = path.join(ROOT, "data", "rebuild-result.json");
-const PI_TIMEOUT = 25 * 60_000;
 
 /**
  * 内核：它改不了的部分。自我修复机制本身、重启脚本、健康检查、启动入口、数据库与备份、忽略规则。
@@ -93,10 +92,8 @@ async function runPi(request: string): Promise<string> {
     let err = "";
     child.stdout.on("data", (b) => (out += b));
     child.stderr.on("data", (b) => (err += b));
-    const timer = setTimeout(() => child.kill("SIGTERM"), PI_TIMEOUT);
     child.on("error", reject);
     child.on("close", (code) => {
-      clearTimeout(timer);
       log(`pi 退出 code=${code}\n--- stdout ---\n${out}\n--- stderr ---\n${err.slice(-4000)}`);
       if (code === 0) resolve(out.trim());
       else reject(new Error(`pi 退出码 ${code}：${(err || out).slice(-500)}`));

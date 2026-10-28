@@ -65,40 +65,16 @@ async function post(body: Record<string, unknown>, signal?: AbortSignal) {
 
 export type StreamEvent = { type: "text"; text: string } | { type: "tools"; calls: ToolCall[] };
 
-const IDLE_MS = 25_000;
-
-/**
- * 流式对话一轮。思考量压到最低：想太久就会把回复组织成条目、报告，说出的话也变硬；
- * 少想一点，先开口接人，才像在聊天，首字也更快。模型要用工具时，最后吐出一个 tools 事件。
- * 接口偶尔会接上了却一直不出字：25 秒没有任何数据就断开；还没出字的话自动重来，最多 3 次。
- */
+/** 流式对话一轮。模型要用工具时，最后吐出一个 tools 事件。（不设超时：对方要求不加限制） */
 export async function* streamChat(messages: ChatMessage[], tools?: unknown[]): AsyncGenerator<StreamEvent> {
-  for (let attempt = 0; ; attempt++) {
-    let yielded = false;
-    try {
-      for await (const ev of streamOnce(messages, tools)) {
-        yielded = true;
-        yield ev;
-      }
-      return;
-    } catch (e) {
-      if (yielded || attempt >= 2) throw e;
-      console.warn(`[dongni] 模型无响应，第 ${attempt + 2} 次重试：`, (e as Error).message);
-    }
-  }
+  yield* streamOnce(messages, tools);
 }
 
 async function* streamOnce(messages: ChatMessage[], tools?: unknown[]): AsyncGenerator<StreamEvent> {
-  const ctrl = new AbortController();
-  let idle: NodeJS.Timeout = setTimeout(() => ctrl.abort(new Error("模型 25 秒没有响应")), IDLE_MS);
-  const touch = () => {
-    clearTimeout(idle);
-    idle = setTimeout(() => ctrl.abort(new Error("模型 25 秒没有响应")), IDLE_MS);
-  };
-  try {
+  {
     const res = await post(
       { messages, stream: true, reasoning_effort: process.env.DONGNI_CHAT_REASONING || "low", max_tokens: 16000, temperature: 0.85, ...(tools ? { tools } : {}) },
-      ctrl.signal,
+      undefined,
     );
     const reader = res.body!.getReader();
     const decoder = new TextDecoder();
@@ -107,7 +83,6 @@ async function* streamOnce(messages: ChatMessage[], tools?: unknown[]): AsyncGen
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
-      touch();
       buf += decoder.decode(value, { stream: true });
       let idx;
       while ((idx = buf.indexOf("\n")) >= 0) {
@@ -133,8 +108,6 @@ async function* streamOnce(messages: ChatMessage[], tools?: unknown[]): AsyncGen
     }
     const done = calls.filter(Boolean);
     if (done.length) yield { type: "tools", calls: done };
-  } finally {
-    clearTimeout(idle);
   }
 }
 
