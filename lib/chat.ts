@@ -18,7 +18,7 @@ const GAP_MS = 3 * 3600_000;
 const TRIES = 3;
 const RETRY_WAIT_MS = 300;
 /** 兜底的那一句：短、像人话，不装作没事，也不留下空白 */
-const STUCK_LINE = "卡了一下，我再来——你再喊我一声就行。";
+const STUCK_LINE = "卡了一下，我再来";
 
 /** 模型这轮一个字都没说（工具跑完没接上话、回包被吞）：跟超时一样算可重试的错 */
 function emptyReply() {
@@ -285,12 +285,18 @@ async function generate(assistantId: number, userRow: MessageRow, onEvent: (e: C
         emit({ type: "done" });
         return;
       } catch (e) {
-        console.error(`[dongni] #${assistantId} 第 ${attempt + 1} 次回复失败：`, errText(e));
+        // 空回复不是坏了，只是这一轮没接上话：单独记一笔，别混进「失败」里
+        if ((e as { message?: string }).message === "模型返回为空") {
+          console.warn(`[dongni] #${assistantId} 第 ${attempt + 1} 次没接上话（空回复），准备再来`);
+        } else {
+          console.error(`[dongni] #${assistantId} 第 ${attempt + 1} 次回复失败：`, errText(e));
+        }
         // key 失效、权限这类错，再试也一样，直接给他一句
         if ((e as { fatal?: boolean }).fatal) break;
       }
     }
     // 没答上来也不能留空：用自己的口吻先说一句，他就不用干等着猜
+    console.warn(`[dongni] #${assistantId} 几次都没接上话，用兜底那一句接住`);
     text = STUCK_LINE;
     emit({ type: "reset" }); // 上一次留下的半截话清掉，别和这句拼在一起
     save("done");
