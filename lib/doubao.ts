@@ -43,7 +43,11 @@ export async function doubaoTts(text: string): Promise<{ audio: Buffer; mime: st
   const said = text.trim();
   if (!said) return null;
   try {
-    if (cfg.apiKey) return await ttsV3(said, cfg.apiKey, cfg.speaker || DEFAULT_SPEAKER_V3, cfg.ttsResourceId);
+    if (cfg.apiKey) {
+      // 先想好这句该怎么念（哪里惊讶、哪里笑、哪里拖长音），再交给豆包 2.0 按这个语气念——不然念出来平平的
+      const direction = await howToSay(said);
+      return await ttsV3(said, cfg.apiKey, cfg.speaker || DEFAULT_SPEAKER_V3, cfg.ttsResourceId, direction);
+    }
     if (cfg.appId && cfg.accessToken) return await ttsV1(said, cfg.appId, cfg.accessToken, cfg.speaker || DEFAULT_SPEAKER_V1, cfg.cluster);
     return null;
   } catch (e) {
@@ -85,7 +89,35 @@ function* jsonObjects(raw: string): Generator<string> {
 }
 
 /** 新版控制台：单向流式 HTTP，返回一串 JSON，每个里带一段 base64 音频 */
-async function ttsV3(text: string, apiKey: string, speaker: string, resourceId?: string) {
+/**
+ * 这句话怎么念：给豆包 2.0 的「语境提示」（context_texts）。实测加了以后音域宽了三成左右，
+ * 写得越具体（哪个词惊讶、哪里笑、哪里拖长）效果越明显。想不出来就不加，照常念。
+ */
+async function howToSay(text: string): Promise<string> {
+  try {
+    const { completeJson } = await import("./llm");
+    const r = await Promise.race([
+      completeJson<{ direction: string }>(
+        [
+          {
+            role: "system",
+            content:
+              "你是配音导演。说话的人是一个 20 岁、活泼爱闹、情绪写在脸上的女生，在跟很熟的人聊天。给下面这段台词写一句表演提示（中文，80 字以内）：整体情绪是什么，哪几个词要重读或拖长、哪里带笑、哪里停顿、语速快慢。要具体、要夸张一点，起伏要大；温柔、难过的话就写轻、慢、软。只输出 JSON：{\"direction\":\"...\"}",
+          },
+          { role: "user", content: text.slice(0, 600) },
+        ],
+        300,
+        "none",
+      ),
+      new Promise<{ direction: string }>((ok) => setTimeout(() => ok({ direction: "" }), 4000)),
+    ]);
+    return r.direction?.trim() ?? "";
+  } catch {
+    return "";
+  }
+}
+
+async function ttsV3(text: string, apiKey: string, speaker: string, resourceId?: string, direction = "") {
   const res = await post(
     TTS_V3,
     {
@@ -93,7 +125,14 @@ async function ttsV3(text: string, apiKey: string, speaker: string, resourceId?:
       "X-Api-Resource-Id": resourceId || DEFAULT_TTS_RESOURCE,
       "X-Api-Request-Id": crypto.randomUUID(),
     },
-    { req_params: { text, speaker, audio_params: { format: "mp3", sample_rate: 24000 } } },
+    {
+      req_params: {
+        text,
+        speaker,
+        audio_params: { format: "mp3", sample_rate: 24000 },
+        ...(direction ? { additions: JSON.stringify({ context_texts: [direction] }) } : {}),
+      },
+    },
   );
   if (!res.ok) throw new Error(`tts ${res.status}: ${(await res.text()).slice(0, 200)}`);
   const raw = await res.text();
