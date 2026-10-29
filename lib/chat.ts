@@ -11,6 +11,8 @@ import { runTool, toolsFor } from "./tools";
 import { formatMemories, getProfile, nowText, relevantMemories, scheduleExtraction } from "./memory";
 import { INTRO, PERSONA, SPEAKING } from "./persona";
 import { startReminders } from "./reminders";
+import { flushOutbox } from "./outbox";
+import { startProgressTick } from "./progress";
 
 const HISTORY = 40;
 /**
@@ -211,6 +213,9 @@ export function startReply(clientId: string, content: string, onEvent: (e: ChatE
 /** 服务启动时把没写完、出过错的回复接着生成，不用手动重试；顺带把定时提醒重新上表 */
 export function resumePending() {
   startReminders();
+  // 上次没送进对话的那句话补一次；改自己的时候每两三分钟贴一句进度（都不依赖下面这些轮次）
+  flushOutbox();
+  startProgressTick();
   const rows = db()
     .prepare("SELECT * FROM messages WHERE role = 'assistant' AND status IN ('streaming', 'error') ORDER BY id")
     .all() as MessageRow[];

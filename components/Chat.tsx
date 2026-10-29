@@ -251,7 +251,7 @@ export default function Chat() {
         if (!fresh.length || busy.current) return;
         stick.current = true;
         setMsgs((list) => [...list, ...fresh.map((m) => ({ ...fromServer(m), fresh: true }))]);
-        fresh.filter((m) => m.role === "assistant").forEach((m) => browserNotify(m.id, m.content));
+        fresh.filter((m) => m.role === "assistant" && m.kind !== "system").forEach((m) => browserNotify(m.id, m.content));
       } catch {}
     }, 4000);
     return () => clearInterval(t);

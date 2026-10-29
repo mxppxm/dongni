@@ -4,7 +4,8 @@ import path from "node:path";
 import { myName, notify } from "./notify";
 import { db, getKv, setKv, type MessageRow } from "./db";
 import { repeatContext, silence, type Silence } from "./dedupe";
-import { verdict } from "./send";
+import { verdict, type SayVerdict } from "./send";
+import { enqueueProactive, flushOutbox } from "./outbox";
 import { completeJson } from "./llm";
 import { activeMemories, formatMemories, getProfile, nowText } from "./memory";
 import { INTRO, PERSONA, SPEAKING } from "./persona";
@@ -76,6 +77,54 @@ function freshReason(errors: string): string | null {
 
 export type QuietGate = { block: boolean; capped: boolean; reason: string | null };
 
+/** 一句话没送出去时，日志和补发队列都要知道断在哪一步 */
+const why = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
+/**
+ * 把想好的这句话真的送进对话。步骤拆开、各自兜住：
+ * 话已经在手里了，就不能因为某一步出错整条静默消失——断在哪一步都写进日志，
+ * 没落进对话的那句存进发件箱（lib/outbox.ts），重启后补发一次。
+ */
+function deliver(text: string, quiet: Silence, today: string, todayCount: number) {
+  // 第 1 步：发之前的闸——这句话最近说过、或者他沉默/睡着了还在自述，就不发（模型常常不听提示词，硬拦一道）
+  let v: SayVerdict;
+  try {
+    v = verdict(text, quiet);
+  } catch (e) {
+    console.warn(`[dongni] 主动消息第 1 步（开口前的闸）失手，照原样发：${why(e)}`);
+    v = { ok: true };
+  }
+  if (!v.ok) {
+    // 拦下来是有意的，不补发
+    console.log(`[dongni] 主动消息没发：${v.why}——${text}`);
+    return;
+  }
+  // 第 2 步：写进对话
+  try {
+    postAssistant(text);
+  } catch (e) {
+    enqueueProactive(text, "第 2 步 写进对话", e);
+    return;
+  }
+  // 第 3 步：记账——话已经发出去了，这步出错只影响以后的去重，不再补发，免得同一句出现两次
+  try {
+    const id = (db().prepare("SELECT MAX(id) m FROM messages").get() as { m: number }).m;
+    setKv("proactive_last_id", String(id));
+    setKv("proactive_last_at", String(Date.now()));
+    setKv("proactive_day", today);
+    setKv("proactive_count", String(todayCount + 1));
+  } catch (e) {
+    console.warn(`[dongni] 主动消息第 3 步（记账）失手，话已经说出去了：${why(e)}`);
+  }
+  // 第 4 步：系统通知——弹不出来也不影响对话里那句
+  try {
+    notify(text);
+  } catch (e) {
+    console.warn(`[dongni] 主动消息第 4 步（通知）失手，对话里已经说了：${why(e)}`);
+  }
+  console.log(`[dongni] 主动发消息：${text}`);
+}
+
 /** 他还没回话、这轮该不该开口 */
 export function quietGate(s: Silence, errors: string): QuietGate {
   const reason = freshReason(errors);
@@ -86,6 +135,8 @@ export function quietGate(s: Silence, errors: string): QuietGate {
 
 export async function proactiveTick() {
   if (state.running) return;
+  // 上次断在半路的那句话，顺手补一次（重启时 lib/chat.ts 里也会补）
+  flushOutbox();
   const d = db();
   if (d.prepare("SELECT 1 FROM messages WHERE status = 'streaming' LIMIT 1").get()) return;
 
@@ -170,29 +221,22 @@ ${
         // 模型不听话：他还没回话、连发到上限，或者没有新由头——一律硬拦
         console.log(`[dongni] 主动消息没发：${gate.capped ? "连发到上限了，等他先开口" : "他还没回话，也没有新由头"}——${text}`);
       } else {
-        // 发之前统一过一道闸：这句话最近说过、或者他沉默/睡着了还在自述，就不发（模型常常不听提示词，硬拦一道）
-        const v = verdict(text, quiet);
-        if (!v.ok) {
-          console.log(`[dongni] 主动消息没发：${v.why}——${text}`);
-        } else {
-          postAssistant(text);
-          const id = (d.prepare("SELECT MAX(id) m FROM messages").get() as { m: number }).m;
-          setKv("proactive_last_id", String(id));
-          setKv("proactive_last_at", String(now));
-          setKv("proactive_day", today);
-          setKv("proactive_count", String(todayCount + 1));
-          notify(text);
-          console.log(`[dongni] 主动发消息：${text}`);
-        }
+        deliver(text, quiet, today, todayCount);
       }
     }
     if (canImprove && r.improve?.trim()) {
-      setKv("improve_last_at", String(now));
-      console.log(`[dongni] 自己决定改进：${r.improve.trim()}`);
-      startRepair(`（这是你自己回看后决定的改进）${r.improve.trim()}`);
+      // 第 5 步：把「要改什么」交给编码助手——失手也别连着上面那句一起算成「没想出发什么」
+      try {
+        setKv("improve_last_at", String(now));
+        console.log(`[dongni] 自己决定改进：${r.improve.trim()}`);
+        startRepair(`（这是你自己回看后决定的改进）${r.improve.trim()}`);
+      } catch (e) {
+        console.error(`[dongni] 想改却没交出去（第 5 步 交给编码助手失手：${why(e)}）：${r.improve.trim()}`);
+      }
     }
   } catch (e) {
-    console.error("[dongni] 主动思考失败：", e instanceof Error ? e.message : e);
+    // 这一步还没想出发什么，没话可补；真要补的是「话已经想好了却没送进对话」那一截，见 deliver
+    console.error("[dongni] 主动思考没走完（还没想出发什么，没有话可补）：", e instanceof Error ? e.message : e);
   } finally {
     state.running = false;
   }
