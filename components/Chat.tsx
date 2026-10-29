@@ -9,7 +9,7 @@ import Mood from "./Mood";
 import Starfield, { type Theme } from "./Starfield";
 import { AttachmentStrip, useAttachments } from "./useAttachments";
 import MicButton, { type VoiceSendResult } from "./VoiceRecorder";
-import { hasSpeakable, VoiceButton, VoiceProvider } from "./Voice";
+import { hasSpeakable, VoiceButton, VoiceProvider, VoiceToggle } from "./Voice";
 
 const MemoryMap = dynamic(() => import("./MemoryMap"), { ssr: false });
 const Album = dynamic(() => import("./Album"), { ssr: false });
@@ -466,6 +466,7 @@ export default function Chat() {
           </motion.span>
         </AnimatePresence>
       </button>
+      <VoiceToggle />
       <button
         onClick={() => setShowAlbum(true)}
         className="flex h-10 w-10 items-center justify-center rounded-full text-[var(--icon)] transition-colors hover:bg-[var(--hover)] hover:text-[var(--icon-hover)]"
