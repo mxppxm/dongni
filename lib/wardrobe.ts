@@ -48,12 +48,41 @@ export const OUTFITS: Outfit[] = [
 export type Weather = {
   city: string;
   temp: number;
+  /** 体感温度（°C） */
+  feels?: number;
   text: string;
   kind: "sun" | "cloud" | "rain" | "snow" | "unknown";
   humidity?: number;
+  /** 风速 km/h */
   wind?: number;
+  /** 风向，比如「东北风」 */
+  windDir?: string;
+  /** 风力等级 0–12 */
+  windLevel?: number;
+  /** 今天最高 / 最低温 */
+  high?: number;
+  low?: number;
+  /** 今晚（今天剩下的时间）最低温；过了今晚就是明天凌晨 */
+  tonightLow?: number;
+  /** 再过几小时的温度，用来判断在升温还是降温 */
+  nextTemp?: number;
+  trend?: "up" | "down" | "flat";
   advice: string;
 };
+
+/** 风向角度 → 中文风向 */
+function windDirName(deg: number) {
+  const dirs = ["北风", "东北风", "东风", "东南风", "南风", "西南风", "西风", "西北风"];
+  return dirs[Math.round(((deg % 360) + 360) % 360 / 45) % 8];
+}
+
+/** 风速 km/h → 蒲福风力等级，说话时用「几级风」比数字直观 */
+function beaufort(kmh: number) {
+  const steps = [1, 6, 12, 20, 29, 39, 50, 62, 75, 89, 103, 118];
+  let level = 0;
+  for (const s of steps) if (kmh >= s) level++;
+  return level;
+}
 
 export const HOME_CITY = "北京";
 
@@ -129,8 +158,8 @@ function describe(code: number): { text: string; kind: Weather["kind"] } {
   return { text: "天气不明", kind: "unknown" };
 }
 
-/** 温度 + 天气 → 一句穿搭建议（跟衣橱的选法对得上） */
-function adviceFor(temp: number, kind: Weather["kind"], wind: number) {
+/** 温度（体感优先）+ 天气 + 风 → 一句穿搭建议（跟衣橱的选法对得上） */
+function adviceFor(temp: number, kind: Weather["kind"], wind: number, opts: { feels?: number; trend?: Weather["trend"]; nextTemp?: number } = {}) {
   const out: string[] = [];
   if (temp >= 30) out.push("热，短袖短裤或裙子");
   else if (temp >= 24) out.push("暖和，短袖配条长裤");
@@ -138,10 +167,15 @@ function adviceFor(temp: number, kind: Weather["kind"], wind: number) {
   else if (temp >= 12) out.push("有点凉，外面加件外套");
   else if (temp >= 5) out.push("冷，厚外套或薄羽绒");
   else out.push("很冷，羽绒服、围巾手套都上身");
+  // 体感差得多就提一句：同样 16 度，风一吹就不一样
+  const feels = opts.feels;
+  if (feels !== undefined && Math.abs(feels - temp) >= 3) out.push(feels < temp ? `体感只有 ${feels}°C，穿厚一点` : `体感有 ${feels}°C，别穿太多`);
   if (kind === "rain") out.push("带伞，鞋挑防水的");
   else if (kind === "snow") out.push("鞋要防滑保暖，路滑走慢点");
   else if (kind === "sun" && temp >= 28) out.push("记得防晒");
   if (wind >= 25) out.push("风大，加件防风的");
+  else if (wind >= 12) out.push("有点风，外套挑防风的");
+  if (opts.trend === "down" && opts.nextTemp !== undefined && temp - opts.nextTemp >= 4) out.push(`过几小时降到 ${opts.nextTemp}°C，带件薄的`);
   return out.join("，");
 }
 
@@ -205,26 +239,80 @@ async function fetchWeather(city: string): Promise<Weather | null> {
     const url =
       "https://api.open-meteo.com/v1/forecast?" +
       `latitude=${c.lat}&longitude=${c.lon}` +
-      "&current=temperature_2m,weather_code,relative_humidity_2m,wind_speed_10m&timezone=auto";
+      "&current=temperature_2m,apparent_temperature,weather_code,relative_humidity_2m,wind_speed_10m,wind_direction_10m" +
+      "&daily=temperature_2m_max,temperature_2m_min" +
+      "&hourly=temperature_2m&forecast_days=2&timezone=auto";
     const res = await fetch(url, { signal: AbortSignal.timeout(FORECAST_TIMEOUT), cache: "no-store" });
     if (!res.ok) return null;
     const j = (await res.json()) as {
-      current?: { temperature_2m?: unknown; weather_code?: unknown; relative_humidity_2m?: unknown; wind_speed_10m?: unknown };
+      current?: {
+        time?: string;
+        temperature_2m?: unknown;
+        apparent_temperature?: unknown;
+        weather_code?: unknown;
+        relative_humidity_2m?: unknown;
+        wind_speed_10m?: unknown;
+        wind_direction_10m?: unknown;
+      };
+      daily?: { temperature_2m_max?: unknown[]; temperature_2m_min?: unknown[] };
+      hourly?: { time?: string[]; temperature_2m?: unknown[] };
     };
-    const temp = Number(j.current?.temperature_2m);
-    const code = Number(j.current?.weather_code);
-    if (!Number.isFinite(temp) || !Number.isFinite(code)) return null;
-    const humidity = Number(j.current?.relative_humidity_2m);
-    const wind = Number(j.current?.wind_speed_10m);
+    const num = (v: unknown) => {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : undefined;
+    };
+    const temp = num(j.current?.temperature_2m);
+    const code = num(j.current?.weather_code);
+    if (temp === undefined || code === undefined) return null;
+    const feels = num(j.current?.apparent_temperature);
+    const humidity = num(j.current?.relative_humidity_2m);
+    const wind = num(j.current?.wind_speed_10m);
+    const windDeg = num(j.current?.wind_direction_10m);
+    const high = num(j.daily?.temperature_2m_max?.[0]);
+    const low = num(j.daily?.temperature_2m_min?.[0]);
+
+    // 逐小时温度：从现在往后看 6 小时判趋势，再看今天剩下的时间里的最低温（今晚会降到几度）
+    const times = j.hourly?.time ?? [];
+    const temps = (j.hourly?.temperature_2m ?? []).map((v) => num(v));
+    const nowIso = String(j.current?.time ?? "");
+    const hourKey = nowIso.slice(0, 13);
+    let idx = times.findIndex((t) => t.slice(0, 13) === hourKey);
+    if (idx < 0) idx = times.findIndex((t) => t >= nowIso);
+    let nextTemp: number | undefined;
+    let tonightLow: number | undefined;
+    if (idx >= 0) {
+      nextTemp = temps[idx + 6];
+      const today = times[idx].slice(0, 10);
+      for (let i = idx; i < times.length; i++) {
+        if (!times[i].startsWith(today)) break;
+        const t = temps[i];
+        if (t !== undefined && (tonightLow === undefined || t < tonightLow)) tonightLow = t;
+      }
+    }
     const { text, kind } = describe(code);
+    const trend: Weather["trend"] | undefined =
+      nextTemp === undefined ? undefined : nextTemp - temp <= -1 ? "down" : nextTemp - temp >= 1 ? "up" : "flat";
+    const windRounded = wind === undefined ? undefined : Math.round(wind);
     return {
       city,
       temp: Math.round(temp),
+      feels: feels === undefined ? undefined : Math.round(feels),
       text,
       kind,
-      humidity: Number.isFinite(humidity) ? humidity : undefined,
-      wind: Number.isFinite(wind) ? wind : undefined,
-      advice: adviceFor(temp, kind, Number.isFinite(wind) ? wind : 0),
+      humidity: humidity === undefined ? undefined : Math.round(humidity),
+      wind: windRounded,
+      windDir: windDeg === undefined ? undefined : windDirName(windDeg),
+      windLevel: windRounded === undefined ? undefined : beaufort(windRounded),
+      high: high === undefined ? undefined : Math.round(high),
+      low: low === undefined ? undefined : Math.round(low),
+      tonightLow: tonightLow === undefined ? undefined : Math.round(tonightLow),
+      nextTemp: nextTemp === undefined ? undefined : Math.round(nextTemp),
+      trend,
+      advice: adviceFor(temp, kind, wind ?? 0, {
+        feels: feels === undefined ? undefined : Math.round(feels),
+        trend,
+        nextTemp: nextTemp === undefined ? undefined : Math.round(nextTemp),
+      }),
     };
   } catch {
     return null;
@@ -262,7 +350,7 @@ export function pickOutfit(w: Weather | null, d = new Date()): Outfit {
   if (h < 8 && !wet) return byKey("run");
   if (h < 7) return byKey("home");
   if (wet) return byKey("rainy");
-  const cold = w ? w.temp < 12 : season() === "冬";
+  const cold = w ? (w.feels ?? w.temp) < 12 : season() === "冬";
   if (cold) return byKey("cold");
   return byKey("sunny");
 }
@@ -290,13 +378,27 @@ function weatherSoon(ms: number) {
   });
 }
 
+/** 把天气说成一句人话：体感、湿度、风、今天高低、晚上降多少都在里面 */
+export function weatherText(w: Weather) {
+  const bits = [`${w.city}现在${w.text}，${w.temp}°C`];
+  if (w.feels !== undefined && w.feels !== w.temp) bits.push(`体感 ${w.feels}°C`);
+  if (w.humidity !== undefined) bits.push(`湿度 ${w.humidity}%`);
+  if (w.windDir !== undefined) bits.push(`${w.windDir}${w.windLevel !== undefined ? ` ${w.windLevel} 级` : ""}${w.wind !== undefined ? `（${w.wind}km/h）` : ""}`);
+  if (w.low !== undefined && w.high !== undefined) bits.push(`今天 ${w.low}~${w.high}°C`);
+  if (w.tonightLow !== undefined && w.tonightLow <= w.temp - 3) bits.push(`今晚降到 ${w.tonightLow}°C`);
+  if (w.trend === "down" && w.nextTemp !== undefined) bits.push(`接下来几小时降到 ${w.nextTemp}°C`);
+  else if (w.trend === "up" && w.nextTemp !== undefined) bits.push(`接下来几小时升到 ${w.nextTemp}°C`);
+  else if (w.trend === "flat" && w.nextTemp !== undefined) bits.push(`接下来几小时 ${w.nextTemp}°C 左右`);
+  return bits.join("，");
+}
+
 /** 写进她的系统提示词：她知道自己今天穿什么、外面什么天。没取到就明说，不许编。 */
 export async function wardrobeNote() {
   const w = await weatherSoon(1200);
   const outfit = pickOutfit(w);
   const city = getCity();
   const sky = w
-    ? `${city}现在${w.text}，${w.temp}°C${w.advice ? `，${w.advice}` : ""}`
+    ? `${weatherText(w)}${w.advice ? `，${w.advice}` : ""}`
     : `${city}的实时天气没取到（接口没响应或超时），别猜天气、别编天气`;
   return `你今天穿的是「${outfit.name}」那身。现在是${season()}天，${sky}。`;
 }
