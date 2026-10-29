@@ -211,7 +211,7 @@ async function showImage({ path: p }: { path: string }, ctx?: ToolCtx) {
 }
 
 async function drawImage({ prompt }: { prompt: string }, ctx?: ToolCtx) {
-  const r = await generateImage(prompt, ctx?.turnId ?? "x");
+  const r = await generateImage(prompt);
   if (!r.ok) return r.message;
   ctx?.attach(r.markdown);
   return "画好了，图已经放进你的回复里。回复里不要再写图片链接，直接用一两句话说说这张图。";
