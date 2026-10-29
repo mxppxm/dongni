@@ -215,7 +215,7 @@ async function* streamOnce(
   try {
     arm();
     const res = await post(
-      { ...(CHAT_MODEL ? { model: CHAT_MODEL } : {}), messages: slimMessages(messages, level), stream: true, reasoning_effort: process.env.DONGNI_CHAT_REASONING || "low", max_tokens: 16000, temperature: 0.85, ...(tools ? { tools } : {}) },
+      { ...(CHAT_MODEL ? { model: CHAT_MODEL } : {}), messages: slimMessages(messages, level), stream: true, reasoning_effort: process.env.DONGNI_CHAT_REASONING || "high", max_tokens: 16000, temperature: 0.85, ...(tools ? { tools } : {}) },
       ac.signal,
     );
     const reader = res.body!.getReader();

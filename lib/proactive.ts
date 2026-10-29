@@ -212,7 +212,8 @@ export async function proactiveTick() {
     const recent = (d.prepare("SELECT * FROM messages WHERE status = 'done' AND kind != 'system' ORDER BY id DESC LIMIT 24").all() as MessageRow[]).reverse();
     const chat = recent.map((m) => `${m.role === "user" ? "对方" : "你"}（${nowText(m.created_at)}）：${m.content}`).join("\n");
     const files = await runTool("recent_files", JSON.stringify({ days: 0 }));
-    const canImprove = true; // 对方说不给她设限：每次都可以回看自己
+    // 他把「自己改自己」关了，就别回看日志找毛病了——不然她只会拿这些来跟他念叨
+    const canImprove = getKv("repair_paused") !== "1";
     // 去重用的上下文：他上一条之后她说过什么、他沉默多久了
     const quiet = silence();
     const said = repeatContext(quiet);
@@ -279,6 +280,11 @@ ${
     ]);
 
     // 说了要去修/查，却没真的交出去：这句不发（不然又是「说了没做」）
+    // 主动消息只聊生活，不拿后台的事烦他
+    if (r.send && r.message && /(修复|自修复|日志|报错|bug|判定|代码|重启|key|凭据|声音还)/i.test(r.message)) {
+      console.log(`[dongni] 这句是在聊后台，不发：${r.message.trim()}`);
+      r.send = false;
+    }
     if (r.send && r.message && !r.improve?.trim() && /(去|在|正在|马上|这就|先)(修|查|排查|看看|弄|改|翻)/.test(r.message)) {
       console.log(`[dongni] 说了要去做却没真去做，这句不发：${r.message.trim()}`);
       r.send = false;
