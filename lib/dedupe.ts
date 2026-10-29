@@ -6,7 +6,10 @@ import { stripImageMarkdown } from "./images";
  * 主动消息去重：同一件事（催睡、催回家、「我回来了你试试」、还没改完……）连着说过一次，
  * 短时间内就不要再换个说法说一遍。尤其是对方一直没回的时候——一晚上反复发同一种话，像复读机。
  *
- * 只拿「对方上一条消息之后」自己说过的话来比：中间他回过话，就说明是新的一段，重复同一个话题是正常的。
+ * 两个范围一起比：
+ * 1）他上一条消息之后自己说过的话（就在嘴边，窗口最紧）；
+ * 2）历史里自己最近十条——他中间回过话也不算数了。以前只要他回一句，几乎原样重复的
+ *    「我重启一下，半分钟回来」「回来了，你试试」就能再发一遍，闸等于形同虚设。
  */
 
 export type SelfLine = { id: number; text: string; at: number };
@@ -69,8 +72,15 @@ const TOPIC_WINDOW = 3 * 3600_000;
 const TOPIC_WINDOW_STRETCHED = 9 * 3600_000;
 const TEXT_WINDOW = 6 * 3600_000;
 const TEXT_WINDOW_STRETCHED = 24 * 3600_000;
+// 历史里那十条：跨过他回话也算同一件事，所以给得宽一点
+const HISTORY_TEXT_WINDOW = 6 * 3600_000;
+const HISTORY_TEXT_WINDOW_STRETCHED = 24 * 3600_000;
+const HISTORY_TOPIC_WINDOW = 6 * 3600_000;
+const HISTORY_TOPIC_WINDOW_STRETCHED = 12 * 3600_000;
 const LONG_SILENCE = 4 * 3600_000; // 对方这么久没回，算「一直没回」
-const LONG_STREAK = 3; // 或者自己已经连说了这么多条
+const LONG_STREAK = 2; // 或者她自己已经追着说了这么多条（不算本该回他的那一句）
+/** 判重时回看历史里自己最近多少条 */
+const RECENT_MINE = 10;
 
 function ago(ms: number) {
   const min = Math.max(0, Math.round(ms / 60_000));
@@ -81,13 +91,36 @@ function ago(ms: number) {
   return `${Math.round(h / 24)} 天`;
 }
 
-export type Silence = { sinceMs: number; streak: number; lines: SelfLine[] };
+export type Silence = {
+  sinceMs: number;
+  /** 他最后一次开口之后，她说了几条（第一条是本该回他的那句话） */
+  streak: number;
+  /** 去掉本该回他的那条，真正「追着说」的条数——硬上限按这个数 */
+  extra: number;
+  /** 他上一条之后她说过的话（从早到晚） */
+  lines: SelfLine[];
+  /** 历史里她最近十条（不管他中间回没回） */
+  recent: SelfLine[];
+};
+
+function asLines(rows: MessageRow[]): SelfLine[] {
+  return rows
+    .slice()
+    .reverse()
+    .map((m) => ({ id: m.id, text: stripImageMarkdown(m.content).trim(), at: m.created_at }))
+    .filter((l) => l.text);
+}
 
 /** 对方最后一次开口之后：他沉默多久了、这期间她说了几条、都说了什么（从早到晚） */
-export function silence(limit = 8): Silence {
+export function silence(limit = 10): Silence {
   const d = db();
+  const recent = asLines(
+    d
+      .prepare("SELECT * FROM messages WHERE role = 'assistant' AND status = 'done' AND kind != 'system' ORDER BY id DESC LIMIT ?")
+      .all(RECENT_MINE) as MessageRow[],
+  );
   const lastUser = d.prepare("SELECT * FROM messages WHERE role = 'user' ORDER BY id DESC LIMIT 1").get() as MessageRow | undefined;
-  if (!lastUser) return { sinceMs: Number.POSITIVE_INFINITY, streak: 0, lines: [] };
+  if (!lastUser) return { sinceMs: Number.POSITIVE_INFINITY, streak: 0, extra: 0, lines: [], recent };
   const rows = d
     .prepare(
       "SELECT * FROM messages WHERE id > ? AND role = 'assistant' AND status = 'done' AND kind != 'system' ORDER BY id DESC LIMIT ?",
@@ -98,35 +131,49 @@ export function silence(limit = 8): Silence {
       .prepare("SELECT COUNT(*) c FROM messages WHERE id > ? AND role = 'assistant' AND kind != 'system'")
       .get(lastUser.id) as { c: number }
   ).c;
-  const lines = rows
-    .reverse()
-    .map((m) => ({ id: m.id, text: stripImageMarkdown(m.content).trim(), at: m.created_at }))
-    .filter((l) => l.text);
-  return { sinceMs: Date.now() - lastUser.created_at, streak, lines };
+  // 第一条是她回他那句话，不算「追着说」
+  const extra = Math.max(0, streak - 1);
+  return { sinceMs: Date.now() - lastUser.created_at, streak, extra, lines: asLines(rows), recent };
 }
 
 export type RepeatCheck = { repeated: boolean; why?: string };
 
 /** 这句准备发出去的话，是不是把刚才说过的又换个说法说一遍 */
 export function repeatedAlready(text: string, s: Silence = silence()): RepeatCheck {
-  const mine = core(text);
-  if (!mine || !s.lines.length) return { repeated: false };
-  const stretched = s.sinceMs >= LONG_SILENCE || s.streak >= LONG_STREAK;
-  const topicWindow = stretched ? TOPIC_WINDOW_STRETCHED : TOPIC_WINDOW;
-  const textWindow = stretched ? TEXT_WINDOW_STRETCHED : TEXT_WINDOW;
+  const body = core(text);
+  if (!body || !(s.lines.length || s.recent.length)) return { repeated: false };
+  const stretched = s.sinceMs >= LONG_SILENCE || s.extra >= LONG_STREAK;
   const near = stretched ? NEAR_STRETCHED : NEAR;
   const myTopics = new Set(topicsOf(text));
   const now = Date.now();
-  for (const line of s.lines) {
+  const seen = new Set<number>();
+  // 两批话合起来比，同一条只比一次
+  const cmp = (line: SelfLine, textWindow: number, topicWindow: number): string | null => {
+    if (seen.has(line.id)) return null;
+    seen.add(line.id);
     const age = now - line.at;
-    if (age > textWindow) continue;
+    if (age > textWindow) return null;
     const prev = core(line.text);
-    if (!prev) continue;
-    if (dice(mine, prev) >= near) return { repeated: true, why: `${ago(age)}前说过几乎一样的话` };
+    if (!prev) return null;
+    if (dice(body, prev) >= near) return `${ago(age)}前说过几乎一样的话`;
     if (myTopics.size && age <= topicWindow) {
       const shared = topicsOf(line.text).filter((t) => myTopics.has(t));
-      if (shared.length) return { repeated: true, why: `${ago(age)}前的「${shared.join("、")}」` };
+      if (shared.length) return `${ago(age)}前的「${shared.join("、")}」`;
     }
+    return null;
+  };
+  const textWindow = stretched ? TEXT_WINDOW_STRETCHED : TEXT_WINDOW;
+  const topicWindow = stretched ? TOPIC_WINDOW_STRETCHED : TOPIC_WINDOW;
+  for (const line of s.lines) {
+    const why = cmp(line, textWindow, topicWindow);
+    if (why) return { repeated: true, why };
+  }
+  // 再比历史里最近十条：他回过话也要拦住换个说法的同一件事
+  const histText = stretched ? HISTORY_TEXT_WINDOW_STRETCHED : HISTORY_TEXT_WINDOW;
+  const histTopic = stretched ? HISTORY_TOPIC_WINDOW_STRETCHED : HISTORY_TOPIC_WINDOW;
+  for (const line of s.recent) {
+    const why = cmp(line, histText, histTopic);
+    if (why) return { repeated: true, why };
   }
   return { repeated: false };
 }

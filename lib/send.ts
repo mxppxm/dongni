@@ -12,8 +12,10 @@ import { repeatedAlready, selfNarration, silence, type Silence } from "./dedupe"
  * 保证「拦」这件事只有一套规矩，不会一部分拦下、一部分漏出去。
  */
 
-/** 他连着这么多条没回，就不再跟他说「我自己这边好了」这类话 */
-const STREAK_LIMIT = 2;
+/** 他连着没回时，她最多追着说几条（不算本该回他的那一句）；到这儿就静默到他先开口 */
+const MAX_EXTRA = 3;
+/** 已经在追着说了：「我自己这边好了」这类进度话就别再追着说 */
+const EXTRA_QUIET = 1;
 /** 凌晨他在睡：进度话一律不说，等他醒了自然会说上 */
 const SLEEP_FROM_MIN = 30; // 00:30
 const SLEEP_TO_MIN = 7 * 60; // 07:00
@@ -61,10 +63,12 @@ export function verdict(text: string, s: Silence = silence(), now = Date.now()):
     console.error("[dongni] 发送闸门没建起来：", e instanceof Error ? e.message : e);
   }
   const repeat = repeatedAlready(body, s);
+  // 硬上限：他连着没回时追着说的条数有上限，到这儿就静默到他先开口——有新由头也不说
+  if (s.extra >= MAX_EXTRA) return { ok: false, why: `他连着 ${s.extra} 条没回，到他先开口为止都不说了` };
   if (repeat.repeated) return { ok: false, why: repeat.why ?? "刚才说过同一件事" };
   // 自述（改好了、重启了、你试试、还没弄完）：他没问就别追着说
   if (selfNarration(body)) {
-    if (s.streak >= STREAK_LIMIT) return { ok: false, why: `他连着 ${s.streak} 条没回` };
+    if (s.extra >= EXTRA_QUIET) return { ok: false, why: `他连着 ${s.extra} 条没回` };
     if (inSleepHours(now)) return { ok: false, why: "凌晨他在睡" };
   }
   return { ok: true };

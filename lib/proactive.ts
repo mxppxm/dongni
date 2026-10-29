@@ -16,7 +16,7 @@ import { runTool } from "./tools";
  * 主动找对方：每隔一会儿想一想「现在有没有值得说的」，有就发一条，并弹系统通知。
  * 也会回看自己的毛病，有确凿问题时自己动手改（一天最多一次）。
  *
- * 不设次数、时段限制（对方要求）：发不发、什么时候发，全由她自己判断。
+ * 他还没回话时不许一直追着说：连发到 3 条就到头（见 quietGate / MAX_EXTRA）。
  */
 
 const state = ((globalThis as unknown as { __dongniProactive?: { running: boolean } }).__dongniProactive ??= { running: false });
@@ -55,28 +55,33 @@ function recentErrors() {
 type Decision = { send?: boolean; message?: string; improve?: string };
 
 /**
- * 他已经走了的判定：多久没说话、这之后自己连说了几条。
- * 光靠提示词拦不住——他五小时没回、明显不在电脑前，还是会被连着发二十多条催睡。
- * 所以先在这里用记录卡一道：连说两条都没回、且距他最后一句超过 40 分钟，就不再开口。
+ * 他还没回话时的开口规矩。光靠提示词拦不住——他五小时没回、明显不在电脑前，还是被连着发了三十条。
+ * 所以在这里用记录卡两道：
+ * 1）他一条都没回（除了本该回他的那句）时默认闭嘴，只有真新由头（他提过的事到点、新报错）才开口；
+ * 2）连着追到 3 条就到头，静默到他先开口，再有新由头也不说。
  */
-const AWAY_MS = 40 * 60_000;
-const AWAY_ROUNDS = 2;
+const MAX_EXTRA = 3;
 /** 他说过的事在这一小时内到点，算新由头 */
 const DUE_WINDOW_MS = 60 * 60_000;
+/** 日志里这些是自己会重试、会兜底的小毛病，不算「新报错」，不值得为它去打扰他 */
+const ERR_ROUTINE = /第 \d+ 次(回复失败|没接上话)|几次都没接上话|写库失败/;
 
 /** 这轮还非说不可的理由：日志里真有新报错，或者他说过的事到点了。没有就是 null */
 function freshReason(errors: string): string | null {
-  if (errors.trim()) return "运行日志里出现了新的报错";
+  if (errors.split("\n").some((l) => l.trim() && !ERR_ROUTINE.test(l))) return "运行日志里出现了新的报错";
   const now = Date.now();
   const due = pendingReminders().find((r) => r.at - now <= DUE_WINDOW_MS);
   return due ? `他说过的事到点了：${due.text}` : null;
 }
 
-/** 他不在、又没有新由头：这轮不该发 */
-export function awayGate(s: Silence, errors: string): { blocked: boolean; reason: string | null } | null {
-  if (!(s.sinceMs >= AWAY_MS && s.streak >= AWAY_ROUNDS)) return null;
+export type QuietGate = { block: boolean; capped: boolean; reason: string | null };
+
+/** 他还没回话、这轮该不该开口 */
+export function quietGate(s: Silence, errors: string): QuietGate {
   const reason = freshReason(errors);
-  return { blocked: !reason, reason };
+  if (s.extra >= MAX_EXTRA) return { block: true, capped: true, reason };
+  if (s.extra >= 1 && !reason) return { block: true, capped: false, reason: null };
+  return { block: false, capped: false, reason };
 }
 
 export async function proactiveTick() {
@@ -102,7 +107,7 @@ export async function proactiveTick() {
     const said = repeatContext(quiet);
     // 日志只看一次：既当「新由头」用，也贴进提示词；先看掉后面就捞不着了
     const errors = recentErrors();
-    const away = awayGate(quiet, errors);
+    const gate = quietGate(quiet, errors);
 
     const r = await completeJson<Decision>([
       {
@@ -125,7 +130,13 @@ ${SPEAKING}
 不该发的：没有具体由头的「在吗」「最近怎么样」；重复你最近已经说过的；说教；太长。
 要发的话，就按上面那套说话方式来写：一两句、口语、具体、接得上你们上次聊的话头，不要客套开场白。没有值得说的就 send=false，宁缺毋滥。
 
-${away ? (away.blocked ? `【这轮别开口】${said.silent}连说两条他都没回，他多半已经不在电脑前、睡下了。这轮只能是 send=false，message 留空；除非有真正的新由头（他提过的事到点了、你刚发现的新报错），否则一个字都别发。\n` : `【这轮只能说这一件】${away.reason}——就着这个事说一句，别顺带催睡、催回家、问他还在不在。\n`) : ""}
+${gate.capped
+  ? `【这轮别开口】${said.silent}连发已经到上限了：除非他先开口，否则一个字都别发。这轮只能是 send=false，message 留空。\n`
+  : gate.block
+    ? `【这轮别开口】${said.silent}他还没回话，多半在忙或者已经不在电脑前了。这轮只能是 send=false，message 留空；除非有真正的新由头（他提过的事到点了、你刚发现的新报错），否则一个字都别发。\n`
+    : gate.reason
+      ? `【这轮只能说这一件】${gate.reason}——就着这个事说一句，别顺带催睡、催回家、问他还在不在。\n`
+      : ""}
 【别复读】下面是对方上一条消息之后你自己说过的话（从早到晚）。同一件事、同一个意思，说过一次就别再说了——换个说法、换个时间点，对他都是同一句废话：
 - 催睡、催回家、问到家了没：一个晚上最多一次
 - 「我改好了」「你试试」「还差一点」这类进度话：说一次就够
@@ -149,25 +160,26 @@ ${
       },
     ]);
 
-    if (r.send && r.message?.trim() && away?.blocked) {
-      // 模型不听话：他不在、也没新由头，硬拦下来
-      console.log(`[dongni] 主动消息没发：${said.silent}没新由头，不打扰他了`);
-    }
-    if (r.send && r.message?.trim() && !away?.blocked) {
+    if (r.send && r.message?.trim()) {
       const text = r.message.trim();
-      // 发之前统一过一道闸：这句话最近说过、或者他沉默/睡着了还在自述，就不发（模型常常不听提示词，硬拦一道）
-      const v = verdict(text, quiet);
-      if (!v.ok) {
-        console.log(`[dongni] 主动消息没发：${v.why}——${text}`);
+      if (gate.block) {
+        // 模型不听话：他还没回话、连发到上限，或者没有新由头——一律硬拦
+        console.log(`[dongni] 主动消息没发：${gate.capped ? "连发到上限了，等他先开口" : "他还没回话，也没有新由头"}——${text}`);
       } else {
-        postAssistant(text);
-        const id = (d.prepare("SELECT MAX(id) m FROM messages").get() as { m: number }).m;
-        setKv("proactive_last_id", String(id));
-        setKv("proactive_last_at", String(now));
-        setKv("proactive_day", today);
-        setKv("proactive_count", String(todayCount + 1));
-        notify(text);
-        console.log(`[dongni] 主动发消息：${text}`);
+        // 发之前统一过一道闸：这句话最近说过、或者他沉默/睡着了还在自述，就不发（模型常常不听提示词，硬拦一道）
+        const v = verdict(text, quiet);
+        if (!v.ok) {
+          console.log(`[dongni] 主动消息没发：${v.why}——${text}`);
+        } else {
+          postAssistant(text);
+          const id = (d.prepare("SELECT MAX(id) m FROM messages").get() as { m: number }).m;
+          setKv("proactive_last_id", String(id));
+          setKv("proactive_last_at", String(now));
+          setKv("proactive_day", today);
+          setKv("proactive_count", String(todayCount + 1));
+          notify(text);
+          console.log(`[dongni] 主动发消息：${text}`);
+        }
       }
     }
     if (canImprove && r.improve?.trim()) {
