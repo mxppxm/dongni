@@ -39,6 +39,12 @@ export type ChatMessage =
   | { role: "tool"; content: string; tool_call_id: string };
 
 /** 网络抖动或 5xx 时自动重试两次（还没开始出字，重试不会重复内容） */
+/**
+ * 跟他聊天（她说出口的话）用 Kimi K3：比 flash 灵，会接梗、会用上自己的小日子。
+ * 后台的活（整理记忆、挑表情、写日记、配文）仍走 pi 的默认模型，便宜够用。
+ */
+const CHAT_MODEL = process.env.DONGNI_CHAT_MODEL || "kimi/kimi-k3";
+
 async function post(body: Record<string, unknown>, signal?: AbortSignal) {
   const r = route();
   let lastErr: unknown;
@@ -209,7 +215,7 @@ async function* streamOnce(
   try {
     arm();
     const res = await post(
-      { messages: slimMessages(messages, level), stream: true, reasoning_effort: process.env.DONGNI_CHAT_REASONING || "low", max_tokens: 16000, temperature: 0.85, ...(tools ? { tools } : {}) },
+      { model: CHAT_MODEL, messages: slimMessages(messages, level), stream: true, reasoning_effort: process.env.DONGNI_CHAT_REASONING || "low", max_tokens: 16000, temperature: 0.85, ...(tools ? { tools } : {}) },
       ac.signal,
     );
     const reader = res.body!.getReader();
