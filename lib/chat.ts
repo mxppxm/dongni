@@ -4,6 +4,7 @@ import { streamChat, type ChatMessage, type ContentPart } from "./llm";
 import { CAPABILITIES } from "./capabilities";
 import { pickMood } from "./moods";
 import { wardrobeNote } from "./wardrobe";
+import { todayMe } from "./todayme";
 import { recentDiary } from "./diary";
 import { HONESTY, selfState } from "./selfstate";
 import { addUploadedImage, getImage, imageDataUrl, imageIdsIn, imageMarkdown, stripImageMarkdown } from "./images";
@@ -81,6 +82,7 @@ ${CAPABILITIES}
 
 【你自己今天】
 ${myself || "（不清楚）"}
+${todayMe() ? `\n【今天的你】（你的小日子，聊天时可以自然地拿出来分享）\n${todayMe()}` : ""}
 
 【你最近的日记】（你自己写的，用来记得前几天的事）
 ${recentDiary(3).map((d) => `${d.date}：${d.text}`).join("\n") || "（还没写过）"}

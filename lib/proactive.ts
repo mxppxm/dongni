@@ -13,6 +13,7 @@ import { INTRO, PERSONA, SPEAKING } from "./persona";
 import { pendingReminders } from "./reminders";
 import { postAssistant, startRepair } from "./selfrepair";
 import { HONESTY, selfState } from "./selfstate";
+import { todayMe } from "./todayme";
 import { runTool } from "./tools";
 
 /**
@@ -229,6 +230,9 @@ ${HONESTY}
 
 ${INTRO}
 
+【今天的你】
+${todayMe() || "（还没写）"}
+
 ${PERSONA}
 
 ${SPEAKING}
@@ -242,7 +246,8 @@ ${SPEAKING}
 - 你想到一个和对方兴趣、在做的事真正相关的点子或信息
 - 上次聊到一半没说完的话题
 
-不该发的：没有具体由头的「在吗」「最近怎么样」；重复你最近已经说过的；说教；太长。
+不该发的：没有具体由头的「在吗」「最近怎么样」；重复你最近已经说过的；说教；太长；任何关于日志、报错、修复、代码、后台的事（那是你自己的事，不拿来烦他）。
+也可以发的：你今天小日子里的事（见【今天的你】）、你刚想到的好玩的念头、一个想问他的问题——像朋友随手发来一条。
 要发的话，就按上面那套说话方式来写：一两句、口语、具体、接得上你们上次聊的话头，不要客套开场白。没有值得说的就 send=false，宁缺毋滥。
 
 ${gate.block
