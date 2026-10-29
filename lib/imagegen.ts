@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { getKv, setKv } from "./db";
 import { addImageBuffer, imageMarkdown } from "./images";
 
 /**
@@ -20,7 +21,64 @@ const SKILL_DIR = path.join(os.homedir(), ".agents", "skills", "gptimg");
 const SCRIPT = path.join(SKILL_DIR, "scripts", "gptimg.mjs");
 const TIMEOUT_MS = 5 * 60_000;
 
+/**
+ * 「生图到底能不能用」只认证据：真的画出来过一张图，才叫能用。
+ * 每次真的调用（成功或失败）都把结果和真实原因记在 kv 里；
+ * 没说过的、没试过的，状态就是「没验证过」——不许说成好的。
+ */
+const PROOF_KEY = "imagegen_proof";
+const PROBE_PROMPT = "一朵白色小花，浅灰背景，极简";
+const PROBE_TIMEOUT_MS = 90_000;
+const PROOF_FRESH_MS = 10 * 60_000;
+
 export type GenOutcome = { ok: true; markdown: string } | { ok: false; message: string };
+export type GenProof = { at: number; ok: boolean; why: string; id?: number };
+
+function keepProof(ok: boolean, why: string, id?: number) {
+  try {
+    setKv(PROOF_KEY, JSON.stringify({ at: Date.now(), ok, why: why.slice(0, 200), id } satisfies GenProof));
+  } catch {
+    // 记不下也不影响这次出图
+  }
+}
+
+export function lastGenProof(): GenProof | null {
+  try {
+    const v = getKv(PROOF_KEY);
+    const p = v ? (JSON.parse(v) as GenProof) : null;
+    return p && typeof p.at === "number" ? p : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 用一句话说清生图现在的真实状态（写进提示词，她照着说） */
+export function imagegenStatus(): string {
+  const p = lastGenProof();
+  if (!p) return "生图：还没真画出来过一次（没验证过）。要说自己能画，先用 generate_image 真画一张；在那之前就说没试过。";
+  const mins = Math.max(1, Math.round((Date.now() - p.at) / 60000));
+  if (p.ok) return `生图：${mins} 分钟前真的画出来过一张${p.id ? `（第 ${p.id} 张）` : ""}，能用。`;
+  return `生图：${mins} 分钟前真的试着画了一张，没画出来，真实原因是：${p.why}。这就是生图现在的真实状态——别说是好的，别说是修好了。`;
+}
+
+/** 真调一次生成接口拿图：拿到才算通过，拿不到就把真实原因留着；十分钟内试过的不重复花钱试 */
+let proving: Promise<GenProof | null> | null = null;
+export async function proveImagegen(): Promise<GenProof | null> {
+  const last = lastGenProof();
+  if (last && Date.now() - last.at < PROOF_FRESH_MS) return last;
+  if (proving) return proving;
+  proving = (async () => {
+    await generateImage(PROBE_PROMPT, { quality: "low", timeoutMs: PROBE_TIMEOUT_MS });
+    const p = lastGenProof();
+    console.log(`[dongni] 生图自检：${p?.ok ? "画出来了" : `没画出来（${p?.why ?? "不知道什么原因"}）`}`);
+    return p;
+  })()
+    .catch(() => lastGenProof())
+    .finally(() => {
+      proving = null;
+    });
+  return proving;
+}
 
 /** key 在 skill 目录的 .env 里（也可能在环境变量里）：缺了先照实说，别等脚本跑一半才失败 */
 function notInstalled(): string | null {
@@ -35,9 +93,9 @@ function notInstalled(): string | null {
 }
 
 /** 脚本的报错原话在 stderr 里，e.message 只有一行 Command failed，看不出毛病 */
-function whyFailed(e: unknown) {
+function whyFailed(e: unknown, timeoutMs: number) {
   const err = e as { stderr?: string; message?: string; killed?: boolean; signal?: string };
-  if (err.killed || err.signal) return `画图卡住了（${Math.round(TIMEOUT_MS / 60_000)} 分钟没画完）`;
+  if (err.killed || err.signal) return `画图卡住了（${Math.round(timeoutMs / 1000)} 秒没画完）`;
   const lines = String(err.stderr ?? "")
     .split("\n")
     .map((l) => l.trim())
@@ -46,21 +104,24 @@ function whyFailed(e: unknown) {
   return last.slice(0, 160) || "不知道什么原因";
 }
 
-export async function generateImage(prompt: string): Promise<GenOutcome> {
+export async function generateImage(prompt: string, opts?: { quality?: "low" | "medium" | "high" | "auto"; timeoutMs?: number }): Promise<GenOutcome> {
   const p = prompt.trim();
   if (!p) return { ok: false, message: "没说要画什么，先问清一句再画。" };
   const missing = notInstalled();
   if (missing) {
     console.error(`[dongni] 画不了：${missing}`);
+    keepProof(false, missing);
     return { ok: false, message: `画不了，真实原因是：${missing}。跟他用大白话说这个原因，别说成「我不愿意画」或者别的。` };
   }
 
+  const quality = opts?.quality ?? "medium";
+  const timeoutMs = opts?.timeoutMs ?? TIMEOUT_MS;
   const out = path.join(os.tmpdir(), `dongni-gen-${crypto.randomUUID()}.png`);
   try {
     const { stdout } = await run(
       process.execPath,
-      [SCRIPT, p, "-o", out, "--size", "1024x1024", "--quality", "medium", "--json"],
-      { timeout: TIMEOUT_MS, maxBuffer: 20 << 20 },
+      [SCRIPT, p, "-o", out, "--size", "1024x1024", "--quality", quality, "--json"],
+      { timeout: timeoutMs, maxBuffer: 20 << 20 },
     );
     const info = JSON.parse(stdout.trim()) as { files?: string[] };
     const file = info.files?.[0];
@@ -68,10 +129,12 @@ export async function generateImage(prompt: string): Promise<GenOutcome> {
     const buf = fs.readFileSync(file);
     fs.rmSync(file, { force: true });
     const rec = addImageBuffer(buf, "image/png", "gen", p);
+    keepProof(true, "", rec.id);
     console.log(`[dongni] 画好一张图 #${rec.id}`);
     return { ok: true, markdown: imageMarkdown(rec.id) };
   } catch (e) {
-    const why = whyFailed(e);
+    const why = whyFailed(e, timeoutMs);
+    keepProof(false, why);
     console.warn(`[dongni] 画图失败：${why}`);
     return {
       ok: false,

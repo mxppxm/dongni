@@ -1,6 +1,7 @@
 import "server-only";
 import { db } from "./db";
 import { diaryOf } from "./diary";
+import { imagegenStatus } from "./imagegen";
 import { moodGenerating } from "./moods";
 import { pendingReminders } from "./reminders";
 import { repairStatus } from "./selfrepair";
@@ -14,6 +15,7 @@ import { voiceReady } from "./voiceconfig";
 export function selfState(): string {
   const lines: string[] = [];
   lines.push(repairStatus());
+  lines.push(imagegenStatus());
   const mood = moodGenerating();
   lines.push(mood ? `正在给自己画新样子「${mood}」。` : "没有在画新样子。");
   try {
