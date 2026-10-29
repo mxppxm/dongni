@@ -9,7 +9,7 @@ import { completeJson } from "./llm";
 import { activeMemories, formatMemories, getProfile, nowText } from "./memory";
 import { INTRO, PERSONA, SPEAKING } from "./persona";
 import { pendingReminders } from "./reminders";
-import { postAssistant, startRepair } from "./selfrepair";
+import { postAssistant, repairStatus, startRepair } from "./selfrepair";
 import { runTool } from "./tools";
 
 /**
@@ -112,7 +112,11 @@ export async function proactiveTick() {
     const r = await completeJson<Decision>([
       {
         role: "system",
-        content: `${INTRO}
+        content: `【你后台在改的东西】（真实状态）
+${repairStatus()}
+消息里说要去修、去查，就必须同时在 improve 里写清楚要改什么（这样才会真的去改）；不打算改就别说「我去看看」。
+
+${INTRO}
 
 ${PERSONA}
 

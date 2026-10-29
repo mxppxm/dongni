@@ -113,6 +113,21 @@ export function repairRunning() {
   return state.running;
 }
 
+/** 后台改代码的真实状态（给她看，免得她说「在修」其实啥也没在跑） */
+export function repairStatus() {
+  const q = queue();
+  const lastAt = Number(getKv("repair_last_at") ?? 0);
+  const ago = (t: number) => `${Math.max(1, Math.round((Date.now() - t) / 60000))} 分钟前`;
+  const lines = [
+    state.running
+      ? `正在改：「${state.running}…」（${ago(Number(getKv("repair_started_at") ?? Date.now()))}开始的）`
+      : "现在后台没有在改任何东西。",
+  ];
+  if (q.length) lines.push(`排队等着改的还有 ${q.length} 件：${q.map((x) => `「${x.slice(0, 24)}…」`).join("、")}`);
+  if (lastAt) lines.push(`上一次改完是 ${ago(lastAt)}：${getKv("repair_last_result") ?? ""}`);
+  return lines.join("\n");
+}
+
 /** 改动排队：正在改的时候来的新要求先存起来（存库里，重启也不丢），一个改完接着下一个 */
 function queue(): string[] {
   try {
@@ -138,6 +153,7 @@ export function startRepair(request: string): string {
     return "前面还有一处正在改，这个已经排上队了：前一个改完（可能会重启一下）就接着改这个。如实告诉对方要排一会儿。";
   }
   state.running = request.slice(0, 40);
+  setKv("repair_started_at", String(Date.now()));
   let restarting = false;
   void (async () => {
     let good = "";
@@ -188,6 +204,8 @@ export function startRepair(request: string): string {
       }
       await say(`这次改自己没改成，已经退回原样，什么都没坏。原因（技术细节别说）：${msg.slice(0, 200)}`, "这次没改成，已经退回原样了，啥也没坏。");
     } finally {
+      setKv("repair_last_at", String(Date.now()));
+      setKv("repair_last_result", `${restarting ? "改好了" : "没改成或没改动"}（${request.slice(0, 30)}…）`);
       state.running = null;
       // 要重启的话交给重启后的新进程接着改，否则这里直接接着改下一个
       if (!restarting) setTimeout(drainRepairQueue, 1000);
