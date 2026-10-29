@@ -3,8 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { myName, notify } from "./notify";
 import { db, getKv, setKv, type MessageRow } from "./db";
-import { repeatContext, silence, type Silence } from "./dedupe";
-import { verdict, type SayVerdict } from "./send";
+import { reasonFresh, repeatContext, silence, type Silence } from "./dedupe";
+import { usedReason, verdict, type SayVerdict } from "./send";
 import { enqueueProactive, flushOutbox } from "./outbox";
 import { completeJson } from "./llm";
 import { activeMemories, formatMemories, getProfile, nowText } from "./memory";
@@ -18,7 +18,9 @@ import { runTool } from "./tools";
  * 主动找对方：每隔一会儿想一想「现在有没有值得说的」，有就发一条，并弹系统通知。
  * 也会回看自己的毛病，有确凿问题时自己动手改（一天最多一次）。
  *
- * 他还没回话时不许一直追着说：连发到 3 条就到头（见 quietGate / MAX_EXTRA）。
+ * 他还没回话时不是一律闭嘴：没有新的具体由头（新报错、他提过的事到点）就不发，
+ * 有就允许说一条，同一个由头只一次（见 quietGate 和 lib/send.ts 的 verdict）。
+ * 他忙的时候她不能彻底没了动静。
  */
 
 const state = ((globalThis as unknown as { __dongniProactive?: { running: boolean } }).__dongniProactive ??= { running: false });
@@ -58,25 +60,26 @@ type Decision = { send?: boolean; message?: string; improve?: string };
 
 /**
  * 他还没回话时的开口规矩。光靠提示词拦不住——他五小时没回、明显不在电脑前，还是被连着发了三十条。
- * 所以在这里用记录卡两道：
- * 1）他一条都没回（除了本该回他的那句）时默认闭嘴，只有真新由头（他提过的事到点、新报错）才开口；
- * 2）连着追到 3 条就到头，静默到他先开口，再有新由头也不说。
+ * 所以在这里用记录卡：没有真正新的由头就不开口；有由头才能说一条，同一个由头不重复用
+ * （由头的新鲜度记在 lib/dedupe.ts 的 said_reasons，是真的发出去才记账）。
  */
-const MAX_EXTRA = 3;
 /** 他说过的事在这一小时内到点，算新由头 */
 const DUE_WINDOW_MS = 60 * 60_000;
 /** 日志里这些是自己会重试、会兜底的小毛病，不算「新报错」，不值得为它去打扰他 */
 const ERR_ROUTINE = /第 \d+ 次(回复失败|没接上话)|几次都没接上话|写库失败/;
 
+type Reason = { text: string; sig: string };
+
 /** 这轮还非说不可的理由：日志里真有新报错，或者他说过的事到点了。没有就是 null */
-function freshReason(errors: string): string | null {
-  if (errors.split("\n").some((l) => l.trim() && !ERR_ROUTINE.test(l))) return "运行日志里出现了新的报错";
+function freshReason(errors: string): Reason | null {
+  const err = errors.split("\n").find((l) => l.trim() && !ERR_ROUTINE.test(l));
+  if (err) return { text: "运行日志里出现了新的报错", sig: `报错：${err.trim()}` };
   const now = Date.now();
   const due = pendingReminders().find((r) => r.at - now <= DUE_WINDOW_MS);
-  return due ? `他说过的事到点了：${due.text}` : null;
+  return due ? { text: `他说过的事到点了：${due.text}`, sig: `到点：${due.text}` } : null;
 }
 
-export type QuietGate = { block: boolean; capped: boolean; reason: string | null };
+export type QuietGate = { block: boolean; reason: string | null; sig: string | null };
 
 /** 一句话没送出去时，日志和补发队列都要知道断在哪一步 */
 const why = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -86,11 +89,11 @@ const why = (e: unknown) => (e instanceof Error ? e.message : String(e));
  * 话已经在手里了，就不能因为某一步出错整条静默消失——断在哪一步都写进日志，
  * 没落进对话的那句存进发件箱（lib/outbox.ts），重启后补发一次。
  */
-function deliver(text: string, quiet: Silence, today: string, todayCount: number) {
-  // 第 1 步：发之前的闸——这句话最近说过、或者他沉默/睡着了还在自述，就不发（模型常常不听提示词，硬拦一道）
+function deliver(text: string, quiet: Silence, today: string, todayCount: number, reasonSig: string | null) {
+  // 第 1 步：发之前的闸——这句话最近说过、或者他还没回话这句又没新由头，就不发（模型常常不听提示词，硬拦一道）
   let v: SayVerdict;
   try {
-    v = verdict(text, quiet);
+    v = verdict(text, quiet, Date.now(), reasonSig);
   } catch (e) {
     console.warn(`[dongni] 主动消息第 1 步 开口前的闸（verdict）失手，照原样发：${why(e)}`);
     v = { ok: true };
@@ -109,6 +112,8 @@ function deliver(text: string, quiet: Silence, today: string, todayCount: number
   }
   // 第 3 步：记账——话已经发出去了，这步出错只影响以后的去重，不再补发，免得同一句出现两次
   try {
+    // 这条由头用掉了：同一个由头不能再换个说法说一遍
+    usedReason(reasonSig);
     const id = (db().prepare("SELECT MAX(id) m FROM messages").get() as { m: number }).m;
     setKv("proactive_last_id", String(id));
     setKv("proactive_last_at", String(Date.now()));
@@ -126,12 +131,14 @@ function deliver(text: string, quiet: Silence, today: string, todayCount: number
   console.log(`[dongni] 主动发消息：${text}`);
 }
 
-/** 他还没回话、这轮该不该开口 */
+/** 他还没回话、这轮该不该开口：没有新的具体由头就不开，有就开一条 */
 export function quietGate(s: Silence, errors: string): QuietGate {
   const reason = freshReason(errors);
-  if (s.extra >= MAX_EXTRA) return { block: true, capped: true, reason };
-  if (s.extra >= 1 && !reason) return { block: true, capped: false, reason: null };
-  return { block: false, capped: false, reason };
+  // 他回过话（或者刚接完他那句）：照常，有由头就优先说那件事
+  if (s.extra < 1) return { block: false, reason: reason?.text ?? null, sig: reason?.sig ?? null };
+  // 他还没回话：只认还没用过的由头，其余这轮别开口
+  if (!reason || !reasonFresh(reason.sig)) return { block: true, reason: null, sig: null };
+  return { block: false, reason: reason.text, sig: reason.sig };
 }
 
 export async function proactiveTick() {
@@ -187,13 +194,11 @@ ${SPEAKING}
 不该发的：没有具体由头的「在吗」「最近怎么样」；重复你最近已经说过的；说教；太长。
 要发的话，就按上面那套说话方式来写：一两句、口语、具体、接得上你们上次聊的话头，不要客套开场白。没有值得说的就 send=false，宁缺毋滥。
 
-${gate.capped
-  ? `【这轮别开口】${said.silent}连发已经到上限了：除非他先开口，否则一个字都别发。这轮只能是 send=false，message 留空。\n`
-  : gate.block
-    ? `【这轮别开口】${said.silent}他还没回话，多半在忙或者已经不在电脑前了。这轮只能是 send=false，message 留空；除非有真正的新由头（他提过的事到点了、你刚发现的新报错），否则一个字都别发。\n`
-    : gate.reason
-      ? `【这轮只能说这一件】${gate.reason}——就着这个事说一句，别顺带催睡、催回家、问他还在不在。\n`
-      : ""}
+${gate.block
+  ? `【这轮别开口】${said.silent}他还没回话，多半在忙或者已经不在电脑前了。这轮只能是 send=false，message 留空；只有真正新的由头（他提过的事到点了、你刚发现的新报错）才算数，没有就别出声。\n`
+  : gate.reason
+    ? `【这轮只能说这一件】${gate.reason}——就着这个事说一句，别顺带催睡、催回家、问他还在不在。\n`
+    : ""}
 【别复读】下面是对方上一条消息之后你自己说过的话（从早到晚）。同一件事、同一个意思，说过一次就别再说了——换个说法、换个时间点，对他都是同一句废话：
 - 催睡、催回家、问到家了没：一个晚上最多一次
 - 「我改好了」「你试试」「还差一点」这类进度话：说一次就够
@@ -225,10 +230,10 @@ ${
     if (r.send && r.message?.trim()) {
       const text = r.message.trim();
       if (gate.block) {
-        // 模型不听话：他还没回话、连发到上限，或者没有新由头——一律硬拦
-        console.log(`[dongni] 主动消息没发：${gate.capped ? "连发到上限了，等他先开口" : "他还没回话，也没有新由头"}——${text}`);
+        // 模型不听话：他还没回话、又没有新的具体由头——硬拦
+        console.log(`[dongni] 主动消息没发：他还没回话，这一句也没有新的由头——${text}`);
       } else {
-        deliver(text, quiet, today, todayCount);
+        deliver(text, quiet, today, todayCount, gate.sig);
       }
     }
     if (canImprove && r.improve?.trim()) {

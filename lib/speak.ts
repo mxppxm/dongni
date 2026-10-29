@@ -1,7 +1,7 @@
 import "server-only";
 import { db, type MessageRow } from "./db";
 import { repeatContext, silence } from "./dedupe";
-import { suppress, verdict } from "./send";
+import { suppress, usedReason, verdict } from "./send";
 import { streamChat } from "./llm";
 import { nowText } from "./memory";
 import { INTRO, PERSONA, SPEAKING } from "./persona";
@@ -21,7 +21,8 @@ export async function speakAsHer(what: string, fallback: string): Promise<string
       .join("\n");
     let out = "";
     // 前不久刚说过什么：同一件事别一遍遍换个说法再说（重启、让他去试、催他睡最容易复读）
-    const said = repeatContext(silence(5));
+    const quiet = silence(5);
+    const said = repeatContext(quiet);
     const run = (async () => {
       for await (const ev of streamChat([
         {
@@ -36,11 +37,16 @@ export async function speakAsHer(what: string, fallback: string): Promise<string
     const got = await Promise.race([run, new Promise<string>((ok) => setTimeout(() => ok(""), 30_000))]);
     const text = got && got.length < 600 ? got : fallback;
     // 自我修复那条路（内核文件）自己会把这句话写进对话，这里只能先判定、再把它登记掉：
-    // 说过一遍的、他连着几条没回的、凌晨他睡着时候的自述，一律不落到对话里。
-    const v = verdict(text);
+    // 说过一遍的、凌晨他睡着时的自述，一律不落到对话里。
+    // 但「刚做完的改动结果」本身就算新的由头：他没回话也能说一条，同一个结果不重复说。
+    // 由头用 fallback（这是这件事最短的原话）认，同一件事的说明文字里带了多少细节都一样。
+    const reason = `你自己这边的事：${fallback}`;
+    const v = verdict(text, quiet, Date.now(), reason);
     if (!v.ok) {
       suppress(text);
       console.log(`[dongni] 这句话没发：${v.why}——${text}`);
+    } else {
+      usedReason(reason);
     }
     return text;
   } catch {

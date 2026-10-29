@@ -178,6 +178,56 @@ export function repeatedAlready(text: string, s: Silence = silence()): RepeatChe
   return { repeated: false };
 }
 
+/**
+ * 由头：这一句凭什么是现在说——新发现的报错、他提过的事到点、刚做完的改动结果。
+ * 他还没回话的时候允许为新的由头开口一条，但同一个由头只说一次，不能同一件事换个说法又来。
+ * 同一件报错每轮都被重新扫出来、同一件到点的事被反复算成「刚发生」，靠这张表挡住。
+ */
+const REASON_WINDOW = 6 * 3600_000;
+const REASON_KEEP = 7 * 24 * 3600_000;
+
+/** 由头的指纹：时间戳、数字、标点都去掉，同一件事的同一个由头落到同一个串上 */
+function reasonSig(reason: string) {
+  return stripImageMarkdown(reason)
+    .replace(/\d{4}-\d{2}-\d{2}[T ][\d:.,+-]+Z?/g, " ")
+    .replace(/\d+/g, "")
+    .replace(/[\s\p{P}\p{S}]/gu, "")
+    .toLowerCase()
+    .slice(0, 120);
+}
+
+function ensureReasons() {
+  db().exec("CREATE TABLE IF NOT EXISTS said_reasons (sig TEXT PRIMARY KEY, at INTEGER NOT NULL)");
+}
+
+/** 这个由头还是新的吗（这段时间内没为它开过口） */
+export function reasonFresh(reason: string): boolean {
+  const sig = reasonSig(reason);
+  if (!sig) return true;
+  try {
+    ensureReasons();
+    const row = db().prepare("SELECT at FROM said_reasons WHERE sig = ?").get(sig) as { at: number } | undefined;
+    return !row || Date.now() - row.at > REASON_WINDOW;
+  } catch {
+    return true;
+  }
+}
+
+/** 这个由头用掉了：话真的发出去之后才记，被拦下的不算 */
+export function noteReason(reason: string) {
+  const sig = reasonSig(reason);
+  if (!sig) return;
+  try {
+    ensureReasons();
+    const now = Date.now();
+    const d = db();
+    d.prepare("DELETE FROM said_reasons WHERE at < ?").run(now - REASON_KEEP);
+    d.prepare("INSERT INTO said_reasons(sig, at) VALUES(?, ?) ON CONFLICT(sig) DO UPDATE SET at = excluded.at").run(sig, now);
+  } catch (e) {
+    console.warn("[dongni] 由头没记上：", e instanceof Error ? e.message : e);
+  }
+}
+
 /** 给模型的上下文：她自己最近说过什么、对方多久没回了 */
 export function repeatContext(s: Silence = silence()) {
   const now = Date.now();
