@@ -1,4 +1,5 @@
 import "server-only";
+import { gptimgDir } from "./portable";
 import { execFile } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -17,7 +18,7 @@ import { addImageBuffer, imageMarkdown } from "./images";
  * 记忆里却记着「生图没问题」，两边对不上，全靠嘴解释。
  */
 const run = promisify(execFile);
-const SKILL_DIR = path.join(os.homedir(), ".agents", "skills", "gptimg");
+const SKILL_DIR = gptimgDir();
 const SCRIPT = path.join(SKILL_DIR, "scripts", "gptimg.mjs");
 const TIMEOUT_MS = 5 * 60_000;
 

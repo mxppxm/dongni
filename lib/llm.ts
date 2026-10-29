@@ -1,4 +1,5 @@
 import "server-only";
+import { LLM_CONFIG } from "./portable";
 import { AsyncLocalStorage } from "node:async_hooks";
 import fs from "node:fs";
 import os from "node:os";
@@ -15,6 +16,15 @@ type Route = { baseUrl: string; apiKey: string; model: string };
 let cache: { mtime: number; route: Route } | null = null;
 
 function route(): Route {
+  // 随包带来的线路（换电脑时用，没有 pi 也能跑）
+  if (fs.existsSync(LLM_CONFIG)) {
+    const mt = fs.statSync(LLM_CONFIG).mtimeMs;
+    if (cache && cache.mtime === mt) return cache.route;
+    const c = JSON.parse(fs.readFileSync(LLM_CONFIG, "utf8")) as Route;
+    const r = { baseUrl: String(c.baseUrl).replace(/\/$/, ""), apiKey: c.apiKey, model: process.env.DONGNI_MODEL || c.model };
+    cache = { mtime: mt, route: r };
+    return r;
+  }
   const modelsFile = path.join(PI_DIR, "models.json");
   const settingsFile = path.join(PI_DIR, "settings.json");
   const mtime = Math.max(fs.statSync(modelsFile).mtimeMs, fs.statSync(settingsFile).mtimeMs);

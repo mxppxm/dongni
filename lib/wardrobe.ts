@@ -1,4 +1,5 @@
 import "server-only";
+import { gptimgScript } from "./portable";
 import { execFile } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -19,7 +20,7 @@ const run = promisify(execFile);
 const ROOT = process.cwd();
 const DATA_DIR = process.env.DONGNI_DATA_DIR || path.join(ROOT, "data");
 const DIR = path.join(DATA_DIR, "wardrobe");
-const GPTIMG = path.join(os.homedir(), ".agents", "skills", "gptimg", "scripts", "gptimg.mjs");
+const GPTIMG = gptimgScript();
 const CHIBI = path.join(ROOT, "public", "mood", "anchor.png");
 const ANCHOR3D = path.join(DIR, "anchor3d.png");
 

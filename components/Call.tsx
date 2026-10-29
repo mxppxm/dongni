@@ -81,7 +81,7 @@ export default function Call({ onClose }: { onClose: () => void }) {
         const node = new AudioWorkletNode(ctx, "mic16k");
         src.connect(node);
 
-        ws = new WebSocket(`ws://${location.hostname === "localhost" ? "127.0.0.1" : location.hostname}:3940`);
+        ws = new WebSocket(`ws://${location.hostname === "localhost" ? "127.0.0.1" : location.hostname}:${Number(location.port || 80) + 1}`);
         ws.binaryType = "arraybuffer";
         node.port.onmessage = (e) => {
           if (ws?.readyState !== WebSocket.OPEN) return;

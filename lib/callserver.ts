@@ -21,7 +21,7 @@ import { wardrobeNote } from "./wardrobe";
  * 你一句说完，识别出的文字走普通聊天那条路生成回复，边生成边用 ChatTTSText 交给豆包念出来。
  * 豆包自己也会生成一个回复，那个不播（按 tts_type 区分，只放 chat_tts_text 的声音）。
  */
-const PORT = 3940;
+const PORT = Number(process.env.DONGNI_CALL_PORT) || 3940; // 页面按「网页端口 + 1」来连
 const URL = "wss://openspeech.bytedance.com/api/v3/realtime/dialogue";
 const APP_KEY = "PlgvMymc7f3tQnJ6";
 

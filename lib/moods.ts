@@ -1,4 +1,5 @@
 import "server-only";
+import { gptimgScript } from "./portable";
 import { execFile } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -17,7 +18,7 @@ const ROOT = process.cwd();
 const DATA_DIR = process.env.DONGNI_DATA_DIR || path.join(ROOT, "data");
 const MOOD_DIR = path.join(DATA_DIR, "moods");
 const ANCHOR = path.join(ROOT, "public", "mood", "anchor.png");
-const GPTIMG = path.join(os.homedir(), ".agents", "skills", "gptimg", "scripts", "gptimg.mjs");
+const GPTIMG = gptimgScript();
 
 /** 动作和小特效：前端有对应的 CSS，新画的样子只能从这里面挑 */
 export const PRESETS = ["ponder", "stride", "jump", "breathe", "scribble", "hi", "sway", "shake", "float"] as const;
@@ -144,8 +145,14 @@ im.thumbnail((200, 200), Image.LANCZOS)
 im.save(sys.argv[1], optimize=True)
 print("ok" if max(corners) < 20 else "opaque")
 `;
-  const { stdout } = await run("/usr/bin/python3", ["-c", py, file], { timeout: 60_000 });
-  return stdout.trim() === "ok";
+  try {
+    const { stdout } = await run("/usr/bin/python3", ["-c", py, file], { timeout: 60_000 });
+    return stdout.trim() === "ok";
+  } catch {
+    // 新电脑上可能没有 Python 的图片库：只缩小尺寸，透明与否交给自查那一步看
+    await run("/usr/bin/sips", ["-Z", "200", file, "--out", file]).catch(() => {});
+    return true;
+  }
 }
 
 async function review(file: string, name: string, pose: string): Promise<Review> {
