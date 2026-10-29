@@ -40,10 +40,10 @@ export type ChatMessage =
 
 /** 网络抖动或 5xx 时自动重试两次（还没开始出字，重试不会重复内容） */
 /**
- * 跟他聊天（她说出口的话）用 Kimi K3：比 flash 灵，会接梗、会用上自己的小日子。
- * 后台的活（整理记忆、挑表情、写日记、配文）仍走 pi 的默认模型，便宜够用。
+ * 跟他聊天用的模型。默认跟后台一样走 pi 的默认模型（flash，快）；
+ * 试过 Kimi K3：更灵，但首字 3～18 秒，太慢，他让切回来了。想再试可以设 DONGNI_CHAT_MODEL。
  */
-const CHAT_MODEL = process.env.DONGNI_CHAT_MODEL || "kimi/kimi-k3";
+const CHAT_MODEL = process.env.DONGNI_CHAT_MODEL || undefined;
 
 async function post(body: Record<string, unknown>, signal?: AbortSignal) {
   const r = route();
@@ -215,7 +215,7 @@ async function* streamOnce(
   try {
     arm();
     const res = await post(
-      { model: CHAT_MODEL, messages: slimMessages(messages, level), stream: true, reasoning_effort: process.env.DONGNI_CHAT_REASONING || "low", max_tokens: 16000, temperature: 0.85, ...(tools ? { tools } : {}) },
+      { ...(CHAT_MODEL ? { model: CHAT_MODEL } : {}), messages: slimMessages(messages, level), stream: true, reasoning_effort: process.env.DONGNI_CHAT_REASONING || "low", max_tokens: 16000, temperature: 0.85, ...(tools ? { tools } : {}) },
       ac.signal,
     );
     const reader = res.body!.getReader();
