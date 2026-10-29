@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { doubaoTts, doubaoTtsStream, ttsReady } from "./doubao";
+import { dialogEnabled, sayViaDialog } from "./dialogvoice";
 import { voiceConfig } from "./voiceconfig";
 
 /**
@@ -156,10 +157,14 @@ const lives = ((globalThis as unknown as { __dongniLive?: Map<string, Live> })._
 function fileFor(id: number, content: string) {
   const text = speakableText(content);
   if (!text) return null;
-  const voiceTag = `doubao:${voiceConfig().speaker || "default"}:acted2`;
+  const dialog = dialogEnabled();
+  const c = voiceConfig();
+  const voiceTag = dialog ? `dialog:${c.dialogSpeaker || "default"}` : `doubao:${c.speaker || "default"}:acted2`;
   const key = crypto.createHash("sha1").update(`${voiceTag}:${text}`).digest("hex").slice(0, 12);
-  return { text, file: path.join(AUDIO_DIR, `${id}-${key}.mp3`) };
+  return { text, dialog, file: path.join(AUDIO_DIR, `${id}-${key}.${dialog ? "ogg" : "mp3"}`) };
 }
+
+export const audioMime = (file: string) => (file.endsWith(".ogg") ? "audio/ogg" : file.endsWith(".wav") ? "audio/wav" : "audio/mpeg");
 
 /** 回复一写完就开始合成（页面来要的时候，往往已经出声了） */
 export function prepareVoice(id: number, content: string) {
@@ -175,10 +180,12 @@ export function prepareVoice(id: number, content: string) {
   const push = (b: Buffer | null) => live.subs.forEach((s) => s(b));
   void (async () => {
     try {
-      live.ok = await doubaoTtsStream(f.text, (b) => {
+      const onChunk = (b: Buffer) => {
         live.chunks.push(b);
         push(b);
-      });
+      };
+      // 端到端那副嗓子说不成（接口抽风），就退回语音合成 2.0，别让这条没声
+      live.ok = f.dialog ? (await sayViaDialog(f.text, onChunk)) || (await doubaoTtsStream(f.text, onChunk)) : await doubaoTtsStream(f.text, onChunk);
       if (live.ok) {
         fs.mkdirSync(AUDIO_DIR, { recursive: true });
         fs.writeFileSync(f.file, Buffer.concat(live.chunks));
@@ -197,7 +204,7 @@ export function prepareVoice(id: number, content: string) {
  * 给页面一条能边收边放的音频流：已经合成好就直接给文件；正在合成就接上（先补发已有的几段）；
  * 都没有就现在开始。合成失败返回 null，由调用方退回整段合成。
  */
-export function voiceStream(id: number, content: string): ReadableStream<Uint8Array> | string | null {
+export function voiceStream(id: number, content: string): { stream: ReadableStream<Uint8Array>; mime: string } | string | null {
   if (!ttsReady()) return null;
   const f = fileFor(id, content);
   if (!f) return null;
@@ -207,7 +214,8 @@ export function voiceStream(id: number, content: string): ReadableStream<Uint8Ar
   prepareVoice(id, content);
   const live = lives.get(f.file);
   if (!live) return null;
-  return new ReadableStream<Uint8Array>({
+  const mime = audioMime(f.file);
+  const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       for (const c of live.chunks) controller.enqueue(new Uint8Array(c));
       if (live.done) {
@@ -228,4 +236,5 @@ export function voiceStream(id: number, content: string): ReadableStream<Uint8Ar
       live.subs.add(sub);
     },
   });
+  return { stream, mime };
 }

@@ -20,6 +20,10 @@ export type VoiceConfig = {
   ttsResourceId: string;
   asrResourceId: string;
   cluster: string;
+  /** 用哪套声音：dialog = 豆包端到端实时语音（像真人聊天，会笑会叹气）；不填 = 语音合成 2.0 */
+  engine: string;
+  /** 端到端那套的音色（jupiter 系列） */
+  dialogSpeaker: string;
 };
 
 type Raw = Partial<VoiceConfig>;
@@ -55,6 +59,8 @@ export function voiceConfig(): VoiceConfig {
     ttsResourceId: str(raw.ttsResourceId),
     asrResourceId: str(raw.asrResourceId),
     cluster: str(raw.cluster),
+    engine: str(raw.engine),
+    dialogSpeaker: str(raw.dialogSpeaker),
   };
 }
 

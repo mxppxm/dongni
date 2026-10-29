@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { db, getKv, setKv, type MessageRow } from "./db";
+import { dialogEnabled, sayViaDialog } from "./dialogvoice";
 import { doubaoTts, ttsReady } from "./doubao";
 import { speakableText, synthesizeFallback } from "./tts";
 
@@ -150,8 +151,14 @@ export async function attachVoiceReply(assistantId: number, content: string): Pr
 
   // 豆包合成失败就退回原来的 edge-tts——声音可以不一样，但这条语音不能没声
   let audio: { buf: Buffer; mime: string } | null = null;
-  const got = await doubaoTts(said);
-  if (got) audio = { buf: got.audio, mime: got.mime };
+  if (dialogEnabled()) {
+    const parts: Buffer[] = [];
+    if (await sayViaDialog(said, (b) => parts.push(b))) audio = { buf: Buffer.concat(parts), mime: "audio/ogg" };
+  }
+  if (!audio) {
+    const got = await doubaoTts(said);
+    if (got) audio = { buf: got.audio, mime: got.mime };
+  }
   if (!audio) {
     try {
       const file = await synthesizeFallback(said);

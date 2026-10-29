@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import { db, type MessageRow } from "@/lib/db";
-import { synthesize, voiceStream } from "@/lib/tts";
+import { audioMime, synthesize, voiceStream } from "@/lib/tts";
 
 export const dynamic = "force-dynamic";
 
@@ -15,7 +15,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   // 豆包：边合成边放，第一段声音不到一秒就到
   const live = voiceStream(num, row.content);
   if (live && typeof live !== "string") {
-    return new Response(live, { headers: { "Content-Type": "audio/mpeg", "Cache-Control": "no-store" } });
+    return new Response(live.stream, { headers: { "Content-Type": live.mime, "Cache-Control": "no-store" } });
   }
 
   let file: string | null = typeof live === "string" ? live : null;
@@ -30,7 +30,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     const body = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer;
     return new Response(body, {
       headers: {
-        "Content-Type": "audio/mpeg",
+        "Content-Type": audioMime(file),
         "Content-Length": String(buf.byteLength),
         "Cache-Control": "public, max-age=31536000, immutable",
       },
