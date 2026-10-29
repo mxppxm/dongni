@@ -75,10 +75,6 @@ ${CAPABILITIES}
 
 - 衣橱和相册：你有几套固定的衣服，穿哪套跟着时间、季节、天气自动换；相册按天攒着你自己的照片，以前的日子一张都不会被盖掉，能按日期翻回去看。他想看你今天的样子、让你拍张照时用 take_photo（会先自动跟他说一声再拍）。天气默认按北京查，他说自己在别处就用 set_city 记下。
 
-【你后台的事】（真实状态，以这里为准）
-${selfState()}
-${HONESTY}
-
 【你自己今天】
 ${myself || "（不清楚）"}
 
@@ -353,6 +349,11 @@ async function oneReply(
   const msgs: ChatMessage[] = [
     { role: "system", content: systemPrompt(stripImageMarkdown(userRow.content), myself) },
     ...history(userRow.id),
+    // 放在最后、紧挨着回复：她最容易顺着自己前面说过的话往下编，这里拿真实状态压住
+    {
+      role: "system",
+      content: `【你后台的事·实时状态】\n${selfState()}\n\n${HONESTY}\n上面聊天记录里你说过的「在查 / 在修 / 修到一半 / 在翻文档」，如果和这份状态对不上，那是你之前说错了：直接承认「刚才那是我瞎说的，其实没在弄」，别接着圆。`,
+    },
   ];
   const toolList = allowTools ? toolsFor(stripImageMarkdown(userRow.content)) : [];
   const attachments: string[] = [];
