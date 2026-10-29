@@ -1,4 +1,5 @@
 import "server-only";
+import { AsyncLocalStorage } from "node:async_hooks";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -161,6 +162,9 @@ function timeoutError(message: string, phase: TimeoutPhase) {
 }
 
 /** 流式对话一轮。模型要用工具时，最后吐出一个 tools 事件。 */
+/** 打电话时要快：这一轮回复不深想（首字从两秒多降到一秒内）。在 callserver 里用 replyMode.run({ fast: true }, …) 包住 */
+export const replyMode = new AsyncLocalStorage<{ fast: boolean }>();
+
 export async function* streamChat(messages: ChatMessage[], tools?: unknown[]): AsyncGenerator<StreamEvent> {
   // 首包慢多半是网关排队、也可能是这一轮带的东西太多：一个字都还没出的时候超时了，
   // 就把上下文再砍一刀重发一次。已经出过字的不重来（重来会把同一段话说两遍）。
@@ -215,7 +219,7 @@ async function* streamOnce(
   try {
     arm();
     const res = await post(
-      { ...(CHAT_MODEL ? { model: CHAT_MODEL } : {}), messages: slimMessages(messages, level), stream: true, reasoning_effort: process.env.DONGNI_CHAT_REASONING || "high", max_tokens: 16000, temperature: 0.85, ...(tools ? { tools } : {}) },
+      { ...(CHAT_MODEL ? { model: CHAT_MODEL } : {}), messages: slimMessages(messages, level), stream: true, reasoning_effort: replyMode.getStore()?.fast ? "none" : process.env.DONGNI_CHAT_REASONING || "high", max_tokens: 16000, temperature: 0.85, ...(tools ? { tools } : {}) },
       ac.signal,
     );
     const reader = res.body!.getReader();

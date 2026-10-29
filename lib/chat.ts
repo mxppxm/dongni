@@ -383,7 +383,7 @@ async function oneReply(
 ) {
   const myself = await Promise.race([wardrobeNote().catch(() => ""), new Promise<string>((ok) => setTimeout(() => ok(""), 900))]);
   const msgs: ChatMessage[] = [
-    { role: "system", content: systemPrompt(stripImageMarkdown(userRow.content), myself, voiceIdsIn(userRow.content).length > 0) },
+    { role: "system", content: systemPrompt(stripImageMarkdown(userRow.content), myself, voiceIdsIn(userRow.content).length > 0 || !!userRow.client_id?.startsWith("call-")) },
     ...history(userRow.id),
     ...lastSentImages(userRow.id),
     // 放在最后、紧挨着回复：她最容易顺着自己前面说过的话往下编，这里拿真实状态压住
