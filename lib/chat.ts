@@ -112,6 +112,18 @@ function imageParts(ids: number[]): ContentPart[] {
   });
 }
 
+/** 她上一条发给他的图：让她看得见自己发了什么，他说「这不是你啊」时她才知道在说哪张 */
+function lastSentImages(userId: number): ChatMessage[] {
+  const prev = db()
+    .prepare("SELECT * FROM messages WHERE id < ? AND role = 'assistant' AND status = 'done' ORDER BY id DESC LIMIT 1")
+    .get(userId) as MessageRow | undefined;
+  const ids = prev ? imageIdsIn(prev.content) : [];
+  if (!ids.length) return [];
+  const parts = imageParts(ids.slice(0, 3));
+  if (!parts.length) return [];
+  return [{ role: "user", content: [{ type: "text", text: "（这是你上一条发给他的图，只给你自己看，方便你知道他在说哪张）" }, ...parts] }];
+}
+
 function history(beforeOrAtId: number): ChatMessage[] {
   const rows = (
     db()
@@ -370,6 +382,7 @@ async function oneReply(
   const msgs: ChatMessage[] = [
     { role: "system", content: systemPrompt(stripImageMarkdown(userRow.content), myself, voiceIdsIn(userRow.content).length > 0) },
     ...history(userRow.id),
+    ...lastSentImages(userRow.id),
     // 放在最后、紧挨着回复：她最容易顺着自己前面说过的话往下编，这里拿真实状态压住
     {
       role: "system",

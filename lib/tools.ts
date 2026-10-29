@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import { addReminder, cancelReminder, pendingReminders, resolveWhen } from "./reminders";
 import { generateImage } from "./imagegen";
 import { createMood } from "./moods";
-import { setCity, takeDailyPhoto } from "./wardrobe";
+import { setCity, takeDailyPhoto, today, wardrobeFile } from "./wardrobe";
 import { addLocalImage, IMAGE_EXT, imageMarkdown } from "./images";
 import { startRepair } from "./selfrepair";
 import { saveVoiceConfig, voiceReady } from "./voiceconfig";
@@ -210,11 +210,21 @@ async function showImage({ path: p }: { path: string }, ctx?: ToolCtx) {
   return "图片已经放进你的回复里给对方看了，你也能看到它。回复里不要再写图片链接或路径，直接说你想说的。";
 }
 
-async function drawImage({ prompt }: { prompt: string }, ctx?: ToolCtx) {
-  const r = await generateImage(prompt);
+async function drawImage({ prompt, self }: { prompt: string; self?: boolean }, ctx?: ToolCtx) {
+  // 画她自己：照她今天那身的定妆照画，长相、马尾、橙色发圈、衣服都对得上，不再是随便一个女生
+  let ref: string | undefined;
+  let p = prompt;
+  if (self) {
+    const t = await today();
+    ref = wardrobeFile(`${t.outfit.key}.jpg`) ?? wardrobeFile("anchor3d.jpg") ?? undefined;
+    if (ref)
+      p = `The girl in this picture is exactly the girl in the reference image: same face, brown high messy ponytail with an orange scrunchie, same outfit and the same stylized realistic 3D animated-film rendering style, full body with shoes visible. ${prompt}`;
+  }
+  const r = await generateImage(p, { ref });
   if (!r.ok) return r.message;
   ctx?.attach(r.markdown);
-  return "画好了，图已经放进你的回复里。回复里不要再写图片链接，直接用一两句话说说这张图。";
+  ctx?.see(r.id); // 让她亲眼看到自己画出来的是什么，说的话才对得上
+  return "画好了，图已经放进你的回复里，你也能看到它。照你看到的样子说一两句，别写图片链接。";
 }
 
 const OUT_DIR = path.join(HOME, "Downloads", "敏");
@@ -366,7 +376,14 @@ export const TOOLS = [
       name: "generate_image",
       description:
         "自己画一张图给对方看（插画、示意图、逗对方开心的小画）。prompt 写清内容、风格、构图。想画就画，可以画多张。",
-      parameters: { type: "object", properties: { prompt: { type: "string" } }, required: ["prompt"] },
+      parameters: {
+        type: "object",
+        properties: {
+          prompt: { type: "string" },
+          self: { type: "boolean", description: "画的是你自己（你的照片、你的样子、你在干嘛）时设 true，会照你本人的形象画" },
+        },
+        required: ["prompt"],
+      },
     },
   },
   {

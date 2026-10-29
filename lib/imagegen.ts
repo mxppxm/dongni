@@ -31,7 +31,7 @@ const PROBE_PROMPT = "一朵白色小花，浅灰背景，极简";
 const PROBE_TIMEOUT_MS = 90_000;
 const PROOF_FRESH_MS = 10 * 60_000;
 
-export type GenOutcome = { ok: true; markdown: string } | { ok: false; message: string };
+export type GenOutcome = { ok: true; markdown: string; id: number } | { ok: false; message: string };
 export type GenProof = { at: number; ok: boolean; why: string; id?: number };
 
 function keepProof(ok: boolean, why: string, id?: number) {
@@ -104,7 +104,7 @@ function whyFailed(e: unknown, timeoutMs: number) {
   return last.slice(0, 160) || "不知道什么原因";
 }
 
-export async function generateImage(prompt: string, opts?: { quality?: "low" | "medium" | "high" | "auto"; timeoutMs?: number }): Promise<GenOutcome> {
+export async function generateImage(prompt: string, opts?: { quality?: "low" | "medium" | "high" | "auto"; timeoutMs?: number; ref?: string }): Promise<GenOutcome> {
   const p = prompt.trim();
   if (!p) return { ok: false, message: "没说要画什么，先问清一句再画。" };
   const missing = notInstalled();
@@ -120,7 +120,7 @@ export async function generateImage(prompt: string, opts?: { quality?: "low" | "
   try {
     const { stdout } = await run(
       process.execPath,
-      [SCRIPT, p, "-o", out, "--size", "1024x1024", "--quality", quality, "--json"],
+      [SCRIPT, p, "-o", out, "--size", opts?.ref ? "1024x1536" : "1024x1024", "--quality", quality, "--json", ...(opts?.ref ? ["--ref", opts.ref] : [])],
       { timeout: timeoutMs, maxBuffer: 20 << 20 },
     );
     const info = JSON.parse(stdout.trim()) as { files?: string[] };
@@ -131,7 +131,7 @@ export async function generateImage(prompt: string, opts?: { quality?: "low" | "
     const rec = addImageBuffer(buf, "image/png", "gen", p);
     keepProof(true, "", rec.id);
     console.log(`[dongni] 画好一张图 #${rec.id}`);
-    return { ok: true, markdown: imageMarkdown(rec.id) };
+    return { ok: true, markdown: imageMarkdown(rec.id), id: rec.id };
   } catch (e) {
     const why = whyFailed(e, timeoutMs);
     keepProof(false, why);
