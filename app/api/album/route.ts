@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import { db } from "@/lib/db";
 import { diaryOf } from "@/lib/diary";
-import { stripImageMarkdown } from "@/lib/images";
+import { captionOf, fillCaptions } from "@/lib/captions";
 import { listPhotos, OUTFITS, today, wardrobeFile } from "@/lib/wardrobe";
 
 export const dynamic = "force-dynamic";
@@ -39,23 +39,19 @@ function dailyPhotos() {
 
 /** 她平时画的所有图：配上她发图时说的那句话 */
 function drawnPhotos() {
+  void fillCaptions(); // 还没配文的在后台补上
   const rows = db().prepare("SELECT id, prompt, created_at FROM images WHERE kind = 'gen' ORDER BY id").all() as {
     id: number;
     prompt: string | null;
     created_at: number;
   }[];
   return rows.map((r) => {
-    const msg = db()
-      .prepare("SELECT content FROM messages WHERE role = 'assistant' AND content LIKE ? ORDER BY id LIMIT 1")
-      .get(`%/api/image/${r.id})%`) as { content: string } | undefined;
-    const said = msg ? stripImageMarkdown(msg.content).replace(/\s+/g, " ").trim() : "";
-    const first = said.split(/(?<=[。！？!?～~])/)[0] ?? "";
     return {
       id: 1_000_000 + r.id,
       date: new Date(r.created_at).toLocaleDateString("sv-SE"),
       outfit: "",
       weather: "",
-      caption: first.length > 60 ? first.slice(0, 58) + "…" : first,
+      caption: captionOf(r.id),
       diary: null as string | null,
       created_at: r.created_at,
       url: `/api/image/${r.id}`,
