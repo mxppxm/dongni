@@ -75,6 +75,7 @@ ${request}
 - 只改这个项目里的代码。不要动 data/、logs/、.next/、node_modules/，不要删用户数据。
 - 以下「内核」文件不许改，改了整次会被作废退回：${PROTECTED.join("、")}。需要新的存储就在别的模块里用 db() 建新表（CREATE TABLE IF NOT EXISTS），或用 kv 表。
 - 改完会自动重启并做健康检查（打开首页、/api/health），检查不过会自动退回。所以首页和 lib/chat.ts 里的 selfTest() 必须保持能用。
+- 怎么干活最快：直接读相关文件、改、跑 pnpm typecheck，就够了。不要另搭测试脚手架、不要自己写测试脚本去跑（尤其别在脚本里真的设定时器、真的调接口）；不要开浏览器、截图或做界面验证；搜文件只在本项目目录里搜，别在整个用户目录里 find/grep。
 - 保持原有设计原则：输入方便、动效好看、页面干净、非必要的东西不出现、响应快、不丢东西。不要顺手加没被要求的文案或功能。
 - 不要运行 pnpm build、不要重启服务、不要 git commit——这些外面会自动做。
 - 改完必须运行 pnpm typecheck，确保通过。
@@ -83,7 +84,7 @@ ${request}
 
 async function runPi(request: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn(PI, ["-p", "--no-session", "--no-mcp", "--thinking", "high", piPrompt(request)], {
+    const child = spawn(PI, ["-p", "--no-session", "--no-mcp", "--no-skills", "--thinking", "high", piPrompt(request)], {
       cwd: ROOT,
       env: process.env,
       stdio: ["ignore", "pipe", "pipe"],

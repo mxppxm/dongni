@@ -5,8 +5,8 @@ export async function register() {
   const { resumePending } = await import("./lib/chat");
   const { reportRebuild, drainRepairQueue } = await import("./lib/selfrepair");
   reportRebuild();
-  // 排队中的自我修改，等服务稳定后接着做（重编译脚本要先做完体检）
-  setTimeout(drainRepairQueue, 90_000);
+  // 排队中的自我修改：重启 20 秒后接着做（体检一般十几秒就做完）
+  setTimeout(drainRepairQueue, 20_000);
   resumePending();
   const tick = () => {
     backupDaily().catch((e) => console.error("[dongni] 备份失败：", e));
