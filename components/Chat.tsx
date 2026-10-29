@@ -8,6 +8,7 @@ import Markdown from "./Markdown";
 import Mood from "./Mood";
 import Starfield, { type Theme } from "./Starfield";
 import { AttachmentStrip, useAttachments } from "./useAttachments";
+import MicButton, { type VoiceSendResult } from "./VoiceRecorder";
 import { hasSpeakable, VoiceButton, VoiceProvider } from "./Voice";
 
 const MemoryMap = dynamic(() => import("./MemoryMap"), { ssr: false });
@@ -84,6 +85,7 @@ export default function Chat() {
   const [hasMore, setHasMore] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [draft, setDraft] = useState("");
+  const [micHint, setMicHint] = useState<string | null>(null);
   const [showMap, setShowMap] = useState(false);
   const [showAlbum, setShowAlbum] = useState(false);
   const [memCount, setMemCount] = useState<number | null>(null);
@@ -191,6 +193,9 @@ export default function Chat() {
                 patch(aKey, (m) => ({ ...m, id: e.assistantId }));
               } else if (e.type === "mood") {
                 patch(aKey, (m) => ({ ...m, mood: e.mood }));
+              } else if (e.type === "voice") {
+                // 他说的是语音，她的回复也带了一条语音：接在正文后面
+                patch(aKey, (m) => ({ ...m, content: `${m.content}\n\n${e.markdown}` }));
               } else if (e.type === "reset") {
                 patch(aKey, (m) => ({ ...m, status: "waiting", content: "" }));
               } else if (e.type === "delta") {
@@ -306,6 +311,38 @@ export default function Chat() {
     stick.current = true;
     enqueue(item);
   }, [draft, enqueue, att]);
+
+  /* ---------- 语音：服务端已经存好音频并听懂了，这里只把对话接上 ---------- */  const sendVoice = useCallback(
+    (r: VoiceSendResult) => {
+      if (!r.user) {
+        setMicHint("这段没发出去，再说一遍？");
+        return;
+      }
+      const u = r.user;
+      const key = `c${u.clientId ?? u.id}`;
+      setMsgs((list) => [
+        ...list.filter((m) => m.key !== key),
+        { key, clientId: u.clientId, id: u.id, role: "user", content: u.content, status: "done", createdAt: u.createdAt, fresh: true },
+      ]);
+      stick.current = true;
+      if (r.reply) {
+        const rep = r.reply;
+        setMsgs((list) => [
+          ...list,
+          { key: `s${rep.id}`, id: rep.id, role: "assistant", content: rep.content, status: "done", createdAt: rep.createdAt, fresh: true },
+        ]);
+        return;
+      }
+      if (u.clientId) enqueue({ clientId: u.clientId, content: r.text ?? "", createdAt: u.createdAt });
+    },
+    [enqueue],
+  );
+
+  useEffect(() => {
+    if (!micHint) return;
+    const t = window.setTimeout(() => setMicHint(null), 4000);
+    return () => window.clearTimeout(t);
+  }, [micHint]);
 
   /* ---------- 初次加载 + 补发没送达的 ---------- */
   useEffect(() => {
@@ -492,9 +529,9 @@ export default function Chat() {
                       {m.status === "waiting" ? (
                         <Mood mood={m.mood} />
                       ) : (
-                        <Markdown text={m.content} animate={m.status === "streaming" || !!m.fresh} />
+                        <Markdown text={m.content} animate={m.status === "streaming" || !!m.fresh} voiceAuto={!!m.fresh} />
                       )}
-                      {m.status === "done" && !!m.id && hasSpeakable(m.content) && (
+                      {m.status === "done" && !!m.id && hasSpeakable(m.content) && !m.content.includes("/api/voice/clip/") && (
                         <div className="msg-actions">
                           <VoiceButton id={m.id} fresh={!!m.fresh} />
                         </div>
@@ -511,6 +548,7 @@ export default function Chat() {
       <div className="pointer-events-none fixed inset-x-0 bottom-0 z-20 bg-[linear-gradient(to_top,var(--bg)_0%,var(--bg-85)_45%,transparent_100%)] pt-16 pb-6">
         <div className="pointer-events-auto mx-auto w-full max-w-[680px] px-5">
           {att.hint && <div className="mb-2 text-center text-xs text-[var(--faint)]">{att.hint}</div>}
+          {micHint && <div className="mb-2 text-center text-xs text-[var(--faint)]">{micHint}</div>}
           <div
             className={`beam flex items-end gap-2 rounded-[26px] border bg-[var(--panel)] py-2 pr-2 pl-5 shadow-[var(--shadow)] backdrop-blur-xl transition-colors ${
               att.dragging ? "border-[var(--dot)]" : "border-[var(--border)]"
@@ -534,6 +572,7 @@ export default function Chat() {
               className="scroll-thin block max-h-[40vh] w-full resize-none bg-transparent py-1 text-[16px] leading-relaxed text-[var(--text)] outline-none placeholder:text-[var(--faint)]"
             />
             </div>
+            <MicButton onSent={sendVoice} onHint={setMicHint} />
             <AnimatePresence>
               {(draft.trim() || att.items.length > 0) && (
                 <motion.button

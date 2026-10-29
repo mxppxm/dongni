@@ -724,6 +724,133 @@ a.card:hover,
   background: var(--hover);
 }
 
+/* 说话按钮：录音时变红、慢慢呼吸，旁边挂着已经录了几秒 */
+.mic-btn[data-rec="1"] {
+  color: #ff5a5a;
+  background: var(--hover);
+  animation: mic-pulse 1.4s ease-in-out infinite;
+}
+@keyframes mic-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+.mic-timer {
+  position: absolute;
+  right: 0;
+  bottom: 42px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--paper-border);
+  background: var(--paper-tile);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  color: var(--paper-sub);
+  pointer-events: none;
+}
+
+/* 对话里的语音消息：一个能点的播放条 */
+.voice-clip {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  margin: 2px 0;
+  padding: 4px 12px 4px 5px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--hover);
+  color: var(--text);
+  font: inherit;
+  transition:
+    border-color 0.2s,
+    background 0.2s;
+}
+.voice-clip:hover {
+  border-color: var(--dot);
+}
+.voice-clip-icon {
+  display: flex;
+  width: 22px;
+  height: 22px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: var(--send);
+  color: var(--send-fg);
+}
+.voice-clip-track {
+  position: relative;
+  display: flex;
+  width: 76px;
+  height: 18px;
+  align-items: center;
+  justify-content: space-between;
+}
+.voice-clip-fill {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--dot);
+  opacity: 0.5;
+  transform: translateY(-50%);
+}
+.voice-clip-bar {
+  position: relative;
+  width: 2px;
+  border-radius: 2px;
+  background: currentColor;
+  opacity: 0.35;
+}
+.voice-clip-bar.b0 {
+  height: 8px;
+}
+.voice-clip-bar.b1 {
+  height: 14px;
+}
+.voice-clip-bar.b2 {
+  height: 6px;
+}
+.voice-clip-bar.b3 {
+  height: 11px;
+}
+.voice-clip[data-on="1"] .voice-clip-bar {
+  opacity: 0.75;
+  animation: voice-bar 0.9s ease-in-out infinite;
+}
+.voice-clip[data-on="1"] .b1 {
+  animation-delay: 0.15s;
+}
+.voice-clip[data-on="1"] .b2 {
+  animation-delay: 0.3s;
+}
+.voice-clip[data-on="1"] .b3 {
+  animation-delay: 0.45s;
+}
+@keyframes voice-bar {
+  0%,
+  100% {
+    transform: scaleY(0.55);
+  }
+  50% {
+    transform: scaleY(1.35);
+  }
+}
+.voice-clip-time {
+  min-width: 26px;
+  text-align: right;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--faint);
+}
+
 .attach {
   position: relative;
   width: 56px;

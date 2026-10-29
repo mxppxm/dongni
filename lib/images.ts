@@ -146,6 +146,7 @@ export function imageIdsIn(text: string): number[] {
 export function stripImageMarkdown(text: string) {
   return text
     .replace(/!\[[^\]]*\]\(\/api\/image\/\d+\)/g, "")
+    .replace(/!\[[^\]]*\]\(\/api\/voice\/clip\/\d+\)/g, "")
     .replace(/!\[[^\]]*\]\(data:image\/[^)]*\)/g, "")
     .replace(/\n{3,}/g, "\n\n")
     .trim();

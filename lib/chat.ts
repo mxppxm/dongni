@@ -10,6 +10,7 @@ import { addUploadedImage, getImage, imageDataUrl, imageIdsIn, imageMarkdown, st
 import { runTool, toolsFor } from "./tools";
 import { formatMemories, getProfile, nowText, relevantMemories, scheduleExtraction } from "./memory";
 import { INTRO, PERSONA, SPEAKING } from "./persona";
+import { attachVoiceReply, voiceIdsIn } from "./voicemsg";
 import { startReminders } from "./reminders";
 import { flushOutbox } from "./outbox";
 import { startProgressTick } from "./progress";
@@ -60,7 +61,10 @@ function lengthRule(text: string) {
   return `【这回的尺子】他写了 ${n} 个字，愿意跟你多讲：你也多说几句，但仍然是说话——不分点、不总结、不超过两百五十字。`;
 }
 
-function systemPrompt(query: string, myself = "") {
+/** 他这次是说的，不是打字：回复得像说话——短、不分段、不列表、不代码 */
+const VOICE_HINT = "【这条是语音】他刚才是用嘴说的，不是打字：回得像接话，短、口语、别分段、别列表、别写代码或表格。";
+
+function systemPrompt(query: string, myself = "", voice = false) {
   const profile = getProfile();
   const mems = relevantMemories(query);
   // 顺序有讲究：先交代能做什么、对方是谁，最后才是「你是谁、怎么说话」——离回复最近的那段影响最大
@@ -94,6 +98,7 @@ ${PERSONA}
 ${SPEAKING}
 
 ${lengthRule(query)}
+${voice ? `\n${VOICE_HINT}` : ""}
 【不是汇报】不复述他给的事、不排期、不报进度，不说「第一件」「接下来」「排在」「下一步」。开口第一句先接住他那句话的情绪或细节；结果只说好了 / 还差什么 / 卡住了。`;
 }
 
@@ -153,6 +158,7 @@ export type ChatEvent =
   | { type: "delta"; text: string }
   | { type: "reset" }
   | { type: "mood"; mood: string }
+  | { type: "voice"; markdown: string }
   | { type: "follow" }
   | { type: "done" };
 
@@ -311,6 +317,19 @@ async function generate(assistantId: number, userRow: MessageRow, onEvent: (e: C
         );
         // 空回复跟超时一样是可重试的错，不当作「答完了」
         if (!text.trim()) throw emptyReply();
+        // 他刚发的是语音：她的回复也做一条语音消息接在后头。先做好再置 done，
+        // 这样页面断线后轮询拿到的也是带语音的完整内容（合成慢就慢一点，文字已经在屏幕上了）
+        if (voiceIdsIn(userRow.content).length) {
+          try {
+            const v = await attachVoiceReply(assistantId, text);
+            if (v) {
+              text = v.content;
+              emit({ type: "voice", markdown: v.markdown });
+            }
+          } catch (e) {
+            console.warn(`[dongni] #${assistantId} 语音回复没做出来：`, errText(e));
+          }
+        }
         save("done");
         finished = true;
         emit({ type: "done" });
@@ -347,7 +366,7 @@ async function oneReply(
 ) {
   const myself = await Promise.race([wardrobeNote().catch(() => ""), new Promise<string>((ok) => setTimeout(() => ok(""), 900))]);
   const msgs: ChatMessage[] = [
-    { role: "system", content: systemPrompt(stripImageMarkdown(userRow.content), myself) },
+    { role: "system", content: systemPrompt(stripImageMarkdown(userRow.content), myself, voiceIdsIn(userRow.content).length > 0) },
     ...history(userRow.id),
     // 放在最后、紧挨着回复：她最容易顺着自己前面说过的话往下编，这里拿真实状态压住
     {

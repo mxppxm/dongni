@@ -6,14 +6,13 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 /**
  * 念出来：一条回复一个小按钮，默认不自动念（设置里可以开）。
  * 切到别的消息会先停上一条。
- * 浏览器默认不许页面凭空出声，两种不出声要分得开、都得给出路：
- * 一是被拦——播之前先看浏览器给没给过用户手势，判定会被拦就直接摆「点一下播放」，
- * 真播了被 NotAllowedError 挡回来就说「点一下才能出声」；这两种点一下就接着播，音频不用重新合成。
- * 二是没生成出来——接口没合成、解码失败（别的 error.name），说「这段没生成出来」，点了从头重试。
+ *
+ * 「发不出声」的病根是：以前先把音频下完（fetch → blob → 换 src）、隔了一两秒才 play()，
+ * 这时候浏览器已经不认那次点击了，Safari 直接拦掉；被拦了还当成「没生成出来」。
+ * 现在一律把播放地址直接交给 audio 元素，并且在同一次点击里立刻 play()——不隔任何 await；
+ * 浏览器真拦下来（自动念的时候页面还没拿到过手势）就摆「点一下播放」，音频不用重新合成。
  */
 const AUTO_KEY = "dongni:voiceAuto";
-/** 44 字节的空 wav：只为在同一次点击里把 audio 元素解锁，Safari 只认用户手势里的第一次 play */
-const SILENT = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YQAAAAA=";
 
 type Phase = "idle" | "loading" | "playing" | "paused";
 type Status = { id: number | null; phase: Phase };
@@ -50,7 +49,6 @@ export function VoiceProvider({ children }: { children: React.ReactNode }) {
   const [status, setStatus] = useState<Status>({ id: null, phase: "idle" });
   const [trouble, setTrouble] = useState<Trouble>(null);
   const audio = useRef<HTMLAudioElement | null>(null);
-  const url = useRef<string | null>(null);
   const autoOn = useRef(false);
 
   useEffect(() => {
@@ -68,82 +66,46 @@ export function VoiceProvider({ children }: { children: React.ReactNode }) {
       a.pause();
       a.removeAttribute("src");
     }
-    if (url.current) {
-      URL.revokeObjectURL(url.current);
-      url.current = null;
-    }
     setStatus({ id: null, phase: "idle" });
   }, []);
 
   useEffect(() => () => stop(), [stop]);
 
   const play = useCallback(
-    async (id: number, gesture = false) => {
+    (id: number, gesture = false) => {
       stop();
       setTrouble(null);
-      setStatus({ id, phase: "loading" });
-      let a: HTMLAudioElement | null = null;
-      try {
-        a = new Audio();
-        audio.current = a;
-        // 先在这同一次点击里解锁，否则等下载完再播，Safari 会当成自动播放拦掉
-        if (gesture) {
-          a.src = SILENT;
-          a.muted = true;
-          try {
-            await a.play();
-            a.pause();
-          } catch {
-            // 解锁失败也照样往下走，真被拦了下面会摆出「点一下才能出声」
-          }
-          a.muted = false;
-        }
-        const res = await fetch(`/api/voice/${id}`);
-        if (!res.ok) throw new Error(`voice ${res.status}`);
-        const blob = await res.blob();
-        const src = URL.createObjectURL(blob);
-        url.current = src;
-        a.src = src;
-        a.onended = () => setStatus({ id, phase: "idle" });
-        // 音频元素自己报错（解码不了、格式不对）就是没生成出能放的东西
-        a.onerror = () => {
-          setStatus({ id: null, phase: "idle" });
-          setTrouble({ id, kind: "synth" });
-        };
-        // 播之前先判断一次 autoplay 策略：这次不是用户点出来的、页面又没拿到过手势，
-        // 那 play() 必然被拦——别硬播留一条静默报错，直接把「点一下播放」摆到这条消息下面，音频已经备好了
-        if (!gesture && !hasGesture()) {
-          setStatus({ id: null, phase: "idle" });
-          setTrouble({ id, kind: "blocked", pre: true });
-          return;
-        }
-        try {
-          await a.play();
-        } catch (e) {
-          setStatus({ id: null, phase: "idle" });
-          setTrouble({ id, kind: isBlocked(e) ? "blocked" : "synth" });
-          return;
-        }
-        setStatus({ id, phase: "playing" });
-      } catch {
-        if (a) {
-          a.onerror = null;
-          a.pause();
-        }
-        audio.current = null;
+      // 自动念的时候页面还没拿到过手势：别再硬播留一条静默失败，直接摆「点一下播放」
+      if (!gesture && !hasGesture()) {
+        setTrouble({ id, kind: "blocked", pre: true });
+        return;
+      }
+      const a = new Audio();
+      audio.current = a;
+      a.preload = "auto";
+      a.src = `/api/voice/${id}`;
+      a.onended = () => setStatus({ id, phase: "idle" });
+      a.onerror = () => {
         setStatus({ id: null, phase: "idle" });
         setTrouble({ id, kind: "synth" });
-      }
+      };
+      setStatus({ id, phase: "loading" });
+      // 同一个手势里立刻播：浏览器允许；等下载完再播就会被当成自动播放拦掉
+      a.play()
+        .then(() => setStatus({ id, phase: "playing" }))
+        .catch((e) => {
+          setStatus({ id: null, phase: "idle" });
+          setTrouble({ id, kind: isBlocked(e) ? "blocked" : "synth" });
+        });
     },
     [stop],
   );
 
-  /** 被浏览器拦下来的那条，音频其实已经下好了：点一下就接着播，不重新合成 */
+  /** 被浏览器拦下来的那条，音频地址还在：点一下接着播，不重新合成 */
   const retry = useCallback(
     (id: number, kind: "synth" | "blocked") => {
       const a = audio.current;
-      const src = a?.getAttribute("src");
-      if (kind === "blocked" && a && src && src !== SILENT) {
+      if (kind === "blocked" && a && a.getAttribute("src")) {
         setStatus({ id, phase: "playing" });
         void a
           .play()
@@ -154,7 +116,7 @@ export function VoiceProvider({ children }: { children: React.ReactNode }) {
           });
         return;
       }
-      void play(id, true);
+      play(id, true);
     },
     [play],
   );
@@ -180,14 +142,14 @@ export function VoiceProvider({ children }: { children: React.ReactNode }) {
         }
         if (status.phase === "loading") return;
       }
-      void play(id, true);
+      play(id, true);
     },
     [status, play],
   );
 
   const auto = useCallback(
     (id: number) => {
-      if (autoOn.current) void play(id);
+      if (autoOn.current) play(id);
     },
     [play],
   );
@@ -219,7 +181,7 @@ export function useVoice() {
   return v;
 }
 
-/** 有没有能念的字（纯图、纯代码的消息不显示按钮） */
+/** 有没有能念的字（纯图、纯代码、纯语音的消息不显示按钮） */
 export function hasSpeakable(text: string) {
   const t = text
     .replace(/```[\s\S]*?```/g, "")
@@ -276,6 +238,102 @@ export function VoiceButton({ id, fresh }: { id: number; fresh?: boolean }) {
       ) : (
         <Volume2 size={13} strokeWidth={1.8} />
       )}
+    </button>
+  );
+}
+
+const clock = (s: number) => {
+  const n = Number.isFinite(s) && s > 0 ? Math.round(s) : 0;
+  return `${Math.floor(n / 60)}:${String(n % 60).padStart(2, "0")}`;
+};
+
+/**
+ * 对话里的语音消息：一个能点的播放条。
+ * 播放地址直接给 audio，点击里立刻 play()——不需要先下载，也不会被当成自动播放拦下来。
+ */
+export function VoiceClip({ src, auto }: { src: string; auto?: boolean }) {
+  const ref = useRef<HTMLAudioElement | null>(null);
+  const [phase, setPhase] = useState<"idle" | "loading" | "playing" | "error">("idle");
+  const [secs, setSecs] = useState(0);
+  const [pos, setPos] = useState(0);
+
+  // 元素先建好只拿时长（preload=metadata，不出声），真正播放留给点击
+  useEffect(() => {
+    const a = new Audio(src);
+    a.preload = "metadata";
+    ref.current = a;
+    const onMeta = () => setSecs(Number.isFinite(a.duration) ? a.duration : 0);
+    a.onloadedmetadata = onMeta;
+    a.ontimeupdate = () => setPos(a.currentTime);
+    a.onended = () => {
+      setPhase("idle");
+      setPos(0);
+    };
+    a.onerror = () => setPhase("error");
+    a.load();
+    return () => {
+      a.pause();
+      a.onloadedmetadata = null;
+      a.ontimeupdate = null;
+      a.onended = null;
+      a.onerror = null;
+      ref.current = null;
+    };
+  }, [src]);
+
+  // 刚收到的语音回复：她刚说完话，直接出声；被浏览器拦了也不报错，点一下就播
+  useEffect(() => {
+    if (!auto) return;
+    const a = ref.current;
+    if (!a) return;
+    setPhase("loading");
+    a.play()
+      .then(() => setPhase("playing"))
+      .catch(() => setPhase("idle"));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [auto, src]);
+
+  const on = () => {
+    const a = ref.current;
+    if (!a) return;
+    if (phase === "playing") {
+      a.pause();
+      setPhase("idle");
+      return;
+    }
+    setPhase("loading");
+    a.play()
+      .then(() => setPhase("playing"))
+      .catch(() => setPhase("error"));
+  };
+
+  const pct = secs > 0 ? Math.min(100, (pos / secs) * 100) : 0;
+
+  return (
+    <button
+      type="button"
+      className="voice-clip"
+      data-on={phase === "playing" ? "1" : "0"}
+      onClick={on}
+      aria-label={phase === "playing" ? "暂停" : "播放语音"}
+      title={phase === "playing" ? "暂停" : "播放"}
+    >
+      <span className="voice-clip-icon">
+        {phase === "loading" ? (
+          <Loader2 size={13} strokeWidth={2.2} className="animate-spin" />
+        ) : phase === "playing" ? (
+          <Pause size={13} strokeWidth={2.2} />
+        ) : (
+          <Play size={13} strokeWidth={2.2} />
+        )}
+      </span>
+      <span className="voice-clip-track">
+        <span className="voice-clip-fill" style={{ width: `${pct}%` }} />
+        {[0, 1, 2, 3].map((i) => (
+          <span key={i} className={`voice-clip-bar b${i}`} />
+        ))}
+      </span>
+      <span className="voice-clip-time">{phase === "error" ? "听不了" : clock(secs)}</span>
     </button>
   );
 }

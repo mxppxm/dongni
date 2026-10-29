@@ -5,6 +5,7 @@ import { moodGenerating } from "./moods";
 import { pendingReminders } from "./reminders";
 import { repairStatus } from "./selfrepair";
 import { photoState } from "./wardrobe";
+import { voiceReady } from "./voiceconfig";
 
 /**
  * 她后台那些事的真实状态。她说「我在做 / 我做了」之前，以这里为准——
@@ -24,6 +25,9 @@ export function selfState(): string {
   lines.push(rs.length ? `有 ${rs.length} 个提醒等着到点：${rs.slice(0, 3).map((r) => `「${r.text}」`).join("、")}。` : "没有待到点的提醒。");
   const n = (db().prepare("SELECT COUNT(*) n FROM memories WHERE status = 'active'").get() as { n: number }).n;
   lines.push(`关于他你记下了 ${n} 件事；聊过的话会在聊完几秒后自动整理进记忆，所以可以说「记住了」，但别说你把它「写进」了什么地方。`);
+  try {
+    lines.push(voiceReady().configured ? "声音（豆包语音）已经接上了：能发语音、也能听懂他发的语音。" : "声音（豆包语音）还没接上：缺 APP ID / Access Token（或新版控制台的 API Key），要说实话，别装作能听会说。");
+  } catch {}
   return lines.join("\n");
 }
 

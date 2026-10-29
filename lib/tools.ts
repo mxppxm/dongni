@@ -10,6 +10,7 @@ import { createMood } from "./moods";
 import { setCity, takeDailyPhoto } from "./wardrobe";
 import { addLocalImage, IMAGE_EXT, imageMarkdown } from "./images";
 import { startRepair } from "./selfrepair";
+import { saveVoiceConfig, voiceReady } from "./voiceconfig";
 
 /**
  * 查电脑的工具：全部只读，不能改、删、执行任意命令（repair_self 除外，它只改本项目，见 selfrepair.ts）。
@@ -371,6 +372,23 @@ export const TOOLS = [
   {
     type: "function",
     function: {
+      name: "set_voice_key",
+      description:
+        "存下火山引擎（豆包语音）的凭据，存好你就能发语音、也能听懂他发的语音。他把 APP ID / Access Token / API Key 发给你时用，只用填他给了的那几个，别自己编。",
+      parameters: {
+        type: "object",
+        properties: {
+          appId: { type: "string", description: "控制台里的 APP ID（旧版控制台）" },
+          accessToken: { type: "string", description: "控制台里的 Access Token（旧版控制台）" },
+          apiKey: { type: "string", description: "新版控制台的 API Key" },
+          speaker: { type: "string", description: "想要的声音（音色 ID），他没指定就别传" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "write_file",
       description:
         "给对方写一个文件（文档、脚本、清单、代码等纯文本），存到下载文件夹里的「敏」目录，回复里会自动带一张文件卡片。name 带扩展名，如 周报.md、backup.sh。",
@@ -396,6 +414,15 @@ const IMPL: Record<string, (a: never, ctx?: ToolCtx) => Promise<string>> = {
   show_image: showImage as (a: never, ctx?: ToolCtx) => Promise<string>,
   generate_image: drawImage as (a: never, ctx?: ToolCtx) => Promise<string>,
   write_file: writeFile as (a: never, ctx?: ToolCtx) => Promise<string>,
+  set_voice_key: (async ({ appId, accessToken, apiKey, speaker }: { appId?: string; accessToken?: string; apiKey?: string; speaker?: string }) => {
+    if (!appId?.trim() && !accessToken?.trim() && !apiKey?.trim() && !speaker?.trim()) return "没看到凭据：需要 APP ID + Access Token（旧版控制台）或者 API Key（新版控制台）。";
+    const r = saveVoiceConfig({ appId, accessToken, apiKey, speaker });
+    if (!r.ok) return `存不下（${r.error ?? "未知原因"}），先别跟他说已经好了。`;
+    const ready = voiceReady();
+    return ready.configured
+      ? "凭据存好了（只存在这台机器的本机配置里），现在能发语音、也能听懂他发的语音。回复里别提 key 本身。"
+      : "存了一部分，但还缺：旧版控制台要 APP ID 和 Access Token 一起给，新版控制台给 API Key 就行。";
+  }) as (a: never, ctx?: ToolCtx) => Promise<string>,
   repair_self: async ({ request }: { request: string }) => startRepair(request),
   set_reminder: setReminder as (a: never, ctx?: ToolCtx) => Promise<string>,
   list_reminders: listReminders,
@@ -412,7 +439,8 @@ const IMPL: Record<string, (a: never, ctx?: ToolCtx) => Promise<string>> = {
  * 没用的东西上（日志 #214、#218 的首包超时就出在这儿）。
  * 只带肯定用得上的那几组；什么都没提到（闲聊）就只留最常用的几件。
  */
-const BASE_TOOLS = ["repair_self", "set_reminder", "list_reminders", "cancel_reminder"];
+// set_voice_key 一直带着：他可能只回一串 key，光看这句话猜不出在说语音
+const BASE_TOOLS = ["repair_self", "set_reminder", "list_reminders", "cancel_reminder", "set_voice_key"];
 
 const TOOL_GROUPS: { names: string[]; hint: RegExp }[] = [
   {

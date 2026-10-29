@@ -4,6 +4,10 @@ import type { ReactNode } from "react";
 import CardBlock from "./Cards";
 import Chart from "./Chart";
 import ImageFigure from "./ImageFigure";
+import { VoiceClip } from "./Voice";
+
+/** 语音消息用图片语法存在正文里，但画的不是一个图片，是播放条 */
+const isVoice = (src: string) => src.startsWith("/api/voice/clip/");
 
 /**
  * 极简 Markdown：自己切块、自己拼 React 节点，全程不碰 innerHTML，所以不存在 XSS。
@@ -291,7 +295,7 @@ function highlight(code: string, lang: string): ReactNode[] {
 
 /* ---------------- 组装 ---------------- */
 
-export default function Markdown({ text, animate = false }: { text: string; animate?: boolean }) {
+export default function Markdown({ text, animate = false, voiceAuto = false }: { text: string; animate?: boolean; voiceAuto?: boolean }) {
   const blocks = parse(text);
   return (
     <div className={animate ? "md md-anim" : "md"}>
@@ -345,7 +349,11 @@ export default function Markdown({ text, animate = false }: { text: string; anim
           case "images":
             return (
               <div key={i} className={b.items.length > 1 ? "md-imgs md-imgs-multi" : "md-imgs"}>
-                {b.items.map((im, k) => (safeHref(im.src) ? <ImageFigure key={k} src={im.src} alt={im.alt} /> : null))}
+                {b.items.map((im, k) =>
+                  safeHref(im.src) ? (
+                    isVoice(im.src) ? <VoiceClip key={k} src={im.src} auto={voiceAuto} /> : <ImageFigure key={k} src={im.src} alt={im.alt} />
+                  ) : null,
+                )}
               </div>
             );
           case "heading":
