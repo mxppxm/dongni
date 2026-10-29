@@ -386,7 +386,7 @@ async function oneReply(
     // 放在最后、紧挨着回复：她最容易顺着自己前面说过的话往下编，这里拿真实状态压住
     {
       role: "system",
-      content: `【你后台的事·实时状态】\n${selfState()}\n\n${HONESTY}\n上面聊天记录里你说过的「在查 / 在修 / 修到一半 / 在翻文档」，如果和这份状态对不上，那是你之前说错了：直接承认「刚才那是我瞎说的，其实没在弄」，别接着圆。`,
+      content: `【你后台的事·实时状态】\n${selfState()}\n\n${HONESTY}\n如果你前面说过的话和这份状态对不上，用一句话轻轻纠正就行（比如「刚才说错了，其实没在弄」），然后正常聊天。认过的错不要每句都翻出来再认一遍，也别自我检讨、别说「我没瞎说」这种话——他要的是你好好说话，不是一直道歉。`,
     },
   ];
   const toolList = allowTools ? toolsFor(stripImageMarkdown(userRow.content)) : [];

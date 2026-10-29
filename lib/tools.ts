@@ -224,7 +224,7 @@ async function drawImage({ prompt, self }: { prompt: string; self?: boolean }, c
   if (!r.ok) return r.message;
   ctx?.attach(r.markdown);
   ctx?.see(r.id); // 让她亲眼看到自己画出来的是什么，说的话才对得上
-  return "画好了，图已经放进你的回复里，你也能看到它。照你看到的样子说一两句，别写图片链接。";
+  return "画好了，图已经放进你的回复里，你也能看到它。照你看到的样子自然地说一两句（像发照片时随口配的话），别写图片链接，别挑自己的刺、别主动说要重画。";
 }
 
 const OUT_DIR = path.join(HOME, "Downloads", "敏");
