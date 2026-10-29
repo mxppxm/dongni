@@ -4,6 +4,7 @@ import path from "node:path";
 import { myName, notify } from "./notify";
 import { db, getKv, setKv, type MessageRow } from "./db";
 import { reasonFresh, repeatContext, silence, type Silence } from "./dedupe";
+import { stripImageMarkdown } from "./images";
 import { usedReason, verdict, type SayVerdict } from "./send";
 import { enqueueProactive, flushOutbox } from "./outbox";
 import { completeJson } from "./llm";
@@ -18,9 +19,10 @@ import { runTool } from "./tools";
  * 主动找对方：每隔一会儿想一想「现在有没有值得说的」，有就发一条，并弹系统通知。
  * 也会回看自己的毛病，有确凿问题时自己动手改（一天最多一次）。
  *
- * 他还没回话时不是一律闭嘴：没有新的具体由头（新报错、他提过的事到点）就不发，
- * 有就允许说一条，同一个由头只一次（见 quietGate 和 lib/send.ts 的 verdict）。
- * 他忙的时候她不能彻底没了动静。
+ * 他还没回话时不是一律闭嘴：新报错、他提过的事到点，随时允许说一条；
+ * 他自己的身体、情绪状态这类由头，只要离上次她开口已经隔够久（QUIET_GAP_MS），也允许说一条。
+ * 只按话题去重——同一个由头、同一件事不重复说（见 quietGate 和 lib/send.ts 的 verdict）。
+ * 他忙的时候她不能彻底没了动静，越久没回也不能越不吭声。
  */
 
 const state = ((globalThis as unknown as { __dongniProactive?: { running: boolean } }).__dongniProactive ??= { running: false });
@@ -60,23 +62,64 @@ type Decision = { send?: boolean; message?: string; improve?: string };
 
 /**
  * 他还没回话时的开口规矩。光靠提示词拦不住——他五小时没回、明显不在电脑前，还是被连着发了三十条。
- * 所以在这里用记录卡：没有真正新的由头就不开口；有由头才能说一条，同一个由头不重复用
+ * 所以在这里用记录卡：没有具体由头就不开口；有由头才能说一条，同一个由头不重复用
  * （由头的新鲜度记在 lib/dedupe.ts 的 said_reasons，是真的发出去才记账）。
+ * 反过来也不能因为“他没回”就一律禁发：他的身体、情绪这类软由头，隔够久（QUIET_GAP_MS）也算数。
+ * 他越久没回，越不能一声不吭。
  */
-/** 他说过的事在这一小时内到点，算新由头 */
+/** 他说过的事在这一小时内到点（或者刚过去这么久），算新由头 */
 const DUE_WINDOW_MS = 60 * 60_000;
+/** 他一路没回时：距离她上次开口隔了这么久，才允许只为「他的身体、情绪」这类软由头说一条 */
+const QUIET_GAP_MS = 3 * 3600_000;
+/** 他话里露出的身体、情绪状态，这么久之内还算「现在」的，值得问一句 */
+const STATE_WINDOW_MS = 24 * 3600_000;
+/** 累、头疼、睡不着、心里烦……这些是他自己说过的状态 */
+const STATE_WORDS = /没睡好|失眠|睡不着|熬夜|头疼|头痛|胃疼|难受|不舒服|生病|感冒|发烧|疼|累|困|疲|焦虑|压力|烦|难过|低落|委屈|心慌/i;
 /** 日志里这些是自己会重试、会兜底的小毛病，不算「新报错」，不值得为它去打扰他 */
 const ERR_ROUTINE = /第 \d+ 次(回复失败|没接上话)|几次都没接上话|写库失败/;
 
-type Reason = { text: string; sig: string };
+/** soft：不是「新情况」，只是他本来就有的状态——这种要先隔够久才开口 */
+type Reason = { text: string; sig: string; soft: boolean };
 
-/** 这轮还非说不可的理由：日志里真有新报错，或者他说过的事到点了。没有就是 null */
-function freshReason(errors: string): Reason | null {
+/** 她上次开口是什么时候（主动发的那句也算在内） */
+function lastMineAt(): number {
+  let said = 0;
+  try {
+    const row = db()
+      .prepare("SELECT MAX(created_at) t FROM messages WHERE role = 'assistant' AND status = 'done' AND kind != 'system'")
+      .get() as { t: number | null } | undefined;
+    said = Number(row?.t ?? 0);
+  } catch {}
+  return Math.max(said, Number(getKv("proactive_last_at") ?? 0));
+}
+
+/** 他最近自己说过的身体、情绪状态：他累了、头疼、睡不着的时候，她不能一声不吭 */
+function stateReason(now: number): Reason | null {
+  try {
+    const rows = db()
+      .prepare("SELECT content, created_at FROM messages WHERE role = 'user' AND status = 'done' ORDER BY id DESC LIMIT 8")
+      .all() as { content: string; created_at: number }[];
+    for (const r of rows) {
+      if (now - r.created_at > STATE_WINDOW_MS) break;
+      const line = stripImageMarkdown(r.content).replace(/\s+/g, " ").trim().slice(0, 60);
+      if (!line || !STATE_WORDS.test(line)) continue;
+      return { text: `他自己说过状态：「${line}」`, sig: `状态：${line}`, soft: true };
+    }
+  } catch {}
+  return null;
+}
+
+/** 这轮能凭的由头，从硬的到软的：新报错、他说过的事到点、他自己的状态 */
+function freshReasons(errors: string, now: number): Reason[] {
+  const out: Reason[] = [];
   const err = errors.split("\n").find((l) => l.trim() && !ERR_ROUTINE.test(l));
-  if (err) return { text: "运行日志里出现了新的报错", sig: `报错：${err.trim()}` };
-  const now = Date.now();
-  const due = pendingReminders().find((r) => r.at - now <= DUE_WINDOW_MS);
-  return due ? { text: `他说过的事到点了：${due.text}`, sig: `到点：${due.text}` } : null;
+  if (err) out.push({ text: "运行日志里出现了新的报错", sig: `报错：${err.trim()}`, soft: false });
+  // 到点的、或者刚过点不久的（过太久的那件早该在到点时说过，不再翻旧账）
+  const due = pendingReminders().find((r) => r.at - now <= DUE_WINDOW_MS && now - r.at <= DUE_WINDOW_MS);
+  if (due) out.push({ text: `他说过的事到点了：${due.text}`, sig: `到点：${due.text}`, soft: false });
+  const state = stateReason(now);
+  if (state) out.push(state);
+  return out;
 }
 
 export type QuietGate = { block: boolean; reason: string | null; sig: string | null };
@@ -131,14 +174,22 @@ function deliver(text: string, quiet: Silence, today: string, todayCount: number
   console.log(`[dongni] 主动发消息：${text}`);
 }
 
-/** 他还没回话、这轮该不该开口：没有新的具体由头就不开，有就开一条 */
-export function quietGate(s: Silence, errors: string): QuietGate {
-  const reason = freshReason(errors);
-  // 他回过话（或者刚接完他那句）：照常，有由头就优先说那件事
-  if (s.extra < 1) return { block: false, reason: reason?.text ?? null, sig: reason?.sig ?? null };
-  // 他还没回话：只认还没用过的由头，其余这轮别开口
-  if (!reason || !reasonFresh(reason.sig)) return { block: true, reason: null, sig: null };
-  return { block: false, reason: reason.text, sig: reason.sig };
+/**
+ * 他还没回话、这轮该不该开口：有还没用过的具体由头就能开一条。
+ * 新报错、他说过的事到点这类硬由头随时算数；他的身体、情绪状态这类软由头要先隔够久（QUIET_GAP_MS），
+ * 免得他睡一觉的功夫被连着问好几次。已经为同一个由头开过口的不再说。
+ */
+export function quietGate(s: Silence, errors: string, now = Date.now()): QuietGate {
+  const reasons = freshReasons(errors, now);
+  // 他回过话（或者刚接完他那句）：照常，有硬由头就优先说那件事（他的状态不硬塞进来，免得每轮都只能聊这个）
+  if (s.extra < 1) {
+    const r = reasons.find((x) => !x.soft);
+    return { block: false, reason: r?.text ?? null, sig: r?.sig ?? null };
+  }
+  // 他还没回话：只认还没用过的、够格开口的由头；一个都没有这轮才别出声
+  const gap = now - lastMineAt();
+  const pick = reasons.find((r) => (!r.soft || gap >= QUIET_GAP_MS) && reasonFresh(r.sig));
+  return pick ? { block: false, reason: pick.text, sig: pick.sig } : { block: true, reason: null, sig: null };
 }
 
 export async function proactiveTick() {
@@ -166,7 +217,7 @@ export async function proactiveTick() {
     const said = repeatContext(quiet);
     // 日志只看一次：既当「新由头」用，也贴进提示词；先看掉后面就捞不着了
     const errors = recentErrors();
-    const gate = quietGate(quiet, errors);
+    const gate = quietGate(quiet, errors, now);
 
     const r = await completeJson<Decision>([
       {
@@ -195,7 +246,7 @@ ${SPEAKING}
 要发的话，就按上面那套说话方式来写：一两句、口语、具体、接得上你们上次聊的话头，不要客套开场白。没有值得说的就 send=false，宁缺毋滥。
 
 ${gate.block
-  ? `【这轮别开口】${said.silent}他还没回话，多半在忙或者已经不在电脑前了。这轮只能是 send=false，message 留空；只有真正新的由头（他提过的事到点了、你刚发现的新报错）才算数，没有就别出声。\n`
+  ? `【这轮别开口】${said.silent}他还没回话，这轮没有还没说过的具体由头（他提过的事到点、你刚发现的新报错），或者同一个话题刚说过、离你上次开口还不够久。这轮只能是 send=false，message 留空。\n`
   : gate.reason
     ? `【这轮只能说这一件】${gate.reason}——就着这个事说一句，别顺带催睡、催回家、问他还在不在。\n`
     : ""}
