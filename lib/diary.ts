@@ -1,4 +1,5 @@
 import "server-only";
+import { humanize } from "./humanizer";
 import { db, type MessageRow } from "./db";
 import { completeJson } from "./llm";
 import { INTRO, PERSONA } from "./persona";
@@ -37,7 +38,9 @@ async function write(date: string, start: number, end: number) {
     },
     { role: "user", content: chat },
   ]);
-  if (r.text?.trim()) db().prepare("INSERT OR REPLACE INTO diary(date, text, created_at) VALUES(?, ?, ?)").run(date, r.text.trim(), Date.now());
+  // 日记不赶时间：按 Humanizer-zh 再去一遍 AI 味
+  const text = r.text?.trim() ? await humanize(r.text.trim(), "私人日记（第一人称、口语）") : "";
+  if (text) db().prepare("INSERT OR REPLACE INTO diary(date, text, created_at) VALUES(?, ?, ?)").run(date, text, Date.now());
 }
 
 /** 过了零点就把前一天（以及之前漏写的几天）补上；晚上 23 点后先写当天的草稿 */

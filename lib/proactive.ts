@@ -1,4 +1,5 @@
 import "server-only";
+import { CHAT_TELLS } from "./humanizer";
 import fs from "node:fs";
 import path from "node:path";
 import { myName, notify } from "./notify";
@@ -236,6 +237,8 @@ ${todayMe() || "（还没写）"}
 ${PERSONA}
 
 ${SPEAKING}
+
+${CHAT_TELLS}
 
 你的名字是「${myName()}」。现在没人跟你说话，你在想：此刻要不要主动给对方发一条消息。现在是 ${nowText()}。
 

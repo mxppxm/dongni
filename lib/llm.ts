@@ -264,14 +264,14 @@ async function* streamOnce(
 /** 要 JSON 结果的后台任务（记忆整理、画像）：超时自己报清楚，不然日志里只有一句 aborted */
 const JSON_MS = 180_000;
 
-export async function completeJson<T>(messages: ChatMessage[], maxTokens = 6000, effort = "low"): Promise<T> {
+export async function completeJson<T>(messages: ChatMessage[], maxTokens = 6000, effort = "low", model?: string): Promise<T> {
   let lastErr: unknown;
   for (let attempt = 0; attempt < 2; attempt++) {
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(timeoutError(`${JSON_MS / 1000} 秒没等到模型的答案`, "total")), JSON_MS);
     try {
       const res = await post(
-        { messages, response_format: { type: "json_object" }, reasoning_effort: effort, max_tokens: maxTokens, temperature: 0.2 },
+        { ...(model ? { model } : {}), messages, response_format: { type: "json_object" }, reasoning_effort: effort, max_tokens: maxTokens, temperature: 0.2 },
         ac.signal,
       );
       const json = await res.json();

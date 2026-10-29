@@ -1,4 +1,5 @@
 import "server-only";
+import { humanize } from "./humanizer";
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -237,7 +238,9 @@ async function writeFile({ name, content }: { name: string; content: string }, c
   let file = path.join(OUT_DIR, safe);
   const ext = path.extname(safe);
   for (let i = 2; await fs.stat(file).then(() => true, () => false); i++) file = path.join(OUT_DIR, `${path.basename(safe, ext)} (${i})${ext}`);
-  await fs.writeFile(file, content, "utf8");
+  // 写给他的文档（不是代码）：按 Humanizer-zh 去一遍 AI 味再存
+  const prose = /\.(md|txt|markdown)$/i.test(safe) && !/```/.test(content);
+  await fs.writeFile(file, prose ? await humanize(content, "写给对方看的文档") : content, "utf8");
   ctx?.attach(card({ type: "file", path: file }));
   return "文件写好了，回复末尾会自动带一张文件卡片，对方点一下就能在 Finder 里看到。回复里不用写路径。";
 }
@@ -336,6 +339,14 @@ export const TOOLS = [
   {
     type: "function",
     function: {
+      name: "humanize_text",
+      description: "帮他把一段文字去 AI 味（他说「帮我改得像人写的」「去去 AI 味」「润色一下」时用）。只改表达，不加事实。genre 写文体，如 公众号文章、邮件、周报、朋友圈。",
+      parameters: { type: "object", properties: { text: { type: "string" }, genre: { type: "string" } }, required: ["text"] },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "set_city",
       description: "记下他所在的城市（中文或拼音都行，如 北京、Shanghai），你的穿搭会跟着那边的天气换。没记过就默认北京。",
       parameters: { type: "object", properties: { city: { type: "string" } }, required: ["city"] },
@@ -415,6 +426,11 @@ export const TOOLS = [
 ];
 
 const IMPL: Record<string, (a: never, ctx?: ToolCtx) => Promise<string>> = {
+  humanize_text: (async ({ text, genre }: { text: string; genre?: string }) => {
+    if (!text?.trim()) return "没给要改的文字。";
+    const out = await humanize(text, genre || "随笔");
+    return `改好了（按开源的 Humanizer-zh 规则，只改表达、不动事实）。把下面这段原样给他，前后可以说一两句：\n\n${out}`;
+  }) as (a: never, ctx?: ToolCtx) => Promise<string>,
   set_city: (async ({ city }: { city: string }) => {
     if (!city?.trim()) return "城市名不能为空。";
     setCity(city);

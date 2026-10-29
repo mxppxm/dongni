@@ -1,4 +1,5 @@
 import "server-only";
+import { CHAT_TELLS } from "./humanizer";
 import { db, getKv, type MessageRow } from "./db";
 import { streamChat, type ChatMessage, type ContentPart } from "./llm";
 import { CAPABILITIES } from "./capabilities";
@@ -92,6 +93,8 @@ ${PERSONA}
 现在是：${nowText()}
 
 ${SPEAKING}
+
+${CHAT_TELLS}
 
 ${LENGTH_HINT}
 ${voice ? `\n${VOICE_HINT}` : ""}

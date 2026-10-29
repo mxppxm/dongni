@@ -1,4 +1,5 @@
 import "server-only";
+import { humanize } from "./humanizer";
 import { getKv, setKv } from "./db";
 import { recentDiary } from "./diary";
 import { completeJson } from "./llm";
@@ -46,7 +47,7 @@ async function writeToday() {
       600,
       "low",
     );
-    if (r.text?.trim()) setKv(k, r.text.trim());
+    if (r.text?.trim()) setKv(k, await humanize(r.text.trim(), "第一人称的随手记"));
   } catch {
     flag.__dongniTodayMe = undefined; // 下次再试
   }
