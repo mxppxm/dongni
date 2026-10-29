@@ -66,6 +66,75 @@ async function post(body: Record<string, unknown>, signal?: AbortSignal) {
 export type StreamEvent = { type: "text"; text: string } | { type: "tools"; calls: ToolCall[] };
 
 /**
+ * 请求前把上下文削到最后能接上话的那一小段：首包慢，十有八九是发出去的东西太多，
+ * 尤其工具结果动辄两三万字、来回几轮全堆在请求里。
+ * 切点只落在 user 上——拆开 assistant 的 tool_calls 和它后面的 tool 结果，接口会直接报错。
+ */
+type SlimRule = { keep: number; text: number; tool: number; images: number };
+
+const SLIM: Record<"normal" | "tight", SlimRule> = {
+  normal: { keep: 20, text: 2000, tool: 6000, images: 2 },
+  tight: { keep: 6, text: 400, tool: 800, images: 1 }, // 首包超时后重试用：只留最小的一段
+};
+
+const clip = (text: string, max: number) => (text.length > max ? text.slice(0, max) + "…" : text);
+
+function clipOne(m: ChatMessage, rule: SlimRule): ChatMessage {
+  if (m.role === "tool") return { ...m, content: clip(m.content, rule.tool) };
+  if (typeof m.content === "string") return { ...m, content: clip(m.content, rule.text) };
+  return m;
+}
+
+export function slimMessages(messages: ChatMessage[], level: "normal" | "tight" = "normal"): ChatMessage[] {
+  const rule = SLIM[level];
+  const sys: ChatMessage[] = [];
+  let rest = messages;
+  while (rest.length && rest[0].role === "system") {
+    sys.push(rest[0]);
+    rest = rest.slice(1);
+  }
+  if (!rest.length) return messages;
+  let cut = Math.max(0, rest.length - rule.keep);
+  while (cut < rest.length && rest[cut].role !== "user") cut++;
+  // 一长串工具来回里可能找不到干净的切点：那就原样发，总比拆坏了强
+  if (cut >= rest.length) return messages;
+  const kept = rest.slice(cut).map((m) => clipOne(m, rule));
+  if (cut > 0) {
+    // 砍掉的里面往往就有「他到底问的什么」，只留一堆工具结果模型会答偏：把最近那条 user 带回来
+    for (let i = cut - 1; i >= 0; i--) {
+      const prev = rest[i];
+      if (prev.role !== "user") continue;
+      const ask = clip(typeof prev.content === "string" ? prev.content : "（他发了图）", Math.min(rule.text, 200));
+      const first = kept[0];
+      kept[0] =
+        typeof first.content === "string"
+          ? { ...first, content: `${ask}\n${first.content}` }
+          : ({ ...first, content: [{ type: "text", text: ask }, ...first.content] } as ChatMessage);
+      break;
+    }
+  }
+  let left = rule.images; // 图太占地方，只留最近几条
+  for (let i = kept.length - 1; i >= 0; i--) {
+    const m = kept[i];
+    if (typeof m.content === "string") continue;
+    const parts = m.content;
+    const imgs = parts.filter((p) => p.type === "image_url");
+    if (!imgs.length) continue;
+    if (left >= imgs.length) {
+      left -= imgs.length;
+      continue;
+    }
+    const keep = left > 0 ? imgs.slice(-left) : [];
+    left = 0;
+    const text = parts.filter((p) => p.type === "text");
+    const next: ContentPart[] = [...text, ...keep];
+    if (!next.length) next.push({ type: "text", text: "（他发了图）" });
+    kept[i] = { ...m, content: next } as ChatMessage;
+  }
+  return [...sys, ...kept];
+}
+
+/**
  * 超时：不是为了催模型，是为了别让连接挂着不动还一直等。
  * 分三段看，别混成一个：
  * - 首包：发出去多久一个字都没来（换模型、模型忙的时候第一句就是会慢，给到 60 秒）；
@@ -87,12 +156,12 @@ function timeoutError(message: string, phase: TimeoutPhase) {
 
 /** 流式对话一轮。模型要用工具时，最后吐出一个 tools 事件。 */
 export async function* streamChat(messages: ChatMessage[], tools?: unknown[]): AsyncGenerator<StreamEvent> {
-  // 首包慢多半是网关排队，跟这句话没关系：一个字都还没出的时候超时了，就原样再发一次。
-  // 已经出过字的不重来（重来会把同一段话说两遍）。
+  // 首包慢多半是网关排队、也可能是这一轮带的东西太多：一个字都还没出的时候超时了，
+  // 就把上下文再砍一刀重发一次。已经出过字的不重来（重来会把同一段话说两遍）。
   let spoken = false;
   for (let attempt = 0; ; attempt++) {
     try {
-      for await (const ev of streamOnce(messages, tools)) {
+      for await (const ev of streamOnce(messages, tools, attempt ? "tight" : "normal")) {
         spoken = true;
         yield ev;
       }
@@ -106,7 +175,11 @@ export async function* streamChat(messages: ChatMessage[], tools?: unknown[]): A
   }
 }
 
-async function* streamOnce(messages: ChatMessage[], tools?: unknown[]): AsyncGenerator<StreamEvent> {
+async function* streamOnce(
+  messages: ChatMessage[],
+  tools?: unknown[],
+  level: "normal" | "tight" = "normal",
+): AsyncGenerator<StreamEvent> {
   const ac = new AbortController();
   const started = Date.now();
   let gotFirst = false; // 模型吐过第一个字没有：决定现在算「首包超时」还是「停住了」
@@ -136,7 +209,7 @@ async function* streamOnce(messages: ChatMessage[], tools?: unknown[]): AsyncGen
   try {
     arm();
     const res = await post(
-      { messages, stream: true, reasoning_effort: process.env.DONGNI_CHAT_REASONING || "low", max_tokens: 16000, temperature: 0.85, ...(tools ? { tools } : {}) },
+      { messages: slimMessages(messages, level), stream: true, reasoning_effort: process.env.DONGNI_CHAT_REASONING || "low", max_tokens: 16000, temperature: 0.85, ...(tools ? { tools } : {}) },
       ac.signal,
     );
     const reader = res.body!.getReader();
