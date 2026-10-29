@@ -5,6 +5,8 @@ export async function register() {
   const { resumePending } = await import("./lib/chat");
   const { reportRebuild, drainRepairQueue } = await import("./lib/selfrepair");
   reportRebuild();
+  // 打电话：本机 3940 端口的中转
+  (await import("./lib/callserver")).startCallServer();
   // 排队中的自我修改：重启 20 秒后接着做（体检一般十几秒就做完）
   setTimeout(drainRepairQueue, 20_000);
   resumePending();

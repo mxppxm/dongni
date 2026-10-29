@@ -2,7 +2,7 @@
 
 import dynamic from "next/dynamic";
 import { AnimatePresence, motion } from "motion/react";
-import { ArrowUp, BookHeart, Moon, Sparkles, Sun } from "lucide-react";
+import { ArrowUp, BookHeart, Moon, Phone, Sparkles, Sun } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import Markdown from "./Markdown";
 import Mood from "./Mood";
@@ -13,6 +13,7 @@ import { hasSpeakable, VoiceButton, VoiceProvider, VoiceToggle } from "./Voice";
 
 const MemoryMap = dynamic(() => import("./MemoryMap"), { ssr: false });
 const Album = dynamic(() => import("./Album"), { ssr: false });
+const Call = dynamic(() => import("./Call"), { ssr: false });
 
 type Status = "done" | "streaming" | "error" | "sending" | "waiting";
 type Msg = {
@@ -88,6 +89,7 @@ export default function Chat() {
   const [micHint, setMicHint] = useState<string | null>(null);
   const [showMap, setShowMap] = useState(false);
   const [showAlbum, setShowAlbum] = useState(false);
+  const [calling, setCalling] = useState(false);
   const [memCount, setMemCount] = useState<number | null>(null);
   const [pulse, setPulse] = useState(0);
   const [theme, setTheme] = useState<Theme>("light");
@@ -466,6 +468,14 @@ export default function Chat() {
           </motion.span>
         </AnimatePresence>
       </button>
+      <button
+        onClick={() => setCalling(true)}
+        className="flex h-10 w-10 items-center justify-center rounded-full text-[var(--icon)] transition-colors hover:bg-[var(--hover)] hover:text-[var(--icon-hover)]"
+        aria-label="打电话"
+        title="打电话给她"
+      >
+        <Phone size={18} strokeWidth={1.6} />
+      </button>
       <VoiceToggle />
       <button
         onClick={() => setShowAlbum(true)}
@@ -534,7 +544,7 @@ export default function Chat() {
                       )}
                       {m.status === "done" && !!m.id && hasSpeakable(m.content) && !m.content.includes("/api/voice/clip/") && (
                         <div className="msg-actions">
-                          <VoiceButton id={m.id} fresh={!!m.fresh} />
+                          <VoiceButton id={m.id} fresh={!!m.fresh && m.kind !== "call"} />
                         </div>
                       )}
                     </div>
@@ -595,6 +605,7 @@ export default function Chat() {
 
       <AnimatePresence>{showMap && <MemoryMap theme={theme} onClose={() => setShowMap(false)} />}</AnimatePresence>
       <AnimatePresence>{showAlbum && <Album onClose={() => setShowAlbum(false)} />}</AnimatePresence>
+      <AnimatePresence>{calling && <Call onClose={() => setCalling(false)} />}</AnimatePresence>
     </div>
     </VoiceProvider>
   );
