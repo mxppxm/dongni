@@ -82,22 +82,80 @@ ${request}
 - 最后用中文、大白话、三五句话告诉用户你改了什么（不要贴代码）。如果判断不该改或改不了，说明原因。`;
 }
 
+/**
+ * 跑 pi。用 json 模式把每一步都记到 logs/pi/ 下，慢在哪一步事后能查：
+ * 一共几步、模型想了多久、命令跑了多久、最慢的是哪条。
+ */
 async function runPi(request: string): Promise<string> {
+  const dir = path.join(ROOT, "logs", "pi");
+  fs.mkdirSync(dir, { recursive: true });
+  const trace = path.join(dir, `${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`);
+  const t0 = Date.now();
   return new Promise((resolve, reject) => {
-    const child = spawn(PI, ["-p", "--no-session", "--no-mcp", "--no-skills", "--thinking", "high", piPrompt(request)], {
+    const child = spawn(PI, ["-p", "--no-session", "--no-mcp", "--no-skills", "--mode", "json", "--thinking", "high", piPrompt(request)], {
       cwd: ROOT,
       env: process.env,
       stdio: ["ignore", "pipe", "pipe"],
     });
-    let out = "";
+    let buf = "";
     let err = "";
-    child.stdout.on("data", (b) => (out += b));
+    let finalText = "";
+    let steps = 0;
+    let toolMs = 0;
+    const toolStart = new Map<string, { at: number; what: string }>();
+    let slowest = { ms: 0, what: "" };
+    const onEvent = (e: Record<string, unknown>, at: number) => {
+      const type = e.type as string;
+      if (type === "turn_start") steps++;
+      if (type === "tool_execution_start") {
+        const args = JSON.stringify(e.args ?? {}).slice(0, 120);
+        toolStart.set(String(e.toolCallId), { at, what: `${e.toolName} ${args}` });
+      }
+      if (type === "tool_execution_end") {
+        const st = toolStart.get(String(e.toolCallId));
+        if (st) {
+          const ms = at - st.at;
+          toolMs += ms;
+          if (ms > slowest.ms) slowest = { ms, what: st.what };
+        }
+      }
+      if (type === "message_end") {
+        const m = e.message as { role?: string; content?: unknown };
+        if (m?.role === "assistant") {
+          const c = m.content;
+          const text = typeof c === "string" ? c : Array.isArray(c) ? c.filter((x) => x?.type === "text").map((x) => x.text).join("") : "";
+          if (text.trim()) finalText = text.trim();
+        }
+      }
+    };
+    child.stdout.on("data", (chunk: Buffer) => {
+      const at = Date.now();
+      buf += chunk.toString("utf8");
+      let i;
+      while ((i = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, i);
+        buf = buf.slice(i + 1);
+        if (!line.trim()) continue;
+        try {
+          const e = JSON.parse(line);
+          // message_update 是逐字增量，太多了，不落盘
+          if (e.type !== "message_update") fs.appendFileSync(trace, JSON.stringify({ t: at - t0, ...e }).slice(0, 4000) + "\n");
+          onEvent(e, at);
+        } catch {
+          // 不是 json 的行忽略
+        }
+      }
+    });
     child.stderr.on("data", (b) => (err += b));
     child.on("error", reject);
     child.on("close", (code) => {
-      log(`pi 退出 code=${code}\n--- stdout ---\n${out}\n--- stderr ---\n${err.slice(-4000)}`);
-      if (code === 0) resolve(out.trim());
-      else reject(new Error(`pi 退出码 ${code}：${(err || out).slice(-500)}`));
+      const total = Date.now() - t0;
+      const sec = (ms: number) => `${Math.round(ms / 1000)} 秒`;
+      log(
+        `pi 退出 code=${code}｜用时 ${sec(total)}，${steps} 步，模型思考约 ${sec(total - toolMs)}，跑命令 ${sec(toolMs)}；最慢一步 ${sec(slowest.ms)}：${slowest.what}｜明细 ${path.relative(ROOT, trace)}\n--- 结果 ---\n${finalText}\n--- stderr ---\n${err.slice(-4000)}`,
+      );
+      if (code === 0) resolve(finalText);
+      else reject(new Error(`pi 退出码 ${code}：${(err || finalText).slice(-500)}`));
     });
   });
 }
