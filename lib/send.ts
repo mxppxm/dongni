@@ -68,13 +68,9 @@ export function verdict(text: string, s: Silence = silence(), now = Date.now(), 
   }
   const repeat = repeatedAlready(body, s);
   if (repeat.repeated) return { ok: false, why: repeat.why ?? "刚才说过同一件事" };
-  // 他还没回话：不是一律闭嘴，而是只认新的由头，同一个由头只说一次
-  if (s.extra >= 1) {
-    if (!reason) return { ok: false, why: "他还没回话，这一句也没有新的由头" };
-    if (!reasonFresh(reason)) return { ok: false, why: "这个由头已经说过了" };
-  }
-  // 自述（改好了、重启了、你试试、还没弄完）：凌晨他睡着时不说，有由头也不吵醒他
-  if (selfNarration(body) && inSleepHours(now)) return { ok: false, why: "凌晨他在睡" };
+  // 只拦「同一句话又说一遍」。他没回话、深夜，都不再一刀切地闭嘴——什么时候该说，由她自己判断（他要的）
+  void reason;
+  void now;
   return { ok: true };
 }
 

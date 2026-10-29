@@ -79,7 +79,7 @@ export type StreamEvent = { type: "text"; text: string } | { type: "tools"; call
 type SlimRule = { keep: number; text: number; tool: number; images: number };
 
 const SLIM: Record<"normal" | "tight", SlimRule> = {
-  normal: { keep: 20, text: 2000, tool: 6000, images: 2 },
+  normal: { keep: 40, text: 2000, tool: 6000, images: 2 },
   tight: { keep: 6, text: 400, tool: 800, images: 1 }, // 首包超时后重试用：只留最小的一段
 };
 

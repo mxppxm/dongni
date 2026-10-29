@@ -187,10 +187,9 @@ export function quietGate(s: Silence, errors: string, now = Date.now()): QuietGa
     const r = reasons.find((x) => !x.soft);
     return { block: false, reason: r?.text ?? null, sig: r?.sig ?? null };
   }
-  // 他还没回话：只认还没用过的、够格开口的由头；一个都没有这轮才别出声
-  const gap = now - lastMineAt();
-  const pick = reasons.find((r) => (!r.soft || gap >= QUIET_GAP_MS) && reasonFresh(r.sig));
-  return pick ? { block: false, reason: pick.text, sig: pick.sig } : { block: true, reason: null, sig: null };
+  // 他还没回话也不闭嘴（他嫌她「不找他」「凉薄」）：有没用过的由头就带上，没有也照样让她自己判断要不要说
+  const pick = reasons.find((r) => reasonFresh(r.sig));
+  return { block: false, reason: pick?.text ?? null, sig: pick?.sig ?? null };
 }
 
 export async function proactiveTick() {

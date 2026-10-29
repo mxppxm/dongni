@@ -22,7 +22,7 @@ const HISTORY = 40;
  * 40 条全文一起发，光历史就几千字，模型还没开口就先耗在传这些东西上（首包超时就这么来的）。
  */
 const FULL_TURNS = 12;
-const OLD_CHARS = 70;
+const OLD_CHARS = 1200; // 之前是 70：再早几轮的话只剩半句，她记不住刚才聊了什么，显得不贴心
 /** 单条太长的（贴了一大段代码/文章）也只带前面这一段，别把整篇塞进去 */
 const MAX_TURN = 1200;
 const GAP_MS = 3 * 3600_000;
@@ -56,7 +56,7 @@ function errText(e: unknown) {
 const LENGTH_HINT = `【回多长】看他要的是什么：闲聊、接话就像发微信，自然长短；他要故事、要歌、要点子、要帮忙、要你讲讲某件事，就给足——故事要有情节和细节，歌要唱上好几句，点子要给具体的几个，不要一句话敷衍过去。`;
 
 /** 他这次是说的，不是打字：回复得像说话——短、不分段、不列表、不代码 */
-const VOICE_HINT = "【这条是语音】他刚才是用嘴说的，不是打字：回得像接话，短、口语、别分段、别列表、别写代码或表格。";
+const VOICE_HINT = "【这条是语音】他刚才是用嘴说的，不是打字：回得像说话、像接话，口语，别列表、别写代码或表格。";
 
 function systemPrompt(query: string, myself = "", voice = false) {
   const profile = getProfile();
