@@ -1076,3 +1076,11 @@ a.card:hover,
   color: var(--dim);
   white-space: pre-wrap;
 }
+.album-day-diary {
+  max-width: 640px;
+  margin: -4px 0 18px;
+  font-size: 13.5px;
+  line-height: 1.85;
+  color: var(--dim);
+  white-space: pre-wrap;
+}

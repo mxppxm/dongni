@@ -1,5 +1,7 @@
 import fs from "node:fs";
+import { db } from "@/lib/db";
 import { diaryOf } from "@/lib/diary";
+import { stripImageMarkdown } from "@/lib/images";
 import { listPhotos, OUTFITS, today, wardrobeFile } from "@/lib/wardrobe";
 
 export const dynamic = "force-dynamic";
@@ -14,7 +16,13 @@ export async function GET() {
       when: o.when,
       url: wardrobeFile(`${o.key}.jpg`) ? `/api/wardrobe/${o.key}.jpg` : null,
     })),
-    photos: listPhotos()
+    photos: [...dailyPhotos(), ...drawnPhotos()].sort((a, b) => b.created_at - a.created_at || b.id - a.id),
+  });
+}
+
+/** 每天拍的那张 */
+function dailyPhotos() {
+  return listPhotos()
       .filter((p) => wardrobeFile(p.file) && fs.existsSync(wardrobeFile(p.file)!))
       .map((p) => ({
         id: p.id,
@@ -25,6 +33,33 @@ export async function GET() {
         diary: diaryOf(p.date),
         created_at: p.created_at,
         url: `/api/wardrobe/${p.file}`,
-      })),
+        kind: "daily",
+      }));
+}
+
+/** 她平时画的所有图：配上她发图时说的那句话 */
+function drawnPhotos() {
+  const rows = db().prepare("SELECT id, prompt, created_at FROM images WHERE kind = 'gen' ORDER BY id").all() as {
+    id: number;
+    prompt: string | null;
+    created_at: number;
+  }[];
+  return rows.map((r) => {
+    const msg = db()
+      .prepare("SELECT content FROM messages WHERE role = 'assistant' AND content LIKE ? ORDER BY id LIMIT 1")
+      .get(`%/api/image/${r.id})%`) as { content: string } | undefined;
+    const said = msg ? stripImageMarkdown(msg.content).replace(/\s+/g, " ").trim() : "";
+    const first = said.split(/(?<=[。！？!?～~])/)[0] ?? "";
+    return {
+      id: 1_000_000 + r.id,
+      date: new Date(r.created_at).toLocaleDateString("sv-SE"),
+      outfit: "",
+      weather: "",
+      caption: first.length > 60 ? first.slice(0, 58) + "…" : first,
+      diary: null as string | null,
+      created_at: r.created_at,
+      url: `/api/image/${r.id}`,
+      kind: "drawn",
+    };
   });
 }

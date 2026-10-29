@@ -15,6 +15,7 @@ type Photo = {
   diary: string | null;
   created_at: number;
   url: string;
+  kind?: string;
 };
 type Data = { today: { outfit: string }; outfits: Outfit[]; photos: Photo[] };
 
@@ -88,6 +89,7 @@ export default function Album({ onClose }: { onClose: () => void }) {
             days.map((g) => (
               <section key={g.date} className="album-day">
                 <h3 className="album-day-title">{dateText(g.date)}</h3>
+                {g.photos.find((p) => p.diary)?.diary && <p className="album-day-diary">{g.photos.find((p) => p.diary)!.diary}</p>}
                 <div className="album-grid">
                   {g.photos.map((p, i) => {
                     const meta = [g.photos.length > 1 ? timeText(p.created_at) : "", p.weather, p.outfit].filter(Boolean).join(" · ");
@@ -102,11 +104,10 @@ export default function Album({ onClose }: { onClose: () => void }) {
                         onClick={() => setZoom(p.url)}
                       >
                         {/* eslint-disable-next-line @next/next/no-img-element */}
-                        <img src={p.url} alt="" loading="lazy" />
+                        <img src={p.url} alt="" loading="lazy" style={p.kind === "drawn" ? { aspectRatio: "auto" } : undefined} />
                         <figcaption>
                           {p.caption && <span className="pc-caption">{p.caption}</span>}
                           <span className="pc-meta">{meta}</span>
-                          {p.diary && <span className="pc-diary">{p.diary}</span>}
                         </figcaption>
                       </motion.figure>
                     );
