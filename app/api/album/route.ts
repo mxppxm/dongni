@@ -16,6 +16,15 @@ export async function GET() {
     })),
     photos: listPhotos()
       .filter((p) => wardrobeFile(p.file) && fs.existsSync(wardrobeFile(p.file)!))
-      .map((p) => ({ date: p.date, outfit: p.outfit, weather: p.weather, caption: p.caption, diary: diaryOf(p.date), url: `/api/wardrobe/${p.file}` })),
+      .map((p) => ({
+        id: p.id,
+        date: p.date,
+        outfit: p.outfit,
+        weather: p.weather,
+        caption: p.caption,
+        diary: diaryOf(p.date),
+        created_at: p.created_at,
+        url: `/api/wardrobe/${p.file}`,
+      })),
   });
 }

@@ -4,9 +4,18 @@ import { motion } from "motion/react";
 import { X } from "lucide-react";
 import { useEffect, useState } from "react";
 
-/** 相册（一天一张，像能翻的日记）和衣橱（几套固定造型，今天穿哪套） */
+/** 相册（按日期攒，日期倒序，能翻回以前的每一天）和衣橱（几套固定造型，今天穿哪套） */
 type Outfit = { key: string; name: string; when: string; url: string | null };
-type Photo = { date: string; outfit: string; weather: string; caption: string; diary: string | null; url: string };
+type Photo = {
+  id: number;
+  date: string;
+  outfit: string;
+  weather: string;
+  caption: string;
+  diary: string | null;
+  created_at: number;
+  url: string;
+};
 type Data = { today: { outfit: string }; outfits: Outfit[]; photos: Photo[] };
 
 const dateText = (d: string) => {
@@ -14,6 +23,9 @@ const dateText = (d: string) => {
   const w = "日一二三四五六"[new Date(y, m - 1, day).getDay()];
   return `${m}月${day}日 · 周${w}`;
 };
+
+/** 同一天拍了好几张时，补上时刻，才分得清哪张是哪张 */
+const timeText = (at: number) => new Date(at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
 
 export default function Album({ onClose }: { onClose: () => void }) {
   const [data, setData] = useState<Data | null>(null);
@@ -29,6 +41,9 @@ export default function Album({ onClose }: { onClose: () => void }) {
     window.addEventListener("keydown", esc);
     return () => window.removeEventListener("keydown", esc);
   }, [onClose, zoom]);
+
+  const sameDayCount = new Map<string, number>();
+  for (const p of data?.photos ?? []) sameDayCount.set(p.date, (sameDayCount.get(p.date) ?? 0) + 1);
 
   return (
     <motion.div
@@ -64,27 +79,30 @@ export default function Album({ onClose }: { onClose: () => void }) {
         {data && tab === "album" &&
           (data.photos.length ? (
             <div className="album-grid">
-              {data.photos.map((p, i) => (
-                <motion.figure
-                  key={p.date}
-                  initial={{ opacity: 0, y: 12 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ delay: Math.min(i, 8) * 0.05 }}
-                  className="polaroid"
-                  style={{ rotate: `${((i * 37) % 5) - 2}deg` }}
-                  onClick={() => setZoom(p.url)}
-                >
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={p.url} alt="" loading="lazy" />
-                  <figcaption>
-                    <span className="pc-caption">{p.caption}</span>
-                    <span className="pc-meta">
-                      {dateText(p.date)} · {p.weather} · {p.outfit}
-                    </span>
-                    {p.diary && <span className="pc-diary">{p.diary}</span>}
-                  </figcaption>
-                </motion.figure>
-              ))}
+              {data.photos.map((p, i) => {
+                const meta = [dateText(p.date) + ((sameDayCount.get(p.date) ?? 0) > 1 ? ` ${timeText(p.created_at)}` : ""), p.weather, p.outfit]
+                  .filter(Boolean)
+                  .join(" · ");
+                return (
+                  <motion.figure
+                    key={p.id}
+                    initial={{ opacity: 0, y: 12 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: Math.min(i, 8) * 0.05 }}
+                    className="polaroid"
+                    style={{ rotate: `${((i * 37) % 5) - 2}deg` }}
+                    onClick={() => setZoom(p.url)}
+                  >
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={p.url} alt="" loading="lazy" />
+                    <figcaption>
+                      {p.caption && <span className="pc-caption">{p.caption}</span>}
+                      <span className="pc-meta">{meta}</span>
+                      {p.diary && <span className="pc-diary">{p.diary}</span>}
+                    </figcaption>
+                  </motion.figure>
+                );
+              })}
             </div>
           ) : (
             <p className="mt-24 text-center text-sm text-[var(--faint)]">还没有照片</p>

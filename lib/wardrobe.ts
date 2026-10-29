@@ -12,7 +12,8 @@ import { INTRO, PERSONA } from "./persona";
 /**
  * 衣橱和相册。
  * 衣橱：几套固定造型，每套一张定妆照（3D 写实、全身、能看到鞋）。穿哪套由「时间 × 季节 × 天气」按规则算，不随机。
- * 相册：一天一张，穿当天那套，配日期、天气、她写的一句话。拍之前先在对话里说一声。
+ * 相册：按日期往下攒，照片文件名带日期；同一天再拍就追加一张，以前的日子一律不覆盖、不删。
+ * 每张照片配日期、天气、她写的一句话。拍之前先在对话里说一声。
  */
 const run = promisify(execFile);
 const ROOT = process.cwd();
@@ -118,7 +119,7 @@ async function draw(prompt: string, refs: string[], out: string, size = "1024x15
   fs.rmSync(out, { force: true });
 }
 
-const g = globalThis as unknown as { __dongniWardrobeBusy?: boolean };
+const g = globalThis as unknown as { __dongniWardrobeBusy?: boolean; __dongniAlbumReady?: boolean };
 
 /** 衣橱：定妆照缺哪套补哪套（一次性，之后都复用） */
 export async function ensureWardrobe() {
@@ -159,17 +160,97 @@ export const wardrobeFile = (name: string) => {
 
 /* ---------------- 相册 ---------------- */
 
-export type Photo = { date: string; outfit: string; weather: string; caption: string; file: string; created_at: number };
+export type Photo = {
+  id: number;
+  date: string;
+  outfit: string;
+  weather: string;
+  caption: string;
+  file: string;
+  created_at: number;
+};
 
+/** 照片文件名里带着日期：album-2026-10-29-<拍摄时间(base36)>.jpg */
+const ALBUM_FILE = /^album-(\d{4}-\d{2}-\d{2})-(.+)\.(?:jpg|jpeg|png)$/i;
+
+/**
+ * 相册一张一行，同一天可以有好几张（再拍就追加），日期不做主键。
+ * 老库里那张「一天一行」的 album 表不动它，只把内容搬过来，一张都不丢。
+ */
 function albumTable() {
-  db().exec(`CREATE TABLE IF NOT EXISTS album (
-    date TEXT PRIMARY KEY, outfit TEXT NOT NULL, weather TEXT NOT NULL, caption TEXT NOT NULL, file TEXT NOT NULL, created_at INTEGER NOT NULL
-  )`);
+  db().exec(`CREATE TABLE IF NOT EXISTS album_photos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    date TEXT NOT NULL,
+    file TEXT NOT NULL,
+    outfit TEXT NOT NULL DEFAULT '',
+    weather TEXT NOT NULL DEFAULT '',
+    caption TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_album_photos_file ON album_photos(file);
+  CREATE INDEX IF NOT EXISTS idx_album_photos_date ON album_photos(date, created_at);`);
+  if (g.__dongniAlbumReady) return;
+  g.__dongniAlbumReady = true;
+  try {
+    migrateAlbum();
+  } catch (e) {
+    console.warn("[dongni] 相册整理失败：", e instanceof Error ? e.message : e);
+  }
 }
 
+type AlbumInsert = (date: string, file: string, outfit: string, weather: string, caption: string, created: number) => void;
+
+/** 老表 + 磁盘上还在的历史照片，一起并进新表（重复的跳过，不会读两次） */
+function migrateAlbum() {
+  const has = (file: string) => !!db().prepare("SELECT 1 FROM album_photos WHERE file = ?").get(file);
+  const ins: AlbumInsert = (date, file, outfit, weather, caption, created) => {
+    if (has(file)) return;
+    db()
+      .prepare("INSERT OR IGNORE INTO album_photos(date, file, outfit, weather, caption, created_at) VALUES(?, ?, ?, ?, ?, ?)")
+      .run(date, file, outfit, weather, caption, created);
+  };
+  const oldTable = db().prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'album'").get();
+  if (oldTable) {
+    const rows = db().prepare("SELECT * FROM album").all() as Omit<Photo, "id">[];
+    for (const r of rows) ins(r.date, r.file, r.outfit ?? "", r.weather ?? "", r.caption ?? "", r.created_at || Date.now());
+  }
+  collectOrphans(ins, has);
+}
+
+/** 以前被「同一天只留一行」顶掉、但文件还在磁盘上的照片：按文件名里的日期捡回来 */
+function collectOrphans(ins: AlbumInsert, has: (file: string) => boolean) {
+  let files: string[] = [];
+  try {
+    files = fs.readdirSync(DIR);
+  } catch {
+    return;
+  }
+  const meta = new Map<string, { outfit: string; weather: string }>();
+  for (const r of db().prepare("SELECT date, outfit, weather FROM album_photos ORDER BY date DESC, created_at DESC").all() as Photo[]) {
+    if (!meta.has(r.date)) meta.set(r.date, { outfit: r.outfit, weather: r.weather });
+  }
+  for (const file of files) {
+    const m = ALBUM_FILE.exec(file);
+    if (!m || has(file)) continue;
+    const date = m[1];
+    const stamp = Number.parseInt(m[2], 36);
+    let created = stamp;
+    if (!Number.isFinite(created) || created < 1_000_000_000_000 || created > Date.now() + 86400_000) {
+      try {
+        created = Math.round(fs.statSync(path.join(DIR, file)).mtimeMs);
+      } catch {
+        continue;
+      }
+    }
+    const info = meta.get(date);
+    ins(date, file, info?.outfit ?? "", info?.weather ?? "", "", created);
+  }
+}
+
+/** 相册：日期倒序，同一天里新的在前 */
 export function listPhotos(): Photo[] {
   albumTable();
-  return db().prepare("SELECT * FROM album ORDER BY date DESC").all() as Photo[];
+  return db().prepare("SELECT * FROM album_photos ORDER BY date DESC, created_at DESC, id DESC").all() as Photo[];
 }
 
 const dayKey = (d = new Date()) => d.toLocaleDateString("sv-SE");
@@ -187,7 +268,7 @@ function post(content: string) {
 export async function takeDailyPhoto(force = false): Promise<string> {
   albumTable();
   const date = dayKey();
-  if (!force && db().prepare("SELECT 1 FROM album WHERE date = ?").get(date)) return "今天已经拍过了。";
+  if (!force && db().prepare("SELECT 1 FROM album_photos WHERE date = ?").get(date)) return "今天已经拍过了。";
   if (g.__dongniWardrobeBusy) return "衣橱还在准备，等一会儿再拍。";
   const ref = path.join(DIR, `${(await today()).outfit.key}.jpg`);
   if (!fs.existsSync(ref)) {
@@ -227,8 +308,8 @@ export async function takeDailyPhoto(force = false): Promise<string> {
   }
   const jpg = file.replace(/\.png$/, ".jpg");
   db()
-    .prepare("INSERT OR REPLACE INTO album(date, outfit, weather, caption, file, created_at) VALUES(?, ?, ?, ?, ?, ?)")
-    .run(date, t.outfit.name, weatherText, plan.caption || "", jpg, Date.now());
+    .prepare("INSERT OR IGNORE INTO album_photos(date, file, outfit, weather, caption, created_at) VALUES(?, ?, ?, ?, ?, ?)")
+    .run(date, jpg, t.outfit.name, weatherText, plan.caption || "", Date.now());
   post(`${plan.caption || "今天的我～"}\n\n![今天](/api/wardrobe/${jpg})`);
   return "拍好了，已经放进相册，也发给他看了。";
 }
@@ -238,7 +319,7 @@ export async function dailyTick() {
   albumTable();
   const h = new Date().getHours();
   if (h < 9 || h >= 22) return;
-  if (db().prepare("SELECT 1 FROM album WHERE date = ?").get(dayKey())) return;
+  if (db().prepare("SELECT 1 FROM album_photos WHERE date = ?").get(dayKey())) return;
   const seen = db()
     .prepare("SELECT 1 FROM messages WHERE role = 'user' AND created_at > ? LIMIT 1")
     .get(new Date(new Date().toDateString()).getTime());
