@@ -326,7 +326,7 @@ export const TOOLS = [
     type: "function",
     function: {
       name: "set_city",
-      description: "记下他所在的城市（中文或拼音都行，如 北京、Shanghai），你的穿搭会跟着那边的天气换。",
+      description: "记下他所在的城市（中文或拼音都行，如 北京、Shanghai），你的穿搭会跟着那边的天气换。没记过就默认北京。",
       parameters: { type: "object", properties: { city: { type: "string" } }, required: ["city"] },
     },
   },

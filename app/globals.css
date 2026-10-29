@@ -836,6 +836,16 @@ a.card:hover,
 }
 
 /* ================= 相册 / 衣橱 ================= */
+.album-day + .album-day {
+  margin-top: 40px;
+}
+.album-day-title {
+  margin: 0 0 16px;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: var(--dim);
+}
 .album-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));

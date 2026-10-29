@@ -41,12 +41,123 @@ export const OUTFITS: Outfit[] = [
 
 /* ---------------- 天气 ---------------- */
 
-export type Weather = { city: string; temp: number; text: string; kind: "sun" | "cloud" | "rain" | "snow" | "unknown" };
+/**
+ * 实时天气：open-meteo（免费、不用 key）。城市默认北京，set_city 记过就用记下的那个。
+ * 拿不到就返回 null——不猜、不编，调用方要照实说「没取到实时天气」。
+ */
+export type Weather = {
+  city: string;
+  temp: number;
+  text: string;
+  kind: "sun" | "cloud" | "rain" | "snow" | "unknown";
+  humidity?: number;
+  wind?: number;
+  advice: string;
+};
+
+export const HOME_CITY = "北京";
+
+/** 常去的城市先查表，省一次地理编码；表里没有的交给 open-meteo 的地理编码（结果写进 kv，只查一次） */
+const KNOWN_CITIES: Record<string, [number, number]> = {
+  北京: [39.9042, 116.4074],
+  上海: [31.2304, 121.4737],
+  广州: [23.1291, 113.2644],
+  深圳: [22.5431, 114.0579],
+  杭州: [30.2741, 120.1551],
+  南京: [32.0603, 118.7969],
+  成都: [30.5728, 104.0668],
+  重庆: [29.563, 106.5516],
+  武汉: [30.5928, 114.3055],
+  西安: [34.3416, 108.9398],
+  天津: [39.3434, 117.3616],
+  苏州: [31.2989, 120.5853],
+  长沙: [28.2282, 112.9388],
+  郑州: [34.7466, 113.6254],
+  青岛: [36.0671, 120.3826],
+  厦门: [24.4798, 118.0894],
+  沈阳: [41.8057, 123.4315],
+  哈尔滨: [45.8038, 126.5349],
+  昆明: [25.0389, 102.7183],
+  大连: [38.914, 121.6147],
+  香港: [22.3193, 114.1694],
+  台北: [25.033, 121.5654],
+};
+
+/** WMO weather code → 中文说法 + 大类（wttr 那套代码跟这个不一样，别再混用） */
+const WEATHER_CODE: Record<number, [string, Weather["kind"]]> = {
+  0: ["晴", "sun"],
+  1: ["晴间多云", "sun"],
+  2: ["多云", "cloud"],
+  3: ["阴", "cloud"],
+  45: ["有雾", "cloud"],
+  48: ["雾凇", "cloud"],
+  51: ["毛毛雨", "rain"],
+  53: ["毛毛雨", "rain"],
+  55: ["细雨", "rain"],
+  56: ["冻雨", "rain"],
+  57: ["冻雨", "rain"],
+  61: ["小雨", "rain"],
+  63: ["中雨", "rain"],
+  65: ["大雨", "rain"],
+  66: ["冻雨", "rain"],
+  67: ["冻雨", "rain"],
+  71: ["小雪", "snow"],
+  73: ["中雪", "snow"],
+  75: ["大雪", "snow"],
+  77: ["雪粒", "snow"],
+  80: ["阵雨", "rain"],
+  81: ["阵雨", "rain"],
+  82: ["暴雨", "rain"],
+  85: ["阵雪", "snow"],
+  86: ["大阵雪", "snow"],
+  95: ["雷阵雨", "rain"],
+  96: ["雷阵雨伴冰雹", "rain"],
+  99: ["雷阵雨伴冰雹", "rain"],
+};
+
+function describe(code: number): { text: string; kind: Weather["kind"] } {
+  const hit = WEATHER_CODE[code];
+  if (hit) return { text: hit[0], kind: hit[1] };
+  if (code >= 95) return { text: "雷阵雨", kind: "rain" };
+  if (code >= 80) return { text: "阵雨", kind: "rain" };
+  if (code >= 71) return { text: "下雪", kind: "snow" };
+  if (code >= 61) return { text: "下雨", kind: "rain" };
+  if (code >= 51) return { text: "毛毛雨", kind: "rain" };
+  if (code >= 45) return { text: "有雾", kind: "cloud" };
+  if (code >= 3) return { text: "阴", kind: "cloud" };
+  if (code >= 1) return { text: "多云", kind: "cloud" };
+  return { text: "天气不明", kind: "unknown" };
+}
+
+/** 温度 + 天气 → 一句穿搭建议（跟衣橱的选法对得上） */
+function adviceFor(temp: number, kind: Weather["kind"], wind: number) {
+  const out: string[] = [];
+  if (temp >= 30) out.push("热，短袖短裤或裙子");
+  else if (temp >= 24) out.push("暖和，短袖配条长裤");
+  else if (temp >= 18) out.push("舒服，长袖或薄针织就够");
+  else if (temp >= 12) out.push("有点凉，外面加件外套");
+  else if (temp >= 5) out.push("冷，厚外套或薄羽绒");
+  else out.push("很冷，羽绒服、围巾手套都上身");
+  if (kind === "rain") out.push("带伞，鞋挑防水的");
+  else if (kind === "snow") out.push("鞋要防滑保暖，路滑走慢点");
+  else if (kind === "sun" && temp >= 28) out.push("记得防晒");
+  if (wind >= 25) out.push("风大，加件防风的");
+  return out.join("，");
+}
+
+/** 成功的结果留 10 分钟（跟 15 分钟一次的日常检查配合），失败只留 90 秒，别一直卡着不重试 */
+const OK_TTL = 10 * 60_000;
+const FAIL_TTL = 90_000;
+const FORECAST_TIMEOUT = 8_000;
+const GEO_TIMEOUT = 6_000;
 
 let weatherCache: { at: number; city: string; w: Weather | null } | null = null;
+/** 同时有好几个人要天气（提示词、相册、拍照）只发一次请求，别各查各的 */
+let inFlight: { city: string; p: Promise<Weather | null> } | null = null;
+const geoCache = new Map<string, { name: string; lat: number; lon: number }>();
 
 export function getCity() {
-  return getKv("weather_city") ?? "";
+  return (getKv("weather_city") ?? "").trim() || HOME_CITY;
 }
 
 export function setCity(city: string) {
@@ -54,28 +165,90 @@ export function setCity(city: string) {
   weatherCache = null;
 }
 
-export async function getWeather(): Promise<Weather | null> {
-  const city = getCity();
-  if (!city) return null;
-  if (weatherCache && weatherCache.city === city && Date.now() - weatherCache.at < 3600_000) return weatherCache.w;
+async function coordsFor(city: string) {
+  const known = KNOWN_CITIES[city];
+  if (known) return { name: city, lat: known[0], lon: known[1] };
+  const mem = geoCache.get(city);
+  if (mem) return mem;
+  const saved = getKv(`weather_geo:${city}`);
+  if (saved) {
+    try {
+      const c = JSON.parse(saved) as { name: string; lat: number; lon: number };
+      if (Number.isFinite(c.lat) && Number.isFinite(c.lon)) {
+        geoCache.set(city, c);
+        return c;
+      }
+    } catch {
+      /* 存坏了就当没存，重新查 */
+    }
+  }
   try {
-    const res = await fetch(`https://wttr.in/${encodeURIComponent(city)}?format=j1&lang=zh`, { signal: AbortSignal.timeout(15_000) });
-    const j = await res.json();
-    const c = j.current_condition[0];
-    const code = Number(c.weatherCode);
-    const SNOW = [179, 227, 230, 323, 326, 329, 332, 335, 338, 350, 368, 371, 374, 377, 392, 395];
-    const kind: Weather["kind"] =
-      code === 113 ? "sun" : [116, 119, 122, 143, 248, 260].includes(code) ? "cloud" : SNOW.includes(code) ? "snow" : "rain";
-    const FOG = [143, 248, 260];
-    const text =
-      code === 113 ? "晴" : code === 116 ? "多云" : code === 119 || code === 122 ? "阴" : FOG.includes(code) ? "有雾" : kind === "snow" ? "下雪" : "下雨";
-    const w: Weather = { city, temp: Number(c.temp_C), text, kind };
-    weatherCache = { at: Date.now(), city, w };
-    return w;
+    const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(city)}&count=1&language=zh&format=json`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(GEO_TIMEOUT), cache: "no-store" });
+    if (!res.ok) return null;
+    const j = (await res.json()) as { results?: { name?: string; latitude?: number; longitude?: number }[] };
+    const r = j.results?.[0];
+    if (!r || !Number.isFinite(r.latitude) || !Number.isFinite(r.longitude)) return null;
+    const c = { name: r.name || city, lat: r.latitude as number, lon: r.longitude as number };
+    geoCache.set(city, c);
+    setKv(`weather_geo:${city}`, JSON.stringify(c));
+    return c;
   } catch {
-    weatherCache = { at: Date.now(), city, w: null };
     return null;
   }
+}
+
+async function fetchWeather(city: string): Promise<Weather | null> {
+  const c = await coordsFor(city);
+  if (!c) return null;
+  try {
+    const url =
+      "https://api.open-meteo.com/v1/forecast?" +
+      `latitude=${c.lat}&longitude=${c.lon}` +
+      "&current=temperature_2m,weather_code,relative_humidity_2m,wind_speed_10m&timezone=auto";
+    const res = await fetch(url, { signal: AbortSignal.timeout(FORECAST_TIMEOUT), cache: "no-store" });
+    if (!res.ok) return null;
+    const j = (await res.json()) as {
+      current?: { temperature_2m?: unknown; weather_code?: unknown; relative_humidity_2m?: unknown; wind_speed_10m?: unknown };
+    };
+    const temp = Number(j.current?.temperature_2m);
+    const code = Number(j.current?.weather_code);
+    if (!Number.isFinite(temp) || !Number.isFinite(code)) return null;
+    const humidity = Number(j.current?.relative_humidity_2m);
+    const wind = Number(j.current?.wind_speed_10m);
+    const { text, kind } = describe(code);
+    return {
+      city,
+      temp: Math.round(temp),
+      text,
+      kind,
+      humidity: Number.isFinite(humidity) ? humidity : undefined,
+      wind: Number.isFinite(wind) ? wind : undefined,
+      advice: adviceFor(temp, kind, Number.isFinite(wind) ? wind : 0),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function getWeather(): Promise<Weather | null> {
+  const city = getCity();
+  if (weatherCache && weatherCache.city === city) {
+    const ttl = weatherCache.w ? OK_TTL : FAIL_TTL;
+    if (Date.now() - weatherCache.at < ttl) return weatherCache.w;
+  }
+  if (inFlight && inFlight.city === city) return inFlight.p;
+  const entry: { city: string; p: Promise<Weather | null> } = { city, p: Promise.resolve(null) };
+  entry.p = fetchWeather(city)
+    .catch(() => null)
+    .then((w) => {
+      weatherCache = { at: Date.now(), city, w };
+      if (!w) console.warn(`[dongni] ${city} 的实时天气没取到（接口失败或超时）`);
+      if (inFlight === entry) inFlight = null;
+      return w;
+    });
+  inFlight = entry;
+  return entry.p;
 }
 
 const season = (m = new Date().getMonth() + 1) => (m >= 3 && m <= 5 ? "春" : m >= 6 && m <= 8 ? "夏" : m >= 9 && m <= 11 ? "秋" : "冬");
@@ -100,13 +273,32 @@ export async function today() {
   return { weather: w, outfit, season: season() };
 }
 
-/** 写进她的系统提示词：她知道自己今天穿什么、外面什么天 */
+/** 提示词里等不起太久：一点点没回来就先说没取到，请求本身还在后台跑，下次就有了 */
+function weatherSoon(ms: number) {
+  return new Promise<Weather | null>((ok) => {
+    const timer = setTimeout(() => ok(null), ms);
+    getWeather().then(
+      (w) => {
+        clearTimeout(timer);
+        ok(w);
+      },
+      () => {
+        clearTimeout(timer);
+        ok(null);
+      },
+    );
+  });
+}
+
+/** 写进她的系统提示词：她知道自己今天穿什么、外面什么天。没取到就明说，不许编。 */
 export async function wardrobeNote() {
-  const t = await today();
+  const w = await weatherSoon(1200);
+  const outfit = pickOutfit(w);
   const city = getCity();
-  return `你今天穿的是「${t.outfit.name}」那身。现在是${t.season}天${
-    t.weather ? `，${city}${t.weather.text}，${t.weather.temp}°C` : city ? "（天气暂时没查到）" : ""
-  }。${city ? "" : "你还不知道他在哪个城市，聊天时自然地问一句，知道了就用 set_city 记下（衣服会跟着那边的天气换）。"}`;
+  const sky = w
+    ? `${city}现在${w.text}，${w.temp}°C${w.advice ? `，${w.advice}` : ""}`
+    : `${city}的实时天气没取到（接口没响应或超时），别猜天气、别编天气`;
+  return `你今天穿的是「${outfit.name}」那身。现在是${season()}天，${sky}。`;
 }
 
 /* ---------------- 画图 ---------------- */
@@ -270,13 +462,13 @@ export async function takeDailyPhoto(force = false): Promise<string> {
   const date = dayKey();
   if (!force && db().prepare("SELECT 1 FROM album_photos WHERE date = ?").get(date)) return "今天已经拍过了。";
   if (g.__dongniWardrobeBusy) return "衣橱还在准备，等一会儿再拍。";
-  const ref = path.join(DIR, `${(await today()).outfit.key}.jpg`);
+  const t = await today();
+  const ref = path.join(DIR, `${t.outfit.key}.jpg`);
   if (!fs.existsSync(ref)) {
     void ensureWardrobe();
     return "衣橱的定妆照还没做好，正在做，做好了再拍。";
   }
-  const t = await today();
-  const weatherText = t.weather ? `${t.weather.city} ${t.weather.text} ${t.weather.temp}°C` : `${t.season}天`;
+  const weatherText = t.weather ? `${t.weather.city} ${t.weather.text} ${t.weather.temp}°C` : "实时天气没取到";
 
   const plan = await completeJson<{ before: string; scene: string; caption: string }>(
     [
@@ -317,6 +509,8 @@ export async function takeDailyPhoto(force = false): Promise<string> {
 /** 每天自动拍一张：白天、他今天来过，才拍（拍的时候他能看到） */
 export async function dailyTick() {
   albumTable();
+  // 顺手把实时天气刷一遍，聊天里那句天气提示就不用等网络
+  void getWeather();
   const h = new Date().getHours();
   if (h < 9 || h >= 22) return;
   if (db().prepare("SELECT 1 FROM album_photos WHERE date = ?").get(dayKey())) return;

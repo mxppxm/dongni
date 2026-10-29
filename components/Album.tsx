@@ -42,8 +42,15 @@ export default function Album({ onClose }: { onClose: () => void }) {
     return () => window.removeEventListener("keydown", esc);
   }, [onClose, zoom]);
 
-  const sameDayCount = new Map<string, number>();
-  for (const p of data?.photos ?? []) sameDayCount.set(p.date, (sameDayCount.get(p.date) ?? 0) + 1);
+  const days = (() => {
+    const out: { date: string; photos: Photo[] }[] = [];
+    for (const p of data?.photos ?? []) {
+      const last = out[out.length - 1];
+      if (last && last.date === p.date) last.photos.push(p);
+      else out.push({ date: p.date, photos: [p] });
+    }
+    return out;
+  })();
 
   return (
     <motion.div
@@ -77,33 +84,36 @@ export default function Album({ onClose }: { onClose: () => void }) {
         </div>
 
         {data && tab === "album" &&
-          (data.photos.length ? (
-            <div className="album-grid">
-              {data.photos.map((p, i) => {
-                const meta = [dateText(p.date) + ((sameDayCount.get(p.date) ?? 0) > 1 ? ` ${timeText(p.created_at)}` : ""), p.weather, p.outfit]
-                  .filter(Boolean)
-                  .join(" · ");
-                return (
-                  <motion.figure
-                    key={p.id}
-                    initial={{ opacity: 0, y: 12 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: Math.min(i, 8) * 0.05 }}
-                    className="polaroid"
-                    style={{ rotate: `${((i * 37) % 5) - 2}deg` }}
-                    onClick={() => setZoom(p.url)}
-                  >
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img src={p.url} alt="" loading="lazy" />
-                    <figcaption>
-                      {p.caption && <span className="pc-caption">{p.caption}</span>}
-                      <span className="pc-meta">{meta}</span>
-                      {p.diary && <span className="pc-diary">{p.diary}</span>}
-                    </figcaption>
-                  </motion.figure>
-                );
-              })}
-            </div>
+          (days.length ? (
+            days.map((g) => (
+              <section key={g.date} className="album-day">
+                <h3 className="album-day-title">{dateText(g.date)}</h3>
+                <div className="album-grid">
+                  {g.photos.map((p, i) => {
+                    const meta = [g.photos.length > 1 ? timeText(p.created_at) : "", p.weather, p.outfit].filter(Boolean).join(" · ");
+                    return (
+                      <motion.figure
+                        key={p.id}
+                        initial={{ opacity: 0, y: 12 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{ delay: Math.min(i, 8) * 0.05 }}
+                        className="polaroid"
+                        style={{ rotate: `${((i * 37) % 5) - 2}deg` }}
+                        onClick={() => setZoom(p.url)}
+                      >
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img src={p.url} alt="" loading="lazy" />
+                        <figcaption>
+                          {p.caption && <span className="pc-caption">{p.caption}</span>}
+                          <span className="pc-meta">{meta}</span>
+                          {p.diary && <span className="pc-diary">{p.diary}</span>}
+                        </figcaption>
+                      </motion.figure>
+                    );
+                  })}
+                </div>
+              </section>
+            ))
           ) : (
             <p className="mt-24 text-center text-sm text-[var(--faint)]">还没有照片</p>
           ))}
