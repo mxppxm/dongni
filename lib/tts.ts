@@ -67,7 +67,7 @@ export async function synthesize(id: number, content: string): Promise<string | 
   const text = speakableText(content);
   if (!text) return null;
   const useDoubao = ttsReady();
-  const voiceTag = useDoubao ? `doubao:${voiceConfig().speaker || "default"}:acted` : VOICE;
+  const voiceTag = useDoubao ? `doubao:${voiceConfig().speaker || "default"}:acted2` : VOICE;
   const key = crypto.createHash("sha1").update(`${voiceTag}:${text}`).digest("hex").slice(0, 12);
   const file = path.join(AUDIO_DIR, `${id}-${key}.mp3`);
   try {

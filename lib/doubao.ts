@@ -45,8 +45,8 @@ export async function doubaoTts(text: string): Promise<{ audio: Buffer; mime: st
   try {
     if (cfg.apiKey) {
       // 先想好这句该怎么念（哪里惊讶、哪里笑、哪里拖长音），再交给豆包 2.0 按这个语气念——不然念出来平平的
-      const direction = await howToSay(said);
-      return await ttsV3(said, cfg.apiKey, cfg.speaker || DEFAULT_SPEAKER_V3, cfg.ttsResourceId, direction);
+      const { script, direction } = await howToSay(said);
+      return await ttsV3(script, cfg.apiKey, cfg.speaker || DEFAULT_SPEAKER_V3, cfg.ttsResourceId, direction);
     }
     if (cfg.appId && cfg.accessToken) return await ttsV1(said, cfg.appId, cfg.accessToken, cfg.speaker || DEFAULT_SPEAKER_V1, cfg.cluster);
     return null;
@@ -90,30 +90,41 @@ function* jsonObjects(raw: string): Generator<string> {
 
 /** 新版控制台：单向流式 HTTP，返回一串 JSON，每个里带一段 base64 音频 */
 /**
- * 这句话怎么念：给豆包 2.0 的「语境提示」（context_texts）。实测加了以后音域宽了三成左右，
- * 写得越具体（哪个词惊讶、哪里笑、哪里拖长）效果越明显。想不出来就不加，照常念。
+ * 念之前先改成「口播稿」+ 一句表演提示。
+ * 实测（同一句吐槽、同一个声音）：只给豆包 2.0 加语境提示，音域只从 103 涨到 117；
+ * 把字改成真人说话的样子（「又——十点？？」「哎哟喂」「……」「～」）音域到 141，再加提示到 184、音调也明显上扬。
+ * 所以起伏主要靠「字怎么写」，提示只是锦上添花。意思不改，只改说法。
  */
-async function howToSay(text: string): Promise<string> {
+async function howToSay(text: string): Promise<{ script: string; direction: string }> {
   try {
     const { completeJson } = await import("./llm");
     const r = await Promise.race([
-      completeJson<{ direction: string }>(
+      completeJson<{ script: string; direction: string }>(
         [
           {
             role: "system",
-            content:
-              "你是配音导演。说话的人是一个 20 岁、活泼爱闹、情绪写在脸上的女生，在跟很熟的人聊天。给下面这段台词写一句表演提示（中文，80 字以内）：整体情绪是什么，哪几个词要重读或拖长、哪里带笑、哪里停顿、语速快慢。要具体、要夸张一点，起伏要大；温柔、难过的话就写轻、慢、软。只输出 JSON：{\"direction\":\"...\"}",
+            content: `你是配音导演兼口播编辑。说话的人是一个 20 岁、活泼爱闹、情绪写在脸上的女生，在跟很熟的人聊天。
+把下面这段要念出来的话改成她真开口时的「口播稿」：
+- 意思、事实、数字一个都不改，不加新内容，长度差不多。
+- 加真人说话的痕迹：语气词（哎呀、诶、哇、哎哟喂、嗯……）、拉长音用「——」或「～」、惊讶用「？？」或「！！」、犹豫用「……」、笑就写「哈哈」。
+- 情绪要放大一点，起伏要明显；温柔、难过的话就写得轻、慢、软，多停顿。
+- 去掉表情符号、链接、代码、markdown 符号。
+再写一句表演提示（中文，60 字以内）：整体情绪、哪里重读或拖长、哪里带笑、语速。
+只输出 JSON：{"script":"...","direction":"..."}`,
           },
-          { role: "user", content: text.slice(0, 600) },
+          { role: "user", content: text.slice(0, 800) },
         ],
-        300,
+        800,
         "none",
       ),
-      new Promise<{ direction: string }>((ok) => setTimeout(() => ok({ direction: "" }), 4000)),
+      new Promise<{ script: string; direction: string }>((ok) => setTimeout(() => ok({ script: "", direction: "" }), 5000)),
     ]);
-    return r.direction?.trim() ?? "";
+    const script = r.script?.trim() ?? "";
+    // 改坏了（太短、太长）就用原文
+    const ok = script && script.length > text.length * 0.6 && script.length < text.length * 1.8 + 20;
+    return { script: ok ? script : text, direction: r.direction?.trim() ?? "" };
   } catch {
-    return "";
+    return { script: text, direction: "" };
   }
 }
 
