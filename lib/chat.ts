@@ -316,6 +316,8 @@ async function generate(assistantId: number, userRow: MessageRow, onEvent: (e: C
           !attempt || !worked,
         );
         // 空回复跟超时一样是可重试的错，不当作「答完了」
+        // 模型自己编的图片链接（不是真画出来的）去掉，只留工具挂上的真图
+        text = text.replace(/!\[[^\]]*\]\((?!\/api\/(?:image|mood|wardrobe|voice)\/)[^)]*\)\s*/g, "");
         if (!text.trim()) throw emptyReply();
         // 他刚发的是语音：她的回复也做一条语音消息接在后头。先做好再置 done，
         // 这样页面断线后轮询拿到的也是带语音的完整内容（合成慢就慢一点，文字已经在屏幕上了）

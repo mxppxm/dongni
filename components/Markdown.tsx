@@ -351,7 +351,7 @@ export default function Markdown({ text, animate = false, voiceAuto = false }: {
               <div key={i} className={b.items.length > 1 ? "md-imgs md-imgs-multi" : "md-imgs"}>
                 {b.items.map((im, k) =>
                   safeHref(im.src) ? (
-                    isVoice(im.src) ? <VoiceClip key={k} src={im.src} auto={voiceAuto} /> : <ImageFigure key={k} src={im.src} alt={im.alt} />
+                    isVoice(im.src) ? <VoiceClip key={k} src={im.src} auto={voiceAuto} /> : /^(\/api\/|\/mood\/|https?:\/\/)/.test(im.src) ? <ImageFigure key={k} src={im.src} alt={im.alt} /> : null
                   ) : null,
                 )}
               </div>
