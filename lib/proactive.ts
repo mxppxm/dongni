@@ -10,7 +10,8 @@ import { completeJson } from "./llm";
 import { activeMemories, formatMemories, getProfile, nowText } from "./memory";
 import { INTRO, PERSONA, SPEAKING } from "./persona";
 import { pendingReminders } from "./reminders";
-import { postAssistant, repairStatus, startRepair } from "./selfrepair";
+import { postAssistant, startRepair } from "./selfrepair";
+import { HONESTY, selfState } from "./selfstate";
 import { runTool } from "./tools";
 
 /**
@@ -163,8 +164,9 @@ export async function proactiveTick() {
     const r = await completeJson<Decision>([
       {
         role: "system",
-        content: `【你后台在改的东西】（真实状态）
-${repairStatus()}
+        content: `【你后台的事】（真实状态）
+${selfState()}
+${HONESTY}
 消息里说要去修、去查，就必须同时在 improve 里写清楚要改什么（这样才会真的去改）；不打算改就别说「我去看看」。
 
 ${INTRO}
@@ -215,6 +217,11 @@ ${
       },
     ]);
 
+    // 说了要去修/查，却没真的交出去：这句不发（不然又是「说了没做」）
+    if (r.send && r.message && !r.improve?.trim() && /(去|在|正在|马上|这就|先)(修|查|排查|看看|弄|改|翻)/.test(r.message)) {
+      console.log(`[dongni] 说了要去做却没真去做，这句不发：${r.message.trim()}`);
+      r.send = false;
+    }
     if (r.send && r.message?.trim()) {
       const text = r.message.trim();
       if (gate.block) {

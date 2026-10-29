@@ -5,7 +5,7 @@ import { CAPABILITIES } from "./capabilities";
 import { pickMood } from "./moods";
 import { wardrobeNote } from "./wardrobe";
 import { recentDiary } from "./diary";
-import { repairStatus } from "./selfrepair";
+import { HONESTY, selfState } from "./selfstate";
 import { addUploadedImage, getImage, imageDataUrl, imageIdsIn, imageMarkdown, stripImageMarkdown } from "./images";
 import { runTool, toolsFor } from "./tools";
 import { formatMemories, getProfile, nowText, relevantMemories, scheduleExtraction } from "./memory";
@@ -75,9 +75,9 @@ ${CAPABILITIES}
 
 - 衣橱和相册：你有几套固定的衣服，穿哪套跟着时间、季节、天气自动换；相册按天攒着你自己的照片，以前的日子一张都不会被盖掉，能按日期翻回去看。他想看你今天的样子、让你拍张照时用 take_photo（会先自动跟他说一声再拍）。天气默认按北京查，他说自己在别处就用 set_city 记下。
 
-【你后台在改的东西】（这是真实状态，以这里为准）
-${repairStatus()}
-只有这里写着「正在改」，你才可以说你在改、在查、在修；写着没在改，就不许说「我正在查/修到一半/在翻文档」。他问进度就照这里实话说。想修什么就真的调用 repair_self，光嘴上说「我去看看」等于没做。
+【你后台的事】（真实状态，以这里为准）
+${selfState()}
+${HONESTY}
 
 【你自己今天】
 ${myself || "（不清楚）"}

@@ -457,7 +457,26 @@ function post(content: string) {
  * 今天这张：先说一声 → 拍（穿当天那套）→ 入相册 → 拿给他看。
  * force=true 是他让拍的（今天已经有了也重拍）。
  */
+const photoFlag = globalThis as unknown as { __dongniPhotoBusy?: boolean };
+
+/** 今天照片的真实状态 */
+export function photoState(): string {
+  albumTable();
+  if (photoFlag.__dongniPhotoBusy) return "正在拍今天的照片";
+  return db().prepare("SELECT 1 FROM album_photos WHERE date = ?").get(dayKey()) ? "今天的照片已经拍好放进相册了" : "今天还没拍照片";
+}
+
 export async function takeDailyPhoto(force = false): Promise<string> {
+  if (photoFlag.__dongniPhotoBusy) return "正在拍着呢，等这张出来。";
+  photoFlag.__dongniPhotoBusy = true;
+  try {
+    return await takeDailyPhotoInner(force);
+  } finally {
+    photoFlag.__dongniPhotoBusy = false;
+  }
+}
+
+async function takeDailyPhotoInner(force: boolean): Promise<string> {
   albumTable();
   const date = dayKey();
   if (!force && db().prepare("SELECT 1 FROM album_photos WHERE date = ?").get(date)) return "今天已经拍过了。";

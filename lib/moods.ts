@@ -34,7 +34,10 @@ const BASE: Omit<Mood, "created_at">[] = [
   { key: "wave", name: "招手", when_text: "打招呼：对方说你好、早、晚安、刚回来", file: "public:anchor.png", preset: "hi", fx: "none", source: "base" },
 ];
 
-const g = globalThis as unknown as { __dongniMoodsReady?: boolean; __dongniMoodGen?: boolean };
+const g = globalThis as unknown as { __dongniMoodsReady?: boolean; __dongniMoodGen?: boolean; __dongniMoodGenName?: string };
+
+/** 正在画的新样子（没有就是 null） */
+export const moodGenerating = () => (g.__dongniMoodGen ? (g.__dongniMoodGenName ?? "新样子") : null);
 
 function ready() {
   if (g.__dongniMoodsReady) return;
@@ -176,6 +179,7 @@ export async function createMood(name: string, when: string, pose: string) {
   const clean = name.trim().slice(0, 8);
   if (!clean || listMoods().some((m) => m.name === clean)) return;
   g.__dongniMoodGen = true;
+  g.__dongniMoodGenName = clean;
   c.bump();
   fs.mkdirSync(MOOD_DIR, { recursive: true });
   const key = `m${Date.now().toString(36)}${crypto.randomBytes(2).toString("hex")}`;
