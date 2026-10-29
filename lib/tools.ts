@@ -457,11 +457,10 @@ const TOOL_GROUPS: { names: string[]; hint: RegExp }[] = [
 ];
 
 /** 这一句话要用到哪几件工具 */
-export function toolsFor(query: string) {
-  const q = query || "";
-  const names = new Set(BASE_TOOLS);
-  for (const g of TOOL_GROUPS) if (g.hint.test(q)) for (const n of g.names) names.add(n);
-  return TOOLS.filter((t) => names.has(t.function.name));
+export function toolsFor(_query: string) {
+  // 按关键词挑工具会让她「手里突然没工具」：他说「无聊」时没带画图，她就真画不了。
+  // 工具全给，描述走缓存，几乎不影响首字速度。
+  return TOOLS;
 }
 
 /** 工具调用过程不上屏：界面上只出现最终回复，所以这里不再提供「正在做什么」的文案 */
