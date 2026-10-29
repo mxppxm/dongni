@@ -1,5 +1,5 @@
 import "server-only";
-import { db, type MessageRow } from "./db";
+import { db, getKv, type MessageRow } from "./db";
 import { streamChat, type ChatMessage, type ContentPart } from "./llm";
 import { CAPABILITIES } from "./capabilities";
 import { pickMood } from "./moods";
@@ -128,9 +128,11 @@ function history(beforeOrAtId: number): ChatMessage[] {
   const rows = (
     db()
       .prepare(
-        "SELECT * FROM messages WHERE id <= ? AND (status = 'done' OR role = 'user') AND kind != 'system' ORDER BY id DESC LIMIT ?",
+        "SELECT * FROM messages WHERE id <= ? AND id >= ? AND (status = 'done' OR role = 'user') AND kind != 'system' ORDER BY id DESC LIMIT ?",
       )
-      .all(beforeOrAtId, HISTORY) as MessageRow[]
+      // context_from：从这条往后才算她「刚才聊的」。之前一段聊乱了（画不了、我瞎说…），翻篇后她不再被那些话带着走；
+      // 长期的事在记忆、画像、日记里，不会丢
+      .all(beforeOrAtId, Number(getKv("context_from") ?? 0), HISTORY) as MessageRow[]
   ).reverse();
   const withImages = new Set(
     rows
