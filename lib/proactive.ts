@@ -92,7 +92,7 @@ function deliver(text: string, quiet: Silence, today: string, todayCount: number
   try {
     v = verdict(text, quiet);
   } catch (e) {
-    console.warn(`[dongni] 主动消息第 1 步（开口前的闸）失手，照原样发：${why(e)}`);
+    console.warn(`[dongni] 主动消息第 1 步 开口前的闸（verdict）失手，照原样发：${why(e)}`);
     v = { ok: true };
   }
   if (!v.ok) {
@@ -104,7 +104,7 @@ function deliver(text: string, quiet: Silence, today: string, todayCount: number
   try {
     postAssistant(text);
   } catch (e) {
-    enqueueProactive(text, "第 2 步 写进对话", e);
+    enqueueProactive(text, "第 2 步 写进对话（postAssistant）", e);
     return;
   }
   // 第 3 步：记账——话已经发出去了，这步出错只影响以后的去重，不再补发，免得同一句出现两次
@@ -115,13 +115,13 @@ function deliver(text: string, quiet: Silence, today: string, todayCount: number
     setKv("proactive_day", today);
     setKv("proactive_count", String(todayCount + 1));
   } catch (e) {
-    console.warn(`[dongni] 主动消息第 3 步（记账）失手，话已经说出去了：${why(e)}`);
+    console.warn(`[dongni] 主动消息第 3 步 记账（setKv）失手，话已经说出去了：${why(e)}`);
   }
   // 第 4 步：系统通知——弹不出来也不影响对话里那句
   try {
     notify(text);
   } catch (e) {
-    console.warn(`[dongni] 主动消息第 4 步（通知）失手，对话里已经说了：${why(e)}`);
+    console.warn(`[dongni] 主动消息第 4 步 系统通知（notify）失手，对话里已经说了：${why(e)}`);
   }
   console.log(`[dongni] 主动发消息：${text}`);
 }
