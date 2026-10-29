@@ -6,12 +6,20 @@ import { pickMood } from "./moods";
 import { wardrobeNote } from "./wardrobe";
 import { recentDiary } from "./diary";
 import { addUploadedImage, getImage, imageDataUrl, imageIdsIn, imageMarkdown, stripImageMarkdown } from "./images";
-import { runTool, TOOLS } from "./tools";
+import { runTool, toolsFor } from "./tools";
 import { formatMemories, getProfile, nowText, relevantMemories, scheduleExtraction } from "./memory";
 import { INTRO, PERSONA, SPEAKING } from "./persona";
 import { startReminders } from "./reminders";
 
 const HISTORY = 40;
+/**
+ * 上下文只带接得上话的一部分：最近十几条给原文，更早的只留开头一句。
+ * 40 条全文一起发，光历史就几千字，模型还没开口就先耗在传这些东西上（首包超时就这么来的）。
+ */
+const FULL_TURNS = 12;
+const OLD_CHARS = 70;
+/** 单条太长的（贴了一大段代码/文章）也只带前面这一段，别把整篇塞进去 */
+const MAX_TURN = 1200;
 const GAP_MS = 3 * 3600_000;
 
 /** 模型空回复最多再补两次（一共三次请求）；每次隔 300ms 左右，别让他干等 */
@@ -112,13 +120,17 @@ function history(beforeOrAtId: number): ChatMessage[] {
   );
   const out: { role: "user" | "assistant"; text: string; images: number[] }[] = [];
   let prev = 0;
-  for (const m of rows) {
+  const recentFrom = rows.length - FULL_TURNS;
+  for (const [i, m] of rows.entries()) {
     // 隔了很久的消息标上时间，让它知道「这是昨天的事了」
     const stamp = m.role === "user" && prev && m.created_at - prev > GAP_MS ? `（${nowText(m.created_at)}）` : "";
     prev = m.created_at;
     const ids = imageIdsIn(m.content);
     const send = m.role === "user" && withImages.has(m.id) ? ids : [];
-    const text = stamp + stripImageMarkdown(m.content) + (ids.length && !send.length && m.role === "user" ? "（他发了图）" : "");
+    let body = stripImageMarkdown(m.content);
+    const limit = i < recentFrom ? OLD_CHARS : MAX_TURN;
+    if (body.length > limit) body = body.slice(0, limit) + "…";
+    const text = stamp + body + (ids.length && !send.length && m.role === "user" ? "（他发了图）" : "");
     const last = out[out.length - 1];
     // 连发多条合成一条，避免出现连续两个 user
     if (last && last.role === m.role) {
@@ -327,11 +339,12 @@ async function oneReply(
   onMood: (mood: string) => void,
   allowTools = true,
 ) {
-  const myself = await Promise.race([wardrobeNote().catch(() => ""), new Promise<string>((ok) => setTimeout(() => ok(""), 1500))]);
+  const myself = await Promise.race([wardrobeNote().catch(() => ""), new Promise<string>((ok) => setTimeout(() => ok(""), 900))]);
   const msgs: ChatMessage[] = [
     { role: "system", content: systemPrompt(stripImageMarkdown(userRow.content), myself) },
     ...history(userRow.id),
   ];
+  const toolList = allowTools ? toolsFor(stripImageMarkdown(userRow.content)) : [];
   const attachments: string[] = [];
   const ctx = {
     turnId: String(assistantId),
@@ -349,7 +362,7 @@ async function oneReply(
     let roundText = "";
     let calls = null;
     const t0 = Date.now();
-    for await (const ev of streamChat(msgs, allowTools && round < ROUNDS - 1 ? TOOLS : undefined)) {
+    for await (const ev of streamChat(msgs, allowTools && round < ROUNDS - 1 && toolList.length ? toolList : undefined)) {
       if (ev.type === "tools") {
         calls = ev.calls;
         continue;

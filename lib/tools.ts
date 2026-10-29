@@ -407,6 +407,35 @@ const IMPL: Record<string, (a: never, ctx?: ToolCtx) => Promise<string>> = {
   system_info: systemInfo,
 };
 
+/**
+ * 按这句话挑工具：十几套工具全发出去，光描述就几千字，模型还没开口就先耗在传这些
+ * 没用的东西上（日志 #214、#218 的首包超时就出在这儿）。
+ * 只带肯定用得上的那几组；什么都没提到（闲聊）就只留最常用的几件。
+ */
+const BASE_TOOLS = ["repair_self", "set_reminder", "list_reminders", "cancel_reminder"];
+
+const TOOL_GROUPS: { names: string[]; hint: RegExp }[] = [
+  {
+    names: ["list_dir", "read_file", "search_files", "recent_files", "system_info"],
+    hint: /电脑|电脑上|文件|文件夹|目录|路径|桌面|下载|文稿|打开|看看|瞅|找|搜|查|最近|在忙|干啥|干嘛|干什么|弄啥|折腾|项目|记录|笔记|内存|磁盘|存储|硬盘|电池|进程|卡|慢|热|CPU|配置|代码|日志/i,
+  },
+  { names: ["generate_image", "show_image"], hint: /画|图|照片|壁纸|截图|拍/ },
+  { names: ["write_file"], hint: /写|文档|脚本|清单|整理成|导出|保存成/ },
+  { names: ["take_photo", "set_city", "create_mood"], hint: /穿|衣|天气|城市|地方|拍|样子|表情|心情|贴纸|自拍/ },
+  {
+    names: ["repair_self"],
+    hint: /改|修|坏|bug|报错|毛病|不好用|样式|界面|功能|加个|去掉|变|别这样|慢/i,
+  },
+];
+
+/** 这一句话要用到哪几件工具 */
+export function toolsFor(query: string) {
+  const q = query || "";
+  const names = new Set(BASE_TOOLS);
+  for (const g of TOOL_GROUPS) if (g.hint.test(q)) for (const n of g.names) names.add(n);
+  return TOOLS.filter((t) => names.has(t.function.name));
+}
+
 /** 工具调用过程不上屏：界面上只出现最终回复，所以这里不再提供「正在做什么」的文案 */
 
 export async function runTool(name: string, rawArgs: string, ctx?: ToolCtx): Promise<string> {

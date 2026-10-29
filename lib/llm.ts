@@ -68,12 +68,12 @@ export type StreamEvent = { type: "text"; text: string } | { type: "tools"; call
 /**
  * 超时：不是为了催模型，是为了别让连接挂着不动还一直等。
  * 分三段看，别混成一个：
- * - 首包：发出去多久一个字都没来（换模型、模型忙的时候第一句就是会慢，给到 30 秒）；
+ * - 首包：发出去多久一个字都没来（换模型、模型忙的时候第一句就是会慢，给到 60 秒）；
  * - 中途停顿：已经在说话了，突然没声了；
  * - 总时长：整轮最多这么久，不能无限等。
  * 每收到一段内容就重新拨钟，所以只有「真的一声不吭」才会超时。
  */
-const FIRST_MS = 30_000;
+const FIRST_MS = 60_000;
 const IDLE_MS = 60_000;
 const TOTAL_MS = 180_000;
 
@@ -87,7 +87,23 @@ function timeoutError(message: string, phase: TimeoutPhase) {
 
 /** 流式对话一轮。模型要用工具时，最后吐出一个 tools 事件。 */
 export async function* streamChat(messages: ChatMessage[], tools?: unknown[]): AsyncGenerator<StreamEvent> {
-  yield* streamOnce(messages, tools);
+  // 首包慢多半是网关排队，跟这句话没关系：一个字都还没出的时候超时了，就原样再发一次。
+  // 已经出过字的不重来（重来会把同一段话说两遍）。
+  let spoken = false;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      for await (const ev of streamOnce(messages, tools)) {
+        spoken = true;
+        yield ev;
+      }
+      return;
+    } catch (e) {
+      const phase = (e as { phase?: string }).phase;
+      if (attempt || spoken || phase !== "first") throw e;
+      console.warn(`[dongni] 首包没来，再发一次：${(e as Error).message}`);
+      await new Promise((ok) => setTimeout(ok, 500));
+    }
+  }
 }
 
 async function* streamOnce(messages: ChatMessage[], tools?: unknown[]): AsyncGenerator<StreamEvent> {
