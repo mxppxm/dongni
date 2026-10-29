@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import { db, type MessageRow } from "@/lib/db";
-import { synthesize } from "@/lib/tts";
+import { synthesize, voiceStream } from "@/lib/tts";
 
 export const dynamic = "force-dynamic";
 
@@ -12,9 +12,15 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   const row = db().prepare("SELECT * FROM messages WHERE id = ? AND role = 'assistant'").get(num) as MessageRow | undefined;
   if (!row?.content?.trim()) return new Response("not found", { status: 404 });
 
-  let file: string | null = null;
+  // 豆包：边合成边放，第一段声音不到一秒就到
+  const live = voiceStream(num, row.content);
+  if (live && typeof live !== "string") {
+    return new Response(live, { headers: { "Content-Type": "audio/mpeg", "Cache-Control": "no-store" } });
+  }
+
+  let file: string | null = typeof live === "string" ? live : null;
   try {
-    file = await synthesize(num, row.content);
+    if (!file) file = await synthesize(num, row.content);
   } catch {
     file = null;
   }

@@ -5,7 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { doubaoTts, ttsReady } from "./doubao";
+import { doubaoTts, doubaoTtsStream, ttsReady } from "./doubao";
 import { voiceConfig } from "./voiceconfig";
 
 /**
@@ -146,4 +146,86 @@ async function speakWithEdge(file: string, text: string, key: string): Promise<s
   } finally {
     fs.rmSync(tmp, { force: true });
   }
+}
+
+/* ---------------- 边合成边播 ---------------- */
+
+type Live = { chunks: Buffer[]; done: boolean; ok: boolean; subs: Set<(b: Buffer | null) => void> };
+const lives = ((globalThis as unknown as { __dongniLive?: Map<string, Live> }).__dongniLive ??= new Map());
+
+function fileFor(id: number, content: string) {
+  const text = speakableText(content);
+  if (!text) return null;
+  const voiceTag = `doubao:${voiceConfig().speaker || "default"}:acted2`;
+  const key = crypto.createHash("sha1").update(`${voiceTag}:${text}`).digest("hex").slice(0, 12);
+  return { text, file: path.join(AUDIO_DIR, `${id}-${key}.mp3`) };
+}
+
+/** 回复一写完就开始合成（页面来要的时候，往往已经出声了） */
+export function prepareVoice(id: number, content: string) {
+  if (!ttsReady()) return;
+  const f = fileFor(id, content);
+  if (!f) return;
+  try {
+    if (fs.statSync(f.file).size > 512) return;
+  } catch {}
+  if (lives.has(f.file)) return;
+  const live: Live = { chunks: [], done: false, ok: false, subs: new Set() };
+  lives.set(f.file, live);
+  const push = (b: Buffer | null) => live.subs.forEach((s) => s(b));
+  void (async () => {
+    try {
+      live.ok = await doubaoTtsStream(f.text, (b) => {
+        live.chunks.push(b);
+        push(b);
+      });
+      if (live.ok) {
+        fs.mkdirSync(AUDIO_DIR, { recursive: true });
+        fs.writeFileSync(f.file, Buffer.concat(live.chunks));
+      }
+    } catch (e) {
+      console.warn("[dongni] 边合成边播失败：", e instanceof Error ? e.message : e);
+    } finally {
+      live.done = true;
+      push(null);
+      setTimeout(() => lives.delete(f.file), 60_000);
+    }
+  })();
+}
+
+/**
+ * 给页面一条能边收边放的音频流：已经合成好就直接给文件；正在合成就接上（先补发已有的几段）；
+ * 都没有就现在开始。合成失败返回 null，由调用方退回整段合成。
+ */
+export function voiceStream(id: number, content: string): ReadableStream<Uint8Array> | string | null {
+  if (!ttsReady()) return null;
+  const f = fileFor(id, content);
+  if (!f) return null;
+  try {
+    if (fs.statSync(f.file).size > 512) return f.file;
+  } catch {}
+  prepareVoice(id, content);
+  const live = lives.get(f.file);
+  if (!live) return null;
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const c of live.chunks) controller.enqueue(new Uint8Array(c));
+      if (live.done) {
+        controller.close();
+        return;
+      }
+      const sub = (b: Buffer | null) => {
+        try {
+          if (b) controller.enqueue(new Uint8Array(b));
+          else {
+            live.subs.delete(sub);
+            controller.close();
+          }
+        } catch {
+          live.subs.delete(sub);
+        }
+      };
+      live.subs.add(sub);
+    },
+  });
 }

@@ -95,7 +95,7 @@ function* jsonObjects(raw: string): Generator<string> {
  * 把字改成真人说话的样子（「又——十点？？」「哎哟喂」「……」「～」）音域到 141，再加提示到 184、音调也明显上扬。
  * 所以起伏主要靠「字怎么写」，提示只是锦上添花。意思不改，只改说法。
  */
-async function howToSay(text: string): Promise<{ script: string; direction: string }> {
+export async function howToSay(text: string): Promise<{ script: string; direction: string }> {
   try {
     const { completeJson } = await import("./llm");
     const r = await Promise.race([
@@ -117,7 +117,8 @@ async function howToSay(text: string): Promise<{ script: string; direction: stri
         800,
         "none",
       ),
-      new Promise<{ script: string; direction: string }>((ok) => setTimeout(() => ok({ script: "", direction: "" }), 5000)),
+      // 改稿最多等 3 秒：接口慢的时候宁可念原文，也别让他干等
+      new Promise<{ script: string; direction: string }>((ok) => setTimeout(() => ok({ script: "", direction: "" }), 3000)),
     ]);
     const script = r.script?.trim() ?? "";
     // 改坏了（太短、太长）就用原文
@@ -229,4 +230,54 @@ export async function doubaoAsr(wav: Buffer): Promise<AsrResult> {
     warn("识别", e);
     return { ok: false, why: "failed" };
   }
+}
+
+/**
+ * 边合成边吐：豆包第一段音频大约 0.4 秒就回来，整段要 3 秒多。拿到一段就交出去，页面边收边放。
+ * 返回 true 表示合成到了声音；没配 key（或只有旧版凭据）返回 false，由调用方走整段合成的老路。
+ */
+export async function doubaoTtsStream(text: string, onChunk: (b: Buffer) => void): Promise<boolean> {
+  const cfg = voiceConfig();
+  const said = text.trim();
+  if (!said || !cfg.apiKey) return false;
+  const { script, direction } = await howToSay(said);
+  const res = await post(
+    TTS_V3,
+    {
+      "X-Api-Key": cfg.apiKey,
+      "X-Api-Resource-Id": cfg.ttsResourceId || DEFAULT_TTS_RESOURCE,
+      "X-Api-Request-Id": crypto.randomUUID(),
+    },
+    {
+      req_params: {
+        text: script,
+        speaker: cfg.speaker || DEFAULT_SPEAKER_V3,
+        audio_params: { format: "mp3", sample_rate: 24000 },
+        ...(direction ? { additions: JSON.stringify({ context_texts: [direction] }) } : {}),
+      },
+    },
+  );
+  if (!res.ok || !res.body) throw new Error(`tts ${res.status}`);
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  let got = false;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    // 回包是一串 JSON，音频在 "data":"<base64>" 里；base64 不含引号，看到收尾的引号就能解出这一段
+    let m: RegExpExecArray | null;
+    const re = /"data":"([^"]*)"/g;
+    let last = 0;
+    while ((m = re.exec(buf))) {
+      if (m[1]) {
+        onChunk(Buffer.from(m[1], "base64"));
+        got = true;
+      }
+      last = re.lastIndex;
+    }
+    if (last) buf = buf.slice(last);
+  }
+  return got;
 }

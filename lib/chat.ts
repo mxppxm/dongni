@@ -6,6 +6,7 @@ import { pickMood } from "./moods";
 import { wardrobeNote } from "./wardrobe";
 import { todayMe } from "./todayme";
 import { recentDiary } from "./diary";
+import { prepareVoice } from "./tts";
 import { HONESTY, selfState } from "./selfstate";
 import { addUploadedImage, getImage, imageDataUrl, imageIdsIn, imageMarkdown, stripImageMarkdown } from "./images";
 import { runTool, toolsFor } from "./tools";
@@ -344,6 +345,8 @@ async function generate(assistantId: number, userRow: MessageRow, onEvent: (e: C
         save("done");
         finished = true;
         emit({ type: "done" });
+        // 回复一写完就开始准备声音：页面来要时多半已经在合成了
+        if (!text.includes("/api/voice/clip/")) prepareVoice(assistantId, text);
         return;
       } catch (e) {
         // 空回复不是坏了，只是这一轮没接上话：单独记一笔，别混进「失败」里
