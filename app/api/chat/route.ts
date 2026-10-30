@@ -14,7 +14,7 @@ export async function POST(req: Request) {
         if (closed) return;
         try {
           controller.enqueue(enc.encode(JSON.stringify(e) + "\n"));
-          if (e.type === "done" || e.type === "follow") {
+          if (e.type === "done" || e.type === "follow" || e.type === "merged") {
             closed = true;
             controller.close();
           }

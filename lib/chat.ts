@@ -17,6 +17,7 @@ import { attachVoiceReply, voiceIdsIn } from "./voicemsg";
 import { startReminders } from "./reminders";
 import { flushOutbox } from "./outbox";
 import { startProgressTick } from "./progress";
+import { clearStop, onCall, publishReply, stopReply, stoppedReply } from "./presence";
 
 const HISTORY = 40;
 /**
@@ -173,10 +174,49 @@ export type ChatEvent =
   | { type: "mood"; mood: string }
   | { type: "voice"; markdown: string }
   | { type: "follow" }
+  /** 这句没单独回：和后面紧跟着来的话合在一起，由 into 那条一起回 */
+  | { type: "merged"; into: number }
   | { type: "done" };
 
 // 正在生成的回复：同一条不会被生成两次
 const active = ((globalThis as unknown as { __dongniActive?: Set<number> }).__dongniActive ??= new Set<number>());
+
+/**
+ * 一条路：不管从哪个口子进来（打字、语音消息、电话），回复都在这一条队里一句一句来。
+ * 前一句说完、写进库，下一句才开始想——她永远看得见自己刚说过什么，不会两张嘴各说各的。
+ */
+const lane = ((globalThis as unknown as { __dongniLane?: { tail: Promise<void> } }).__dongniLane ??= { tail: Promise.resolve() });
+function inLane(job: () => Promise<void>) {
+  const run = lane.tail.then(job, job);
+  lane.tail = run.catch(() => {});
+  return run;
+}
+
+/**
+ * 合成一句回：他连着说了几句（或者电话里说着、手上又打了字），她不该一句一句分开回、显得割裂。
+ * - 排队等着的回复，后面还有新话进来：这条不单独回，让最后那条把前面的一起回了（历史里连着的几句会并成一段）
+ * - 正在想、还一个字没说、也没动手干活：同样让给新来的那条
+ * - 已经开口或已经在干活了：说完这句，新的话下一句接着回（她看得见自己刚说了什么）
+ */
+const waiting = ((globalThis as unknown as { __dongniWaiting?: number[] }).__dongniWaiting ??= []);
+const running = ((globalThis as unknown as { __dongniRunning?: { cur: { id: number; spoke: boolean; worked: boolean } | null } }).__dongniRunning ??= {
+  cur: null,
+});
+const yielding = ((globalThis as unknown as { __dongniYield?: Map<number, number> }).__dongniYield ??= new Map());
+
+/** 新的一句话进来了：正在想、还没开口的那条让给它 */
+function yieldTo(newAssistantId: number) {
+  const r = running.cur;
+  if (r && !r.spoke && !r.worked && r.id !== newAssistantId) yielding.set(r.id, newAssistantId);
+}
+
+/** 这条不单独回了：占位删掉，告诉发起的那个口子去等合并后的那条 */
+function mergeAway(assistantId: number, into: number, emit: (e: ChatEvent) => void) {
+  db().prepare("DELETE FROM messages WHERE id = ? AND role = 'assistant'").run(assistantId);
+  publishReply({ assistantId, type: "done" });
+  emit({ type: "merged", into });
+  console.log(`[dongni] #${assistantId} 并进 #${into} 一起回`);
+}
 
 /**
  * 先落库再调模型：用户的话一到就写进库；回复边生成边写库。
@@ -222,7 +262,23 @@ export function startReply(clientId: string, content: string, onEvent: (e: ChatE
       .lastInsertRowid,
   );
   onEvent({ type: "meta", userId: user.id, assistantId });
+  yieldTo(assistantId);
   void generate(assistantId, user, onEvent);
+}
+
+/**
+ * 电话里他插话了：这条回复只算说出口的那部分。
+ * 还在生成就叫它停（生成那边收尾）；已经写完了（字生成得比念得快，常有的事）就直接把库里这条改短。
+ * 工具挂上的图片、文件卡片照样留着。
+ */
+export function cutReply(assistantId: number, spoken: string) {
+  if (active.has(assistantId)) return stopReply(assistantId, spoken);
+  const row = db().prepare("SELECT content, status FROM messages WHERE id = ?").get(assistantId) as { content: string; status: string } | undefined;
+  if (!row || row.status !== "done") return;
+  const keep = (row.content.match(/!\[[^\]]*\]\([^)]*\)|```card\n[\s\S]*?\n```/g) ?? []).join("\n\n");
+  const text = (spoken.trim() ? `${spoken.trim()}……` : "……") + (keep ? `\n\n${keep}` : "");
+  db().prepare("UPDATE messages SET content = ? WHERE id = ?").run(text, assistantId);
+  console.log(`[dongni] #${assistantId} 被打断（已写完），只记说出口的：${spoken.slice(0, 30)}`);
 }
 
 /** 服务启动时把没写完、出过错的回复接着生成，不用手动重试；顺带把定时提醒重新上表 */
@@ -246,9 +302,40 @@ export function resumePending() {
 async function generate(assistantId: number, userRow: MessageRow, onEvent: (e: ChatEvent) => void = () => {}) {
   if (active.has(assistantId)) return;
   active.add(assistantId);
+  waiting.push(assistantId);
+  return inLane(async () => {
+    waiting.splice(waiting.indexOf(assistantId), 1);
+    // 后面已经排着新的话了：这条不单独回，交给最后那条一起回
+    const later = waiting[waiting.length - 1];
+    if (later) {
+      active.delete(assistantId);
+      let alive = true;
+      return mergeAway(assistantId, later, (e) => {
+        if (!alive) return;
+        try {
+          onEvent(e);
+        } catch {
+          alive = false;
+        }
+      });
+    }
+    running.cur = { id: assistantId, spoke: false, worked: false };
+    try {
+      await generateNow(assistantId, userRow, onEvent);
+    } finally {
+      running.cur = null;
+      yielding.delete(assistantId);
+    }
+  });
+}
+
+async function generateNow(assistantId: number, userRow: MessageRow, onEvent: (e: ChatEvent) => void) {
   const d = db();
   let alive = true;
   const emit = (e: ChatEvent) => {
+    // 广播给所有出口（电话在听就念出来）；发起这句的那个口子另外照常收
+    if (e.type === "delta" || e.type === "reset" || e.type === "done") publishReply({ assistantId, ...e });
+    else if (e.type === "mood") publishReply({ assistantId, type: "mood", mood: e.mood });
     if (!alive) return;
     try {
       onEvent(e);
@@ -256,6 +343,7 @@ async function generate(assistantId: number, userRow: MessageRow, onEvent: (e: C
       alive = false;
     }
   };
+  publishReply({ assistantId, type: "start" });
   let text = "";
   let lastSave = 0;
   // 写库偶尔会撞锁：记一笔继续，不能因为存不进去就把这句回复也丢了
@@ -278,6 +366,7 @@ async function generate(assistantId: number, userRow: MessageRow, onEvent: (e: C
     emit({ type: "delta", text });
     emit({ type: "done" });
   };
+  let attached = ""; // 工具挂到回复末尾的图片、卡片
   let working = false; // 已经去跑腿/画画了，挑出来的心情就别盖掉它
   let worked = false; // 这轮真的跑过腿/画过图：重试时不再跑一通，免得重复发提醒、重复画画
   try {
@@ -297,6 +386,7 @@ async function generate(assistantId: number, userRow: MessageRow, onEvent: (e: C
         // 上次出了半截字的，清掉重来
         if (text) {
           text = "";
+          attached = "";
           save("streaming");
           emit({ type: "reset" });
         }
@@ -307,6 +397,7 @@ async function generate(assistantId: number, userRow: MessageRow, onEvent: (e: C
           userRow,
           (t) => {
             text += t;
+            if (running.cur?.id === assistantId && t.trim()) running.cur.spoke = true;
             emit({ type: "delta", text: t });
             if (Date.now() - lastSave > 400) {
               save("streaming");
@@ -323,11 +414,34 @@ async function generate(assistantId: number, userRow: MessageRow, onEvent: (e: C
           (mood) => {
             working = true;
             worked = true;
+            if (running.cur?.id === assistantId) running.cur.worked = true;
             emit({ type: "mood", mood });
           },
           // 前面已经动过手了：重试只管把话说出来，不再重复跑腿
           !attempt || !worked,
+          () => stoppedReply(assistantId) !== undefined || yielding.has(assistantId),
+          (md) => {
+            attached += md;
+            text += md;
+            emit({ type: "delta", text: md });
+          },
         );
+        // 还没开口就来了新话：让给新的那条一起回
+        const into = yielding.get(assistantId);
+        if (into !== undefined && !text.trim()) {
+          finished = true;
+          return mergeAway(assistantId, into, emit);
+        }
+        // 电话里被他打断了：只留已经说出口的，后面没说的不算她说过（工具挂上的图、文件照样留着）
+        const cut = stoppedReply(assistantId);
+        if (cut !== undefined) {
+          text = (cut.trim() ? `${cut.trim()}……` : "……") + attached;
+          save("done");
+          finished = true;
+          emit({ type: "done" });
+          console.log(`[dongni] #${assistantId} 被打断，只记说出口的：${cut.slice(0, 30)}`);
+          return;
+        }
         // 空回复跟超时一样是可重试的错，不当作「答完了」
         // 模型自己编的图片链接（不是真画出来的）去掉，只留工具挂上的真图
         text = text.replace(/!\[[^\]]*\]\((?!\/api\/(?:image|mood|wardrobe|voice)\/)[^)]*\)\s*/g, "");
@@ -369,6 +483,7 @@ async function generate(assistantId: number, userRow: MessageRow, onEvent: (e: C
     finishStuck();
   } finally {
     active.delete(assistantId);
+    clearStop(assistantId);
     scheduleExtraction();
   }
 }
@@ -380,10 +495,12 @@ async function oneReply(
   onDiscard: () => void,
   onMood: (mood: string) => void,
   allowTools = true,
+  stopped: () => boolean = () => false,
+  onAttach: (md: string) => void = onText,
 ) {
   const myself = await Promise.race([wardrobeNote().catch(() => ""), new Promise<string>((ok) => setTimeout(() => ok(""), 900))]);
   const msgs: ChatMessage[] = [
-    { role: "system", content: systemPrompt(stripImageMarkdown(userRow.content), myself, voiceIdsIn(userRow.content).length > 0 || !!userRow.client_id?.startsWith("call-")) },
+    { role: "system", content: systemPrompt(stripImageMarkdown(userRow.content), myself, voiceIdsIn(userRow.content).length > 0 || !!userRow.client_id?.startsWith("call-") || onCall()) },
     ...history(userRow.id),
     ...lastSentImages(userRow.id),
     // 放在最后、紧挨着回复：她最容易顺着自己前面说过的话往下编，这里拿真实状态压住
@@ -402,11 +519,12 @@ async function oneReply(
   let seen: number[] = [];
   // 回复写完后，把工具挂上的图片、卡片接在末尾
   const flush = () => {
-    if (attachments.length) onText(`\n\n${attachments.splice(0).join("\n\n")}`);
+    if (attachments.length) onAttach(`\n\n${attachments.splice(0).join("\n\n")}`);
   };
   const ROUNDS = 8;
   let usedTool = false; // 这次真动过手：只有动过手，最后那句「别动手了，直接说」才有意义
   for (let round = 0; round < ROUNDS; round++) {
+    if (stopped()) return flush();
     let roundText = "";
     let calls = null;
     const t0 = Date.now();
@@ -415,6 +533,8 @@ async function oneReply(
         calls = ev.calls;
         continue;
       }
+      // 先看一眼要不要停（被打断、或者让给新来的话），再把这个字放出去
+      if (stopped()) return flush();
       roundText += ev.text;
       onText(ev.text);
     }
@@ -443,7 +563,7 @@ async function oneReply(
   }
   // 一整轮都在翻东西、始终没张嘴（日志里连着好几轮「文字 0」就是这样）：最后不给工具，
   // 让它就着已经拿到的结果把话说出来。这是空回复的正根儿——光靠整轮重来，前面查到的还全丢了。
-  if (usedTool) {
+  if (usedTool && !stopped()) {
     msgs.push({ role: "user", content: "（别再动手查了，就着上面拿到的，用一两句话直接回我。）" });
     let roundText = "";
     const t0 = Date.now();

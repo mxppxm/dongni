@@ -83,7 +83,16 @@ function encodeWav(samples: Float32Array, rate: number) {
 
 const clock = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 
-export default function MicButton({ onSent, onHint }: { onSent: (r: VoiceSendResult) => void; onHint: (t: string | null) => void }) {
+export default function MicButton({
+  onSent,
+  onHint,
+  onIntercept,
+}: {
+  onSent: (r: VoiceSendResult) => void;
+  onHint: (t: string | null) => void;
+  /** 正在打电话：麦克风已经在电话那边了，点这里就回到电话，不再另录一段 */
+  onIntercept?: () => void;
+}) {
   const [state, setState] = useState<"idle" | "recording" | "sending">("idle");
   const [secs, setSecs] = useState(0);
   const rec = useRef<Rec | null>(null);
@@ -200,6 +209,7 @@ export default function MicButton({ onSent, onHint }: { onSent: (r: VoiceSendRes
   }, [onHint]);
 
   const onClick = () => {
+    if (onIntercept && state === "idle") return onIntercept();
     if (state === "recording") void stop();
     else if (state === "idle") void start();
   };

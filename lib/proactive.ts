@@ -16,6 +16,7 @@ import { postAssistant, startRepair } from "./selfrepair";
 import { HONESTY, selfState } from "./selfstate";
 import { todayMe } from "./todayme";
 import { runTool } from "./tools";
+import { onCall } from "./presence";
 
 /**
  * 主动找对方：每隔一会儿想一想「现在有没有值得说的」，有就发一条，并弹系统通知。
@@ -195,6 +196,8 @@ export function quietGate(s: Silence, errors: string, now = Date.now()): QuietGa
 
 export async function proactiveTick() {
   if (state.running) return;
+  // 正在打电话：人就在跟前说话，不另外「找」他
+  if (onCall()) return;
   // 上次断在半路的那句话，顺手补一次（重启时 lib/chat.ts 里也会补）
   flushOutbox();
   const d = db();

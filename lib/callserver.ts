@@ -7,9 +7,11 @@ import { activeMemories, getProfile } from "./memory";
 import { PERSONA } from "./persona";
 import { todayMe } from "./todayme";
 import { voiceConfig } from "./voiceconfig";
-import { startReply } from "./chat";
+import { cutReply, startReply } from "./chat";
 import { replyMode } from "./llm";
+import { callEnded, callStarted, type ReplyEvent, subscribeReplies } from "./presence";
 import { speakableText } from "./tts";
+import { ENROLL_SECONDS, enrollVoiceprint, VOICEPRINT_MIN, voiceprint, voiceprintScore, warmVoiceprint } from "./voiceprint";
 import { wardrobeNote } from "./wardrobe";
 
 /**
@@ -21,7 +23,9 @@ import { wardrobeNote } from "./wardrobe";
  * 你一句说完，识别出的文字走普通聊天那条路生成回复，边生成边用 ChatTTSText 交给豆包念出来。
  * 豆包自己也会生成一个回复，那个不播（按 tts_type 区分，只放 chat_tts_text 的声音）。
  */
-const PORT = Number(process.env.DONGNI_CALL_PORT) || 3940; // 页面按「网页端口 + 1」来连
+const PORT = Number(process.env.DONGNI_CALL_PORT) || 3940;
+/** 没录过声纹时，攒够这么多秒他的话就自动录 */
+const AUTO_ENROLL_SECONDS = 12; // 页面按「网页端口 + 1」来连
 const URL = "wss://openspeech.bytedance.com/api/v3/realtime/dialogue";
 const APP_KEY = "PlgvMymc7f3tQnJ6";
 
@@ -114,20 +118,62 @@ function bridge(page: WebSocket) {
     return page.close();
   }
   const sid = crypto.randomUUID();
+  warmVoiceprint();
   let ready = false;
   let userText = "";
-  let botText = "";
   let playing = ""; // 当前这句是谁的声音：chat_tts_text 是她的脑子说的，其他是豆包自己的，不播
   let turn = 0; // 第几轮回复；他插话后，上一轮剩下的话就别再送去念了
-  /** 把她的回复一句句送去念（流式：start → content… → end） */
-  const speaker = (myTurn: number) => {
+  // 声纹：pre 是最近半秒的声音（豆包报「开口」总晚一点，往前补上）；utter 是这一句攒下的声音
+  const pre: Buffer[] = [];
+  let utter: Buffer[] | null = null;
+  let verdict: boolean | null = null; // 开头那一秒认出来的：是他 / 不是他 / 还没认
+  let checking = false;
+  let enrolling: Buffer[] | null = null; // 正在录声纹：这段时间的声音不给豆包
+  /**
+   * 豆包有两种「照我给的字念」：
+   * - ChatTTSText（500）：流式、最快，但只能用来回答他刚在电话里说的那句（收到 459 之后）
+   * - SayHello（300）：任何时候都能念，但一次一整段，而且新的一段会顶掉还没念完的——所以排队，念完（359）再送下一段
+   * 电话里问的走前者；打字引出来的回复、提醒、照片拍好了这些走后者。
+   */
+  // 排队的每一段带着自己的「已念」回调：真送去念了才算她说出口，还在队里的被打断就不算
+  const hello = { queue: [] as { content: string; onSaid: (t: string) => void }[], busy: false, reply: "", timer: undefined as NodeJS.Timeout | undefined };
+  const flushHello = () => {
+    if (hello.busy || !hello.queue.length || up.readyState !== WebSocket.OPEN) return;
+    const batch = hello.queue.splice(0);
+    const content = batch.map((b) => b.content).join("");
+    hello.busy = true;
+    up.send(frame(300, { content }, sid));
+    batch.forEach((b) => b.onSaid(b.content));
+    // 万一等不到「念完了」，按字数估个时长兜底，别把后面的话卡死
+    clearTimeout(hello.timer);
+    hello.timer = setTimeout(() => {
+      hello.busy = false;
+      flushHello();
+    }, 4000 + content.length * 300);
+  };
+  const helloDone = () => {
+    clearTimeout(hello.timer);
+    hello.busy = false;
+    hello.reply = "";
+    flushHello();
+    maybeFinished();
+  };
+
+  /** 把她的话一句句送去念；viaQuery：是不是在回答他电话里刚说的那句。onSaid 记下真送出去念的 */
+  const speaker = (myTurn: number, viaQuery: boolean, onSaid: (t: string) => void = () => {}) => {
     let started = false;
     let pending = "";
     let finished = false;
     const send = (content: string, end: boolean) => {
       if (myTurn !== turn || up.readyState !== WebSocket.OPEN) return;
       if (!started) console.log(`[dongni][call] +${Date.now() - T0}ms 送出第一句：${content.slice(0, 20)}`);
-      up.send(frame(500, { start: !started, content, end }, sid));
+      if (viaQuery) {
+        up.send(frame(500, { start: !started, content, end }, sid));
+        if (content) onSaid(content);
+      } else if (content) {
+        hello.queue.push({ content, onSaid });
+        flushHello();
+      }
       started = true;
     };
     return {
@@ -152,35 +198,130 @@ function bridge(page: WebSocket) {
       },
     };
   };
-  /** 你这句说完了：交给她自己的脑子回 */
+
+  /**
+   * 一条路：她的每一句回复都从 presence 广播出来，电话这头订阅着就念——
+   * 不管这句是你在电话里说的、还是你在对话框里打的字引出来的。回复本来就排着队一句句来，这里同一时间只念一句。
+   */
+  // current 一直留到这句「念完」为止，不是「想完」——字生成得比念得快，念到一半他插话也要能截住
+  type Speaking = {
+    id: number;
+    say: ReturnType<typeof speaker>;
+    via: boolean;
+    spoken: string;
+    text: string;
+    filler: boolean;
+    genDone: boolean;
+    replyId: string; // 豆包那边这段声音的编号（ChatTTSText 那条路用，等它念完）
+    ttsDone: boolean;
+    timer?: NodeJS.Timeout;
+  };
+  let current: Speaking | null = null;
+  const callReplies = new Set<number>(); // 回答他电话里那句话的回复
+  const generated = new Set<number>(); // 经过脑子生成的回复；其他直接写进对话的（提醒、照片、改好了）另外念
+  const extras: string[] = [];
+  const speakExtras = () => {
+    while (!current && extras.length) {
+      const say = speaker(turn, false);
+      say.push(extras.shift()! + "\n");
+      say.end();
+    }
+  };
+  const onReply = (e: ReplyEvent) => {
+    if (e.type === "start") {
+      generated.add(e.assistantId);
+      const via = callReplies.has(e.assistantId);
+      const me: Speaking = {
+        id: e.assistantId,
+        say: speaker(turn, via, (t) => (me.spoken += t)),
+        via,
+        spoken: "",
+        text: "",
+        filler: false,
+        genDone: false,
+        replyId: "",
+        ttsDone: false,
+      };
+      if (current) clearTimeout(current.timer);
+      current = me;
+      return;
+    }
+    if (!current || e.assistantId !== current.id) return; // 接通前就开始的、被打断的，都不念
+    if (e.type === "delta") {
+      if (!current.text) console.log(`[dongni][call] +${Date.now() - T0}ms 第一个字`);
+      current.say.push(e.text);
+      current.text += e.text;
+      tell({ type: "her", text: current.text });
+    } else if (e.type === "mood" && (e.mood === "run" || e.mood === "draw") && !current.text && !current.filler) {
+      // 要去干活了（查电脑、写文件、画画）还一个字没说：先应一声，别让电话那头干等着
+      current.filler = true;
+      const lines = e.mood === "draw" ? ["好，我画一下，等我会儿～", "行，我这就画，稍等哦"] : ["好，我弄一下，等我一会儿～", "行，我去看看，马上", "嗯嗯，我来弄，稍等哈"];
+      current.say.push(lines[Math.floor(Math.random() * lines.length)] + "\n");
+    } else if (e.type === "reset") {
+      // 调工具前的铺垫话（「我去写一下」）在电话里留着——已经念出去了
+    } else if (e.type === "done") {
+      current.say.end();
+      current.genDone = true;
+      // 兜底：等不到「念完」的信号，按字数估个时长就当念完了
+      const me = current;
+      me.timer = setTimeout(() => finishSpeaking(me), 5000 + me.spoken.length * 300);
+      maybeFinished();
+    }
+  };
+  const finishSpeaking = (me: Speaking) => {
+    if (current !== me) return;
+    clearTimeout(me.timer);
+    current = null;
+    speakExtras();
+  };
+  /** 这句想完了、也念完了：放下，接着念排着的（提醒、照片…） */
+  const maybeFinished = () => {
+    const c = current;
+    if (!c || !c.genDone) return;
+    const played = !c.spoken || (c.via ? c.ttsDone : !hello.busy && !hello.queue.length);
+    if (played) finishSpeaking(c);
+  };
+  /** 他插话（认过是他）：她停嘴，正在想的那句也停，只留说出口的 */
+  const interrupt = () => {
+    tell({ type: "clear" });
+    turn++;
+    if (current) {
+      cutReply(current.id, current.spoken);
+      clearTimeout(current.timer);
+      current = null;
+    }
+    extras.length = 0;
+    hello.queue.length = 0;
+    helloDone();
+  };
+  /** 不经过脑子、直接写进对话的话（提醒到点、照片拍好、改好了…）：电话里也说一声 */
+  let lastSeen = 0;
+  const watchDirect = () => {
+    const rows = db()
+      .prepare("SELECT id, content, kind FROM messages WHERE id > ? AND role = 'assistant' AND status = 'done' ORDER BY id")
+      .all(lastSeen) as { id: number; content: string; kind: string }[];
+    for (const r of rows) {
+      lastSeen = r.id;
+      if (generated.has(r.id) || r.kind === "system" || r.kind === "call") continue;
+      const t = speakableText(r.content);
+      if (t) extras.push(t);
+    }
+    speakExtras();
+  };
+  let unsubscribe = () => {};
+  let watcher: NodeJS.Timeout | undefined;
+  let counted = false;
+
+  /** 你这句说完了：交给她自己的脑子回（和打字是同一条路，念出来交给上面的订阅） */
   const answer = (text: string) => {
-    const myTurn = ++turn;
-    const say = speaker(myTurn);
-    let assistantId = 0;
-    let said = false;
-    replyMode.run({ fast: true }, () => startReply(`call-${crypto.randomUUID()}`, text, (e) => {
-      if (e.type === "meta") {
-        assistantId = e.assistantId;
-        // 通话里说的话也是聊天记录，只是标一下来自电话（页面不会再自动念一遍）
+    replyMode.run({ fast: true }, () =>
+      startReply(`call-${crypto.randomUUID()}`, text, (e) => {
+        // 通话里说的话也是聊天记录，只是标一下来自电话
+        if (e.type !== "meta") return;
+        callReplies.add(e.assistantId);
         db().prepare("UPDATE messages SET kind = 'call' WHERE id IN (?, ?)").run(e.userId, e.assistantId);
-      } else if (e.type === "delta") {
-        if (!botText) console.log(`[dongni][call] +${Date.now() - T0}ms 第一个字`);
-        say.push(e.text);
-        botText += e.text;
-        tell({ type: "her", text: botText });
-      } else if (e.type === "mood" && (e.mood === "run" || e.mood === "draw") && !botText && !said) {
-        // 要去干活了（查电脑、写文件、画画）还一个字没说：先应一声，别让电话那头干等着
-        said = true;
-        const lines = e.mood === "draw" ? ["好，我画一下，等我会儿～", "行，我这就画，稍等哦"] : ["好，我弄一下，等我一会儿～", "行，我去看看，马上", "嗯嗯，我来弄，稍等哈"];
-        say.push(lines[Math.floor(Math.random() * lines.length)] + "\n");
-      } else if (e.type === "reset") {
-        // 调工具前的铺垫话（「我去写一下」）在电话里留着——已经念出去了
-      } else if (e.type === "done") {
-        say.end();
-        botText = "";
-        void assistantId;
-      }
-    }));
+      }),
+    );
   };
   const up = new WebSocket(URL, {
     headers: {
@@ -191,6 +332,14 @@ function bridge(page: WebSocket) {
     },
   });
   const close = () => {
+    unsubscribe();
+    unsubscribe = () => {};
+    clearInterval(watcher);
+    clearTimeout(hello.timer);
+    if (counted) {
+      counted = false;
+      callEnded();
+    }
     try {
       if (up.readyState === WebSocket.OPEN) {
         up.send(frame(102, {}, sid));
@@ -234,33 +383,77 @@ function bridge(page: WebSocket) {
         break;
       case 150:
         ready = true;
-        tell({ type: "ready" });
+        tell({ type: "ready", voiceprint: !!voiceprint() });
+        callStarted();
+        counted = true;
+        lastSeen = (db().prepare("SELECT MAX(id) m FROM messages").get() as { m: number | null }).m ?? 0;
+        unsubscribe = subscribeReplies(onReply);
+        watcher = setInterval(watchDirect, 1500);
         break;
-      case 450: // 他开口了：她要是正在说，马上停；上一轮还没念的也不念了
-        tell({ type: "clear" });
-        turn++;
+      case 450: // 有人开口了：她要是正在说，马上停；上一轮还没念的也不念了
+        if (!voiceprint()) {
+          interrupt();
+          utter = [...pre]; // 还没声纹：这句攒下来，自动拿去录（见 459）
+          break;
+        }
+        // 录过声纹：先攒一秒多的声音认一认是不是他，是他才打断（见下面 page.on("message")）
+        utter = [...pre];
+        verdict = null;
         break;
       case 451: {
         const r = json(m.payload) as { results?: { text?: string; is_interim?: boolean }[] };
         const t = r.results?.[0]?.text ?? "";
         if (t) {
           userText = t;
-          tell({ type: "you", text: t });
+          // 录过声纹：认出是他之前不上字幕，别人的话不出现
+          if (verdict === true || !voiceprint()) tell({ type: "you", text: t });
         }
         break;
       }
-      case 459: // 他这句说完了：交给她自己的脑子
+      case 459: {
+        // 这句说完了：是他说的，交给她自己的脑子
         T0 = Date.now();
-        console.log(`[dongni][call] 459 说完`);
-        if (userText.trim()) answer(userText.trim());
+        const text = userText.trim();
         userText = "";
+        const heard = utter;
+        utter = null;
+        if (heard && !voiceprint() && text.length >= 2) autoEnroll(heard);
+        else if (heard && voiceprint()) {
+          // 整句再认一遍（比开头那一秒准）；不是他就当没听见
+          const score = await voiceprintScore(Buffer.concat(heard)).catch(() => null);
+          const ok = score === null || score >= VOICEPRINT_MIN;
+          console.log(`[dongni][call] 声纹 整句 ${score?.toFixed(2)} ${ok ? "是他" : "不是他，不理"}：${text.slice(0, 20)}`);
+          if (!ok) {
+            verdict = null;
+            break;
+          }
+          if (verdict !== true) interrupt();
+          if (verdict !== true && text) tell({ type: "you", text });
+        }
+        verdict = null;
+        console.log(`[dongni][call] 459 说完`);
+        if (text) answer(text);
         break;
+      }
       case 350: // 新的一句开始念：记下是谁的
         playing = (json(m.payload).tts_type as string) ?? "";
+        // 记下这段 SayHello 是哪一条，念完（359）时只认它，别被豆包自己那条（不播的）的结束信号骗了
+        if (playing === "chat_tts_text") {
+          const rid = String(json(m.payload).reply_id ?? "");
+          if (hello.busy && !hello.reply) hello.reply = rid;
+          else if (current?.via && !current.replyId) current.replyId = rid;
+        }
         console.log(`[dongni][call] +${Date.now() - T0}ms 开始念 ${playing}`);
         break;
       case 352: // 只放她自己脑子说的那些（豆包自己生成的回复不播）
         if (playing === "chat_tts_text" && page.readyState === WebSocket.OPEN && m.payload.length) page.send(m.payload);
+        break;
+      case 359: // 一段念完了：排着队的下一段接上
+        if (hello.reply && json(m.payload).reply_id === hello.reply) helloDone();
+        else if (current?.via && current.replyId && json(m.payload).reply_id === current.replyId) {
+          current.ttsDone = true;
+          maybeFinished();
+        }
         break;
       case 152:
       case 153:
@@ -278,10 +471,82 @@ function bridge(page: WebSocket) {
   });
   up.on("close", () => close());
 
-  // 页面传来的是 16k 单声道 16 位 PCM，原样转给豆包
-  page.on("message", (data: Buffer, isBinary: boolean) => {
-    if (!isBinary || !ready || up.readyState !== WebSocket.OPEN) return;
-    up.send(frame(200, null, sid, 0b0010, Buffer.from(data)));
+  const FRAME = 640; // 20ms
+  const ENROLL_BYTES = ENROLL_SECONDS * 32000;
+  /** 他开口一秒多了：认一认是不是他，是他就打断她 */
+  const checkEarly = async (buf: Buffer[]) => {
+    checking = true;
+    try {
+      const score = await voiceprintScore(Buffer.concat(buf));
+      if (utter !== buf || score === null) return; // 这句已经说完/换了下一句
+      verdict = score >= VOICEPRINT_MIN;
+      console.log(`[dongni][call] 声纹 开头 ${score.toFixed(2)} ${verdict ? "是他" : "不像他"}`);
+      if (verdict) {
+        interrupt();
+        if (userText) tell({ type: "you", text: userText });
+      }
+    } catch (e) {
+      console.warn("[dongni][call] 声纹没认成：", e instanceof Error ? e.message : e);
+      verdict = true; // 认不了就别把他拦在外面
+    } finally {
+      checking = false;
+    }
+  };
+
+  /**
+   * 不用他手动录声纹：还没录过时，把他电话里说的话攒够十来秒，自动录成他的声纹，之后就只认他。
+   * 录错了（比如旁边有人在说）点通话里那个按钮重录。
+   */
+  const auto: Buffer[] = [];
+  let autoBusy = false;
+  const autoEnroll = async (heard: Buffer[]) => {
+    if (autoBusy) return;
+    auto.push(Buffer.concat(heard));
+    const all = Buffer.concat(auto);
+    if (all.length < AUTO_ENROLL_SECONDS * 32000) return;
+    autoBusy = true;
+    const r = await enrollVoiceprint(all).catch((e) => ({ ok: false as const, message: e instanceof Error ? e.message : String(e) }));
+    console.log(`[dongni][call] 声纹自动录入 ${r.ok ? "好了" : `没成：${r.message}`}（${(all.length / 32000).toFixed(1)} 秒）`);
+    if (r.ok) tell({ type: "enrolled" });
+    else auto.length = 0;
+    autoBusy = false;
+  };
+
+  // 页面传来的是 16k 单声道 16 位 PCM，原样转给豆包；文字消息是控制（录声纹）
+  page.on("message", async (data: Buffer, isBinary: boolean) => {
+    if (!isBinary) {
+      const m = json(Buffer.from(data));
+      if (m.type === "enroll") {
+        enrolling = [];
+        utter = null;
+        verdict = null;
+      }
+      return;
+    }
+    if (!ready || up.readyState !== WebSocket.OPEN) return;
+    const pcm = Buffer.from(data);
+    if (enrolling) {
+      enrolling.push(pcm);
+      const got = enrolling.length * FRAME;
+      if (enrolling.length % 25 === 0) tell({ type: "enroll", progress: Math.min(1, got / ENROLL_BYTES) });
+      if (got >= ENROLL_BYTES) {
+        const all = Buffer.concat(enrolling);
+        enrolling = null;
+        const r = await enrollVoiceprint(all).catch((e) => ({ ok: false as const, message: e instanceof Error ? e.message : String(e) }));
+        console.log(`[dongni][call] 声纹录入 ${r.ok ? "好了" : `没成：${r.message}`}`);
+        tell(r.ok ? { type: "enrolled" } : { type: "enroll-failed", message: r.message });
+      }
+      // 录的时候她别听见（送静音保持连线）
+      up.send(frame(200, null, sid, 0b0010, Buffer.alloc(pcm.length)));
+      return;
+    }
+    pre.push(pcm);
+    if (pre.length > 25) pre.shift();
+    if (utter) {
+      utter.push(pcm);
+      if (verdict === null && !checking && utter.length >= 60 && voiceprint()) void checkEarly(utter);
+    }
+    up.send(frame(200, null, sid, 0b0010, pcm));
   });
   page.on("close", () => close());
 }

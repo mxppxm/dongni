@@ -4,6 +4,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { onCall } from "./presence";
 
 /**
  * 模型和 key 直接读 pi 的配置（~/.pi/agent/models.json + settings.json 里的默认模型），
@@ -229,7 +230,7 @@ async function* streamOnce(
   try {
     arm();
     const res = await post(
-      { ...(CHAT_MODEL ? { model: CHAT_MODEL } : {}), messages: slimMessages(messages, level), stream: true, reasoning_effort: replyMode.getStore()?.fast ? "none" : process.env.DONGNI_CHAT_REASONING || "high", max_tokens: 16000, temperature: 0.85, ...(tools ? { tools } : {}) },
+      { ...(CHAT_MODEL ? { model: CHAT_MODEL } : {}), messages: slimMessages(messages, level), stream: true, reasoning_effort: replyMode.getStore()?.fast || onCall() ? "none" : process.env.DONGNI_CHAT_REASONING || "high", max_tokens: 16000, temperature: 0.85, ...(tools ? { tools } : {}) },
       ac.signal,
     );
     const reader = res.body!.getReader();

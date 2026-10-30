@@ -27,6 +27,9 @@ type VoiceCtxValue = {
   toggle: (id: number) => void;
   retry: (id: number, kind: "synth" | "blocked") => void;
   auto: (id: number) => void;
+  /** 打电话的时候：页面自己不出声（电话里她已经在说了），手动点的照常播 */
+  setQuiet: (v: boolean) => void;
+  quietRef: React.RefObject<boolean>;
 };
 
 const VoiceCtx = createContext<VoiceCtxValue | null>(null);
@@ -50,6 +53,7 @@ export function VoiceProvider({ children }: { children: React.ReactNode }) {
   const [trouble, setTrouble] = useState<Trouble>(null);
   const audio = useRef<HTMLAudioElement | null>(null);
   const autoOn = useRef(false);
+  const quietRef = useRef(false);
 
   useEffect(() => {
     // 默认开：只有他手动关过（存了 "0"）才不自动念
@@ -150,7 +154,7 @@ export function VoiceProvider({ children }: { children: React.ReactNode }) {
 
   const auto = useCallback(
     (id: number) => {
-      if (autoOn.current) play(id);
+      if (autoOn.current && !quietRef.current) play(id);
     },
     [play],
   );
@@ -168,9 +172,21 @@ export function VoiceProvider({ children }: { children: React.ReactNode }) {
     [stop],
   );
 
+  const setQuiet = useCallback(
+    (v: boolean) => {
+      quietRef.current = v;
+      // 电话接起来：正在自动念的那条停掉，免得两个声音
+      if (v) {
+        stop();
+        document.dispatchEvent(new Event("dongni:quiet"));
+      }
+    },
+    [stop],
+  );
+
   const value = useMemo<VoiceCtxValue>(
-    () => ({ autoplay, setAutoplay, status, trouble, toggle, retry, auto }),
-    [autoplay, setAutoplay, status, trouble, toggle, retry, auto],
+    () => ({ autoplay, setAutoplay, status, trouble, toggle, retry, auto, setQuiet, quietRef }),
+    [autoplay, setAutoplay, status, trouble, toggle, retry, auto, setQuiet],
   );
 
   return <VoiceCtx.Provider value={value}>{children}</VoiceCtx.Provider>;
@@ -253,6 +269,7 @@ const clock = (s: number) => {
  * 播放地址直接给 audio，点击里立刻 play()——不需要先下载，也不会被当成自动播放拦下来。
  */
 export function VoiceClip({ src, auto }: { src: string; auto?: boolean }) {
+  const quietRef = useContext(VoiceCtx)?.quietRef;
   const ref = useRef<HTMLAudioElement | null>(null);
   const [phase, setPhase] = useState<"idle" | "loading" | "playing" | "error">("idle");
   const [secs, setSecs] = useState(0);
@@ -272,7 +289,14 @@ export function VoiceClip({ src, auto }: { src: string; auto?: boolean }) {
     };
     a.onerror = () => setPhase("error");
     a.load();
+    // 电话接起来了：语音消息也停
+    const hush = () => {
+      a.pause();
+      setPhase("idle");
+    };
+    document.addEventListener("dongni:quiet", hush);
     return () => {
+      document.removeEventListener("dongni:quiet", hush);
       a.pause();
       a.onloadedmetadata = null;
       a.ontimeupdate = null;
@@ -284,7 +308,7 @@ export function VoiceClip({ src, auto }: { src: string; auto?: boolean }) {
 
   // 刚收到的语音回复：她刚说完话，直接出声；被浏览器拦了也不报错，点一下就播
   useEffect(() => {
-    if (!auto) return;
+    if (!auto || quietRef?.current) return;
     const a = ref.current;
     if (!a) return;
     setPhase("loading");

@@ -9,6 +9,7 @@ import { db, getKv, setKv } from "./db";
 import { completeJson } from "./llm";
 import { nowText } from "./memory";
 import { INTRO, PERSONA } from "./persona";
+import { track } from "./tasks";
 
 /**
  * 衣橱和相册。
@@ -434,10 +435,16 @@ export async function ensureWardrobe() {
     for (const o of OUTFITS) {
       const file = path.join(DIR, `${o.key}.png`);
       if (fs.existsSync(file.replace(/\.png$/, ".jpg"))) continue;
-      await draw(
-        `Same girl as the reference (same face, hair, scrunchie, proportions, same rendering style). ${STYLE}. Fashion lookbook shot, she is wearing ${o.wear}. Standing pose full of energy, plain soft light-grey studio background.`,
-        [ANCHOR3D.replace(/\.png$/, ".jpg")],
-        file,
+      await track(
+        "wardrobe",
+        `做定妆照「${o.name}」`,
+        () =>
+          draw(
+            `Same girl as the reference (same face, hair, scrunchie, proportions, same rendering style). ${STYLE}. Fashion lookbook shot, she is wearing ${o.wear}. Standing pose full of energy, plain soft light-grey studio background.`,
+            [ANCHOR3D.replace(/\.png$/, ".jpg")],
+            file,
+          ),
+        () => ({ ok: true, result: `![${o.name}](/api/wardrobe/${o.key}.jpg)` }),
       );
       console.log(`[dongni] 衣橱：做好「${o.name}」`);
     }
@@ -610,17 +617,23 @@ async function takeDailyPhotoInner(force: boolean): Promise<string> {
 
   post(plan.before || "今天的照片我去拍一张～");
   const file = `album-${date}-${Date.now().toString(36)}.png`;
+  const jpg = file.replace(/\.png$/, ".jpg");
   try {
-    await draw(
-      `Same girl wearing exactly the same outfit as the reference image (same face, hair, scrunchie, clothes, shoes, same rendering style). ${STYLE}. ${plan.scene}`,
-      [ref],
-      path.join(DIR, file),
+    await track(
+      "take_photo",
+      "拍今天的照片",
+      () =>
+        draw(
+          `Same girl wearing exactly the same outfit as the reference image (same face, hair, scrunchie, clothes, shoes, same rendering style). ${STYLE}. ${plan.scene}`,
+          [ref],
+          path.join(DIR, file),
+        ),
+      () => ({ ok: true, result: `![今天](/api/wardrobe/${jpg})` }),
     );
   } catch (e) {
     post("诶，照片没拍出来……晚点我再试一次");
     return `没拍成：${e instanceof Error ? e.message : e}`;
   }
-  const jpg = file.replace(/\.png$/, ".jpg");
   db()
     .prepare("INSERT OR IGNORE INTO album_photos(date, file, outfit, weather, caption, created_at) VALUES(?, ?, ?, ?, ?, ?)")
     .run(date, jpg, t.outfit.name, weatherText, plan.caption || "", Date.now());

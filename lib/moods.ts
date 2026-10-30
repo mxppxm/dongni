@@ -8,6 +8,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { db, getKv, setKv } from "./db";
 import { completeJson } from "./llm";
+import { finishTask, startTask } from "./tasks";
 
 /**
  * 她等你时的样子（loading）。
@@ -191,6 +192,8 @@ export async function createMood(name: string, when: string, pose: string) {
   fs.mkdirSync(MOOD_DIR, { recursive: true });
   const key = `m${Date.now().toString(36)}${crypto.randomBytes(2).toString("hex")}`;
   const out = path.join(MOOD_DIR, `${key}.png`);
+  const taskId = startTask("create_mood", `画新表情「${clean}」`);
+  let made = false;
   try {
     let feedback = "";
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -206,6 +209,7 @@ export async function createMood(name: string, when: string, pose: string) {
           .prepare("INSERT INTO moods(key, name, when_text, file, preset, fx, source, created_at) VALUES(?, ?, ?, ?, ?, ?, 'gen', ?)")
           .run(key, clean, when || pose, `data:${key}.png`, preset, fx, Date.now());
         await show(key, clean, pose);
+        made = true;
         return;
       }
       feedback = transparent ? (r.issues ?? "") : "background must be fully transparent";
@@ -215,6 +219,7 @@ export async function createMood(name: string, when: string, pose: string) {
     console.warn("[dongni] 画新样子失败：", e instanceof Error ? e.message : e);
     fs.rmSync(out, { force: true });
   } finally {
+    finishTask(taskId, made, made ? `![${clean}](/api/mood/${key})` : "两次自查都没过，没入库");
     g.__dongniMoodGen = false;
   }
 }

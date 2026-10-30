@@ -11,6 +11,7 @@ import { createMood } from "./moods";
 import { setCity, takeDailyPhoto, today, wardrobeFile } from "./wardrobe";
 import { addLocalImage, IMAGE_EXT, imageMarkdown } from "./images";
 import { startRepair } from "./selfrepair";
+import { finishTask, startTask } from "./tasks";
 import { saveVoiceConfig, voiceReady } from "./voiceconfig";
 
 /**
@@ -498,14 +499,46 @@ export function toolsFor(_query: string) {
 
 /** 工具调用过程不上屏：界面上只出现最终回复，所以这里不再提供「正在做什么」的文案 */
 
+/** 任务栏上那一行怎么写；拍照、画表情、改自己是丢到后台跑的，在它们自己那边登记 */
+const short = (s: unknown, n = 24) => {
+  const t = String(s ?? "").replace(/\s+/g, " ").trim();
+  return t.length > n ? t.slice(0, n) + "…" : t;
+};
+const TASK_TITLE: Record<string, (a: Record<string, unknown>) => string> = {
+  list_dir: (a) => `看文件夹 ${short(a.path || "~")}`,
+  read_file: (a) => `读文件 ${short(path.basename(String(a.path ?? "")))}`,
+  search_files: (a) => `找文件「${short(a.query)}」`,
+  recent_files: () => "看最近改过的文件",
+  system_info: () => "看电脑状态",
+  set_reminder: (a) => `设提醒「${short(a.text)}」`,
+  list_reminders: () => "查提醒",
+  cancel_reminder: () => "取消提醒",
+  humanize_text: () => "润色文字",
+  set_city: (a) => `换城市：${short(a.city)}`,
+  show_image: (a) => `打开图片 ${short(path.basename(String(a.path ?? "")))}`,
+  generate_image: (a) => `画图：${short(a.prompt)}`,
+  set_voice_key: () => "配语音 key",
+  write_file: (a) => `写文件 ${short(a.name)}`,
+};
+
 export async function runTool(name: string, rawArgs: string, ctx?: ToolCtx): Promise<string> {
   const fn = IMPL[name];
   if (!fn) return `没有这个工具：${name}`;
+  let taskId = 0;
   try {
     const args = rawArgs ? JSON.parse(rawArgs) : {};
-    const out = await fn(args as never, ctx);
+    const title = TASK_TITLE[name];
+    // 挂到回复里的东西（图片、文件卡片）也记到任务上，任务栏点开能直接看到
+    const attached: string[] = [];
+    const tctx = ctx && { ...ctx, attach: (md: string) => (attached.push(md), ctx.attach(md)) };
+    if (title) taskId = startTask(name, title(args));
+    const out = await fn(args as never, tctx);
+    // 画图、开图、写文件：真挂上东西才算成；其他看返回的话是不是报错
+    const ok = ["generate_image", "show_image", "write_file"].includes(name) ? attached.length > 0 : !/^(出错了|没有这个|这不是)/.test(out);
+    finishTask(taskId, ok, ok ? attached.join("\n\n") : out.slice(0, 200));
     return out.length > 30_000 ? out.slice(0, 30_000) + "\n……（太长，已截断）" : out;
   } catch (e) {
+    finishTask(taskId, false, e instanceof Error ? e.message : String(e));
     const err = e as NodeJS.ErrnoException;
     if (err.code === "EPERM" || err.code === "EACCES")
       return "没有权限读这里（macOS 隐私保护）。需要在「系统设置 → 隐私与安全性 → 完全磁盘访问权限」里给 node 打开。";

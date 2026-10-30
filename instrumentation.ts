@@ -4,6 +4,7 @@ export async function register() {
   const { runExtraction } = await import("./lib/memory");
   const { resumePending } = await import("./lib/chat");
   const { reportRebuild, drainRepairQueue } = await import("./lib/selfrepair");
+  (await import("./lib/tasks")).markInterrupted();
   reportRebuild();
   // 打电话：本机 3940 端口的中转
   (await import("./lib/callserver")).startCallServer();

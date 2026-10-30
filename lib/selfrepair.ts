@@ -6,6 +6,8 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { db, getKv, setKv } from "./db";
 import { speakAsHer } from "./speak";
+import { onCall, whenOffCall } from "./presence";
+import { finishTask, startTask } from "./tasks";
 
 /**
  * 自我修复：把用户的要求交给 pi（编码 agent）去改本项目的代码，
@@ -213,7 +215,11 @@ export function startRepair(request: string): string {
   }
   state.running = request.slice(0, 40);
   setKv("repair_started_at", String(Date.now()));
+  // 任务栏：要重启的话这件由重启回来的 reportRebuild 收尾
+  const taskId = startTask("repair", `改自己：${request.replace(/\s+/g, " ").slice(0, 30)}`);
+  setKv("repair_task_id", String(taskId));
   let restarting = false;
+  let taskOk = false;
   void (async () => {
     let good = "";
     try {
@@ -227,6 +233,7 @@ export function startRepair(request: string): string {
       const changed = (await git("status", "--porcelain")).stdout.trim();
       if (!changed) {
         await say(`你看了一圈，这次没有改代码。编码助手的说明：${summary}`, "看了一圈，这次没动代码。");
+        taskOk = true;
         return;
       }
       try {
@@ -244,6 +251,11 @@ export function startRepair(request: string): string {
       setKv("repair_summary", summary);
       await say(`你刚把自己改好了，马上要重启，半分钟左右回来。改了什么（编码助手的说明，挑他关心的说一句就够）：${summary}`, "改好啦，我重启一下，半分钟就回来～");
       log("提交完成，后台重新编译并重启");
+      // 正在打电话就先别重启（重启会把电话挂断），挂了再重启
+      if (onCall()) {
+        log("在通话，等挂断再重启");
+        await whenOffCall();
+      }
       // 新起一个进程组去编译重启，自己被重启也不影响它
       restarting = true;
       const child = spawn("/bin/bash", [path.join(ROOT, "scripts", "rebuild.sh"), good], {
@@ -266,6 +278,7 @@ export function startRepair(request: string): string {
       setKv("repair_last_at", String(Date.now()));
       setKv("repair_last_result", `${restarting ? "改好了" : "没改成或没改动"}（${request.slice(0, 30)}…）`);
       state.running = null;
+      if (!restarting) finishTask(taskId, taskOk, taskOk ? "看过了，没动代码" : "没改成，已退回原样");
       // 要重启的话交给重启后的新进程接着改，否则这里直接接着改下一个
       if (!restarting) setTimeout(drainRepairQueue, 1000);
     }
@@ -282,6 +295,7 @@ export function reportRebuild() {
       ? ["你重启回来了，刚才改的已经生效，可以让他试试。", "我回来啦，改好的已经能用了，你试试～"]
       : ["你重启回来了，但新改的没通过，已经退回改之前的样子，一切照旧。", "我回来了，不过新改的没成，已经退回原样了。"];
     void say(what[0], what[1]);
+    finishTask(Number(getKv("repair_task_id") ?? 0), r.ok, r.ok ? "改好了，已生效" : "新改的没通过，已退回");
     log(`重启完成 ok=${r.ok}`);
   } finally {
     fs.rmSync(RESULT, { force: true });

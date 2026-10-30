@@ -17,6 +17,7 @@ mkdir -p "$APP/data"
 sqlite3 data/dongni.db ".backup '$APP/data/dongni.db'"
 for d in images wardrobe moods; do [ -d "data/$d" ] && rsync -a "data/$d" "$APP/data/"; done
 [ -f data/reminders.json ] && cp data/reminders.json "$APP/data/"
+[ -f data/voiceprint.json ] && cp data/voiceprint.json "$APP/data/"
 
 # 大模型线路：从 pi 的配置里导出（新电脑不用装 pi）
 mkdir -p "$APP/config"

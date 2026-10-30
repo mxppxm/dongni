@@ -9,11 +9,22 @@ import Mood from "./Mood";
 import Starfield, { type Theme } from "./Starfield";
 import { AttachmentStrip, useAttachments } from "./useAttachments";
 import MicButton, { type VoiceSendResult } from "./VoiceRecorder";
-import { hasSpeakable, VoiceButton, VoiceProvider, VoiceToggle } from "./Voice";
+import { hasSpeakable, useVoice, VoiceButton, VoiceProvider, VoiceToggle } from "./Voice";
+
+/** 通话期间让页面别自己出声：这个要放在 VoiceProvider 里面才拿得到 */
+function QuietWhile({ on }: { on: boolean }) {
+  const { setQuiet } = useVoice();
+  useEffect(() => {
+    setQuiet(on);
+    return () => setQuiet(false);
+  }, [on, setQuiet]);
+  return null;
+}
 
 const MemoryMap = dynamic(() => import("./MemoryMap"), { ssr: false });
 const Album = dynamic(() => import("./Album"), { ssr: false });
 const Call = dynamic(() => import("./Call"), { ssr: false });
+const Tasks = dynamic(() => import("./Tasks"), { ssr: false });
 
 type Status = "done" | "streaming" | "error" | "sending" | "waiting";
 type Msg = {
@@ -90,6 +101,7 @@ export default function Chat() {
   const [showMap, setShowMap] = useState(false);
   const [showAlbum, setShowAlbum] = useState(false);
   const [calling, setCalling] = useState(false);
+  const [callMini, setCallMini] = useState(false);
   const [memCount, setMemCount] = useState<number | null>(null);
   const [pulse, setPulse] = useState(0);
   const [theme, setTheme] = useState<Theme>("light");
@@ -111,6 +123,7 @@ export default function Chat() {
   const loadingOlder = useRef(false);
   const queue = useRef<Outbox[]>([]);
   const busy = useRef(false);
+  const inflight = useRef(0); // 还在收回复的条数
   const composing = useRef(false);
   const memCountRef = useRef<number | null>(null);
 
@@ -143,7 +156,8 @@ export default function Chat() {
         try {
           const { messages } = (await (await fetch(`/api/messages?after=${assistantId}`)).json()) as { messages: ServerMsg[] };
           const m = messages.find((x) => x.id === assistantId);
-          if (!m) return;
+          // 这条被并进后面那句一起回了：占位收掉
+          if (!m) return setMsgs((list) => list.filter((x) => x.key !== key));
           patch(key, (old) => ({ ...old, content: m.content, status: m.content || m.status === "done" ? m.status : "waiting" }));
           if (m.status === "done") return;
         } catch {}
@@ -154,82 +168,94 @@ export default function Chat() {
 
   /* ---------- 发送队列：一条一条发，先进先出；连不上就一直重试 ---------- */
   const deliver = useCallback(
-    async (item: Outbox) => {
-      const uKey = `c${item.clientId}`;
-      const aKey = `a${item.clientId}`;
-      patch(uKey, (m) => ({ ...m, status: "sending" }));
-      setMsgs((list) => [
-        ...list.filter((m) => m.key !== aKey),
-        { key: aKey, role: "assistant", content: "", status: "waiting", createdAt: Date.now(), fresh: true },
-      ]);
-      stick.current = true;
+    async (item: Outbox, onInserted: () => void = () => {}) => {
+      inflight.current++;
+      try {
+        const uKey = `c${item.clientId}`;
+        const aKey = `a${item.clientId}`;
+        patch(uKey, (m) => ({ ...m, status: "sending" }));
+        setMsgs((list) => [
+          ...list.filter((m) => m.key !== aKey),
+          { key: aKey, role: "assistant", content: "", status: "waiting", createdAt: Date.now(), fresh: true },
+        ]);
+        stick.current = true;
 
-      for (let attempt = 0; ; attempt++) {
-        if (attempt) await new Promise((r) => setTimeout(r, Math.min(15000, 1000 * 2 ** (attempt - 1))));
-        let assistantId = 0;
-        let finished = false;
-        try {
-          const res = await fetch("/api/chat", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ clientId: item.clientId, content: item.content, images: item.images ?? [] }),
-          });
-          if (!res.ok || !res.body) throw new Error(String(res.status));
-          const reader = res.body.getReader();
-          const dec = new TextDecoder();
-          let buf = "";
-          for (;;) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buf += dec.decode(value, { stream: true });
-            let i;
-            while ((i = buf.indexOf("\n")) >= 0) {
-              const line = buf.slice(0, i);
-              buf = buf.slice(i + 1);
-              if (!line) continue;
-              const e = JSON.parse(line);
-              if (e.type === "meta") {
-                assistantId = e.assistantId;
-                writeOutbox(readOutbox().filter((o) => o.clientId !== item.clientId));
-                patch(uKey, (m) => ({ ...m, id: e.userId, status: "done" }));
-                patch(aKey, (m) => ({ ...m, id: e.assistantId }));
-              } else if (e.type === "mood") {
-                patch(aKey, (m) => ({ ...m, mood: e.mood }));
-              } else if (e.type === "voice") {
-                // 他说的是语音，她的回复也带了一条语音：接在正文后面
-                patch(aKey, (m) => ({ ...m, content: `${m.content}\n\n${e.markdown}` }));
-              } else if (e.type === "reset") {
-                patch(aKey, (m) => ({ ...m, status: "waiting", content: "" }));
-              } else if (e.type === "delta") {
-                patch(aKey, (m) => ({ ...m, status: "streaming", content: m.content + e.text }));
-              } else if (e.type === "done") {
-                finished = true;
-                patch(aKey, (m) => {
-                  if (m.id) browserNotify(m.id, m.content);
-                  return { ...m, status: "done" };
-                });
-                [6000, 15000, 30000].forEach((ms) => setTimeout(checkMemories, ms));
+        for (let attempt = 0; ; attempt++) {
+          if (attempt) await new Promise((r) => setTimeout(r, Math.min(15000, 1000 * 2 ** (attempt - 1))));
+          let assistantId = 0;
+          let finished = false;
+          try {
+            const res = await fetch("/api/chat", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ clientId: item.clientId, content: item.content, images: item.images ?? [] }),
+            });
+            if (!res.ok || !res.body) throw new Error(String(res.status));
+            const reader = res.body.getReader();
+            const dec = new TextDecoder();
+            let buf = "";
+            for (;;) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              buf += dec.decode(value, { stream: true });
+              let i;
+              while ((i = buf.indexOf("\n")) >= 0) {
+                const line = buf.slice(0, i);
+                buf = buf.slice(i + 1);
+                if (!line) continue;
+                const e = JSON.parse(line);
+                if (e.type === "meta") {
+                  assistantId = e.assistantId;
+                  onInserted();
+                  writeOutbox(readOutbox().filter((o) => o.clientId !== item.clientId));
+                  patch(uKey, (m) => ({ ...m, id: e.userId, status: "done" }));
+                  patch(aKey, (m) => ({ ...m, id: e.assistantId }));
+                } else if (e.type === "mood") {
+                  patch(aKey, (m) => ({ ...m, mood: e.mood }));
+                } else if (e.type === "voice") {
+                  // 他说的是语音，她的回复也带了一条语音：接在正文后面
+                  patch(aKey, (m) => ({ ...m, content: `${m.content}\n\n${e.markdown}` }));
+                } else if (e.type === "merged") {
+                  // 和后面紧跟着的话合成一句回了：这条的占位收掉，回复在合并的那条里
+                  finished = true;
+                  setMsgs((list) => list.filter((m) => m.key !== aKey));
+                } else if (e.type === "reset") {
+                  patch(aKey, (m) => ({ ...m, status: "waiting", content: "" }));
+                } else if (e.type === "delta") {
+                  patch(aKey, (m) => ({ ...m, status: "streaming", content: m.content + e.text }));
+                } else if (e.type === "done") {
+                  finished = true;
+                  patch(aKey, (m) => {
+                    if (m.id) browserNotify(m.id, m.content);
+                    return { ...m, status: "done" };
+                  });
+                  [6000, 15000, 30000].forEach((ms) => setTimeout(checkMemories, ms));
+                }
               }
             }
+          } catch {}
+          if (finished) return;
+          if (assistantId) {
+            // 已经落库，服务端会一直写到完成，这里跟着拿结果
+            await follow(aKey, assistantId);
+            [6000, 15000, 30000].forEach((ms) => setTimeout(checkMemories, ms));
+            return;
           }
-        } catch {}
-        if (finished) return;
-        if (assistantId) {
-          // 已经落库，服务端会一直写到完成，这里跟着拿结果
-          await follow(aKey, assistantId);
-          [6000, 15000, 30000].forEach((ms) => setTimeout(checkMemories, ms));
-          return;
         }
+      } finally {
+        inflight.current--;
       }
     },
     [patch, follow, checkMemories],
   );
 
+  // 按顺序一条条送进库就行，不等她回完：连着说的几句她才能合在一起回
   const pump = useCallback(async () => {
     if (busy.current) return;
     busy.current = true;
     while (queue.current.length) {
-      await deliver(queue.current[0]);
+      const item = queue.current[0];
+      await new Promise<void>((inserted) => void deliver(item, inserted).finally(inserted));
       queue.current.shift();
     }
     busy.current = false;
@@ -243,25 +269,78 @@ export default function Chat() {
     [pump],
   );
 
-  /* ---------- 它主动发来的消息（比如改完自己的代码） ---------- */
+  /* ---------- 同步整场对话：电话里说的、她主动发的、提醒、改好了……都从这里进来 ---------- */
+  // 一条路：页面不只看自己发出去的那几句，库里这场对话有什么就显示什么（在生成的也边写边显示）
   const msgsRef = useRef<Msg[]>([]);
   msgsRef.current = msgs;
+  const callingRef = useRef(false);
+  callingRef.current = calling;
   useEffect(() => {
     if (!loaded) return;
-    const t = setInterval(async () => {
-      if (busy.current) return;
-      const maxId = Math.max(0, ...msgsRef.current.map((m) => m.id ?? 0));
+    let stop = false;
+    let timer: number | undefined;
+    const sync = async () => {
+      const list = msgsRef.current;
+      const maxId = Math.max(0, ...list.map((m) => m.id ?? 0));
       try {
-        const { messages } = (await (await fetch(`/api/messages?after=${maxId + 1}`)).json()) as { messages: ServerMsg[] };
-        const known = new Set(msgsRef.current.map((m) => m.id));
-        const fresh = messages.filter((m) => !known.has(m.id) && m.status === "done");
-        if (!fresh.length || busy.current) return;
-        stick.current = true;
-        setMsgs((list) => [...list, ...fresh.map((m) => ({ ...fromServer(m), fresh: true }))]);
-        fresh.filter((m) => m.role === "assistant" && m.kind !== "system").forEach((m) => browserNotify(m.id, m.content));
+        // 往回多看一段：页面后来拿到的编号可能比还在生成的电话消息大，别把它们漏了
+        const { messages } = (await (await fetch(`/api/messages?after=${Math.max(0, maxId - 40)}`)).json()) as { messages: ServerMsg[] };
+        const byId = new Map(msgsRef.current.filter((m) => m.id).map((m) => [m.id!, m]));
+        const byClient = new Map(msgsRef.current.filter((m) => m.clientId).map((m) => [m.clientId!, m]));
+        const added: Msg[] = [];
+        const updates = new Map<string, Partial<Msg>>();
+        for (const sm of messages) {
+          const status: Status = sm.status === "streaming" && !sm.content ? "waiting" : sm.status;
+          const mine = byId.get(sm.id) ?? (sm.clientId ? byClient.get(sm.clientId) : undefined);
+          if (mine) {
+            // 自己正在收流的那条由发送那边管；收完了（或者是别的口子来的）以库里为准
+            const owned = mine.key.startsWith("a") && mine.status !== "done";
+            if (!owned && (mine.content !== sm.content || mine.status !== status || mine.kind !== sm.kind || !mine.id))
+              updates.set(mine.key, { id: sm.id, content: sm.content, status, kind: sm.kind });
+            continue;
+          }
+          // 正在发的那句，回复占位还没对上编号：先不认，免得同一条出现两次
+          const sending = busy.current || inflight.current > 0;
+          if (sending && sm.role === "assistant" && sm.kind !== "call" && sm.status !== "done") continue;
+          if (sending && sm.role === "user" && sm.kind !== "call") continue;
+          added.push({ ...fromServer(sm), status, fresh: true });
+        }
+        // 库里没了的回复占位（并进后面那句一起回了）：页面上也收掉；自己正在收流的那条由发送那边管
+        const from = Math.max(0, maxId - 40);
+        const there = new Set(messages.map((m) => m.id));
+        const gone = new Set(
+          msgsRef.current
+            .filter((m) => m.id && m.id >= from && m.role === "assistant" && m.status !== "done" && !m.key.startsWith("a") && !there.has(m.id))
+            .map((m) => m.key),
+        );
+        if (gone.size) setMsgs((cur) => cur.filter((m) => !gone.has(m.key)));
+        if (!added.length && !updates.size) return;
+        stick.current = stick.current || added.length > 0;
+        setMsgs((cur) => {
+          let next = updates.size ? cur.map((m) => (updates.has(m.key) ? { ...m, ...updates.get(m.key) } : m)) : cur;
+          const have = new Set(next.map((m) => m.id).filter(Boolean));
+          for (const a of added) {
+            if (have.has(a.id)) continue;
+            // 按编号插到该在的位置；还没编号的（正在发的）留在最后
+            const at = next.findIndex((m) => !m.id || m.id > a.id!);
+            next = at < 0 ? [...next, a] : [...next.slice(0, at), a, ...next.slice(at)];
+          }
+          return next;
+        });
+        added.filter((m) => m.role === "assistant" && m.kind !== "system" && m.status === "done").forEach((m) => browserNotify(m.id!, m.content));
       } catch {}
-    }, 4000);
-    return () => clearInterval(t);
+    };
+    const loop = async () => {
+      if (stop) return;
+      if (document.visibilityState === "visible" || callingRef.current) await sync();
+      // 通话中勤快点，电话里说的话几乎实时出现在对话框
+      timer = window.setTimeout(loop, callingRef.current ? 1000 : 4000);
+    };
+    void loop();
+    return () => {
+      stop = true;
+      window.clearTimeout(timer);
+    };
   }, [loaded]);
 
   useEffect(() => {
@@ -448,6 +527,8 @@ export default function Chat() {
     >
       <div className="pointer-events-none fixed inset-0 bg-[image:var(--glow-bg)]" />
       <Starfield pulse={pulse} theme={theme} />
+      <Tasks />
+      <QuietWhile on={calling} />
 
       <div className="fixed top-4 right-4 z-20 flex gap-1">
       <button
@@ -469,7 +550,7 @@ export default function Chat() {
         </AnimatePresence>
       </button>
       <button
-        onClick={() => setCalling(true)}
+        onClick={() => (calling ? setCallMini(false) : (setCallMini(false), setCalling(true)))}
         className="flex h-10 w-10 items-center justify-center rounded-full text-[var(--icon)] transition-colors hover:bg-[var(--hover)] hover:text-[var(--icon-hover)]"
         aria-label="打电话"
         title="打电话给她"
@@ -583,7 +664,7 @@ export default function Chat() {
               className="scroll-thin block max-h-[40vh] w-full resize-none bg-transparent py-1 text-[16px] leading-relaxed text-[var(--text)] outline-none placeholder:text-[var(--faint)]"
             />
             </div>
-            <MicButton onSent={sendVoice} onHint={setMicHint} />
+            <MicButton onSent={sendVoice} onHint={setMicHint} onIntercept={calling ? () => setCallMini(false) : undefined} />
             <AnimatePresence>
               {(draft.trim() || att.items.length > 0) && (
                 <motion.button
@@ -605,7 +686,7 @@ export default function Chat() {
 
       <AnimatePresence>{showMap && <MemoryMap theme={theme} onClose={() => setShowMap(false)} />}</AnimatePresence>
       <AnimatePresence>{showAlbum && <Album onClose={() => setShowAlbum(false)} />}</AnimatePresence>
-      <AnimatePresence>{calling && <Call onClose={() => setCalling(false)} />}</AnimatePresence>
+      <AnimatePresence>{calling && <Call mini={callMini} onMini={setCallMini} onClose={() => setCalling(false)} />}</AnimatePresence>
     </div>
     </VoiceProvider>
   );
