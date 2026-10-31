@@ -18,6 +18,7 @@ import { startReminders } from "./reminders";
 import { flushOutbox } from "./outbox";
 import { startProgressTick } from "./progress";
 import { clearStop, onCall, publishReply, stopReply, stoppedReply } from "./presence";
+import { cleanReply, stripCards } from "./textclean";
 
 const HISTORY = 40;
 /**
@@ -150,7 +151,7 @@ function history(beforeOrAtId: number): ChatMessage[] {
     prev = m.created_at;
     const ids = imageIdsIn(m.content);
     const send = m.role === "user" && withImages.has(m.id) ? ids : [];
-    let body = stripImageMarkdown(m.content);
+    let body = stripCards(stripImageMarkdown(m.content));
     const limit = i < recentFrom ? OLD_CHARS : MAX_TURN;
     if (body.length > limit) body = body.slice(0, limit) + "…";
     const text = stamp + body + (ids.length && !send.length && m.role === "user" ? "（他发了图）" : "");
@@ -333,10 +334,12 @@ async function generate(assistantId: number, userRow: MessageRow, onEvent: (e: C
 async function generateNow(assistantId: number, userRow: MessageRow, onEvent: (e: ChatEvent) => void) {
   const d = db();
   let alive = true;
-  const emit = (e: ChatEvent) => {
+  const emit = (e: ChatEvent, silent = false) => {
     // 广播给所有出口（电话在听就念出来）；发起这句的那个口子另外照常收
-    if (e.type === "delta" || e.type === "reset" || e.type === "done") publishReply({ assistantId, ...e });
-    else if (e.type === "mood") publishReply({ assistantId, type: "mood", mood: e.mood });
+    if (!silent) {
+      if (e.type === "delta" || e.type === "reset" || e.type === "done") publishReply({ assistantId, ...e });
+      else if (e.type === "mood") publishReply({ assistantId, type: "mood", mood: e.mood });
+    }
     if (!alive) return;
     try {
       onEvent(e);
@@ -436,7 +439,7 @@ async function generateNow(assistantId: number, userRow: MessageRow, onEvent: (e
         // 电话里被他打断了：只留已经说出口的，后面没说的不算她说过（工具挂上的图、文件照样留着）
         const cut = stoppedReply(assistantId);
         if (cut !== undefined) {
-          text = (cut.trim() ? `${cut.trim()}……` : "……") + attached;
+          text = cleanReply((cut.trim() ? `${cut.trim()}……` : "……") + attached) || STUCK_LINE;
           save("done");
           finished = true;
           emit({ type: "done" });
@@ -459,6 +462,15 @@ async function generateNow(assistantId: number, userRow: MessageRow, onEvent: (e
           } catch (e) {
             console.warn(`[dongni] #${assistantId} 语音回复没做出来：`, errText(e));
           }
+        }
+        // 落库前整理一遍：同一路径的卡片只留一张，正文里的磁盘路径和乱码残片都去掉。
+        // 只在页面上静默重刷（电话已经把话说出去了，不能让同一句再念一遍）。
+        const tidy = cleanReply(text);
+        if (tidy !== text) {
+          text = tidy || STUCK_LINE;
+          save("streaming");
+          emit({ type: "reset" }, true);
+          emit({ type: "delta", text }, true);
         }
         save("done");
         finished = true;

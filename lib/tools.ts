@@ -232,19 +232,76 @@ async function drawImage({ prompt, self }: { prompt: string; self?: boolean }, c
 
 const OUT_DIR = path.join(HOME, "Downloads", "敏");
 
-async function writeFile({ name, content }: { name: string; content: string }, ctx?: ToolCtx) {
-  const safe = path.basename(String(name || "").trim()).replace(/[\\/:*?"<>|]/g, "_");
-  if (!safe) return "文件名不能为空。";
+/** ~ 展开成主目录；相对路径也按主目录算（她说「放下载里」时就落在 ~/Downloads） */
+function expandPath(p: string) {
+  const t = p.trim();
+  if (t === "~") return HOME;
+  if (t.startsWith("~/")) return path.join(HOME, t.slice(2));
+  return path.isAbsolute(t) ? t : path.join(HOME, t);
+}
+
+/** 只清理文件名那一段，目录原样保留 */
+const safeBase = (s: string) => s.replace(/[\\/:*?"<>|]/g, "_").trim();
+
+/** 同名文件不覆盖：加 (2)、(3)… */
+async function uniqueFile(dir: string, base: string) {
+  const ext = path.extname(base);
+  let file = path.join(dir, base);
+  for (let i = 2; await fs.stat(file).then(() => true, () => false); i++) file = path.join(dir, `${path.basename(base, ext)} (${i})${ext}`);
+  return file;
+}
+
+async function writeFile({ name, content, dir }: { name: string; content: string; dir?: string }, ctx?: ToolCtx) {
+  const raw = String(name ?? "").trim();
+  if (!raw) return "文件名不能为空。";
   if (typeof content !== "string" || !content) return "文件内容不能为空。";
-  await fs.mkdir(OUT_DIR, { recursive: true });
-  let file = path.join(OUT_DIR, safe);
-  const ext = path.extname(safe);
-  for (let i = 2; await fs.stat(file).then(() => true, () => false); i++) file = path.join(OUT_DIR, `${path.basename(safe, ext)} (${i})${ext}`);
+
+  const wanted = String(dir ?? "").trim();
+  const nameHasPath = /[\\/]/.test(raw) || raw.startsWith("~");
+  // 对方明确说了放哪儿：name 写成完整路径，或者单独给了 dir——就写到那儿，不再退回自己的目录
+  const explicit = nameHasPath ? expandPath(raw) : wanted ? path.join(expandPath(wanted), raw) : "";
+  const base = safeBase(path.basename(explicit || raw));
+
+  let file: string | null = null;
+  if (explicit && base && base !== "." && base !== "..") {
+    const parent = path.dirname(explicit);
+    const abs = path.join(parent, base);
+    if (!DENY.some((r) => r.test(abs))) {
+      try {
+        await fs.mkdir(parent, { recursive: true });
+        const st = await fs.stat(abs).then((s) => s, () => null);
+        // 指到一个已有的文件夹不算合法路径
+        if (!st || st.isFile()) file = abs;
+      } catch {
+        file = null;
+      }
+    }
+  }
+  // 路径不合法（密钥目录、指到文件夹、没权限）才退回自己的文件夹
+  let fellBack = false;
+  if (!file) {
+    fellBack = !!explicit;
+    await fs.mkdir(OUT_DIR, { recursive: true });
+    file = await uniqueFile(OUT_DIR, base || "未命名");
+  }
+
   // 写给他的文档（不是代码）：按 Humanizer-zh 去一遍 AI 味再存
-  const prose = /\.(md|txt|markdown)$/i.test(safe) && !/```/.test(content);
-  await fs.writeFile(file, prose ? await humanize(content, "写给对方看的文档") : content, "utf8");
+  const prose = /\.(md|txt|markdown)$/i.test(file) && !/```/.test(content);
+  const body = prose ? await humanize(content, "写给对方看的文档") : content;
+  try {
+    await fs.writeFile(file, body, "utf8");
+  } catch (e) {
+    if (!explicit) throw e;
+    // 位置在，但没权限写：退回自己的文件夹，别让文件丢了
+    fellBack = true;
+    await fs.mkdir(OUT_DIR, { recursive: true });
+    file = await uniqueFile(OUT_DIR, base || "未命名");
+    await fs.writeFile(file, body, "utf8");
+  }
   ctx?.attach(card({ type: "file", path: file }));
-  return "文件写好了，回复末尾会自动带一张文件卡片，对方点一下就能在 Finder 里看到。回复里不用写路径。";
+  return fellBack
+    ? `那个位置写不进去（路径不合法），文件改放到我自己的文件夹了，名字是「${path.basename(file)}」。回复里别写路径，卡片会自动带上。`
+    : "文件写好了，回复末尾会自动带一张文件卡片，对方点一下就能在 Finder 里看到。回复里不用写路径。";
 }
 
 export const TOOLS = [
@@ -446,8 +503,16 @@ export const TOOLS = [
     function: {
       name: "write_file",
       description:
-        "给对方写一个文件（文档、脚本、清单、代码等纯文本），存到下载文件夹里的「敏」目录，回复里会自动带一张文件卡片。name 带扩展名，如 周报.md、backup.sh。",
-      parameters: { type: "object", properties: { name: { type: "string" }, content: { type: "string" } }, required: ["name", "content"] },
+        "给对方写一个文件（文档、脚本、清单、代码等纯文本），回复里会自动带一张文件卡片。默认存到下载文件夹里的「敏」目录；对方指定了位置（如 ~/Downloads/dongni_super_test、桌面、某个文件夹）时，把目标目录写进 dir，或者把带目录的完整路径写进 name，就直接写到那儿。name 带扩展名，如 周报.md、backup.sh。",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "文件名或带目录的完整路径，如 周报.md、~/Downloads/dongni_super_test/report.md" },
+          content: { type: "string" },
+          dir: { type: "string", description: "目标目录（可选），如 ~/Downloads/dongni_super_test，不给就存到 ~/Downloads/敏" },
+        },
+        required: ["name", "content"],
+      },
     },
   },
 ];

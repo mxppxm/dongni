@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import { doubaoTts, doubaoTtsStream, ttsReady } from "./doubao";
 import { dialogEnabled, sayViaDialog } from "./dialogvoice";
 import { voiceConfig } from "./voiceconfig";
+import { stripLeaks, stripPaths } from "./textclean";
 
 /**
  * 把回复念出来：配了豆包（火山引擎）就用豆包的声音，没配或没合成出来就退回原来那套
@@ -43,6 +44,9 @@ export function speakableText(markdown: string): string {
   let t = markdown;
   t = t.replace(/```[\s\S]*?```/g, "。");
   t = t.replace(/!\[[^\]]*\]\([^)]*\)/g, "。");
+  // 念的时候不读磁盘路径，也不读模型漏出来的调用残片（乱码）
+  t = stripLeaks(t);
+  t = stripPaths(t);
   t = t.replace(/^\s*\|?[\s:|-]*\|[\s:|-]*$/gm, "");
   t = t.replace(/^\s*\|/gm, "").replace(/\|\s*$/gm, "");
   t = t.replace(/\s*\|\s*/g, "、");
