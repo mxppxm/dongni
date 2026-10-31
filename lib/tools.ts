@@ -11,6 +11,7 @@ import { createMood } from "./moods";
 import { setCity, takeDailyPhoto, today, wardrobeFile } from "./wardrobe";
 import { addLocalImage, IMAGE_EXT, imageMarkdown } from "./images";
 import { startRepair } from "./selfrepair";
+import { dispatch, judge, runningJobs } from "./superagent";
 import { finishTask, startTask } from "./tasks";
 import { saveVoiceConfig, voiceReady } from "./voiceconfig";
 
@@ -340,6 +341,31 @@ export const TOOLS = [
   {
     type: "function",
     function: {
+      name: "dispatch_task",
+      description:
+        "把重活交给后台那个能跑命令的 agent（super agent）：它能读整个代码库、跑命令、装依赖、上网查、写多个文件、自己调试到自己跑通——这些你自己都做不到。所以活里只要出现「跑一遍/验证/装/批量/多个文件/查资料/部署/做一整套东西」，先用它。",
+      parameters: {
+        type: "object",
+        properties: {
+          task: { type: "string", description: "要干什么，完整可独立看懂：目标、在哪做（目录/项目）、做成什么样算完成" },
+          dir: { type: "string", description: "在哪个目录里干，默认他的主目录" },
+          force: { type: "boolean", description: "他明确说「一定要派出去」时才写 true" },
+        },
+        required: ["task"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "dispatch_status",
+      description: "看派出去的活现在还有几件在 super agent 上跑着（他问「那事怎么样了」「还在跑吗」时用）。",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "humanize_text",
       description: "帮他把一段文字去 AI 味（他说「帮我改得像人写的」「去去 AI 味」「润色一下」时用）。只改表达，不加事实。genre 写文体，如 公众号文章、邮件、周报、朋友圈。",
       parameters: { type: "object", properties: { text: { type: "string" }, genre: { type: "string" } }, required: ["text"] },
@@ -427,6 +453,32 @@ export const TOOLS = [
 ];
 
 const IMPL: Record<string, (a: never, ctx?: ToolCtx) => Promise<string>> = {
+  dispatch_task: (async ({ task, dir, force }: { task: string; dir?: string; force?: boolean }) => {
+    const j = judge(task, { force });
+    const why = j.reasons.length ? j.reasons.join("；") : "没命中任何信号，按闲聊量级算";
+    if (j.target !== "super")
+      return `这件不用派（判断：${j.level}，分数 ${j.score}；依据：${why}）。${
+        j.target === "pi"
+          ? "如果是要改你自己，用 repair_self；其他就在这边自己动手做完。"
+          : "你自己几秒钟就能办完，别往外交。"
+      }回复里别念这段判断，直接给他结果。`;
+    try {
+      const out = dispatch(task, dir);
+      return `${out}\n（判断依据：${why}。回复时按你自己平常说话，别提 super agent 的名字、别提工具和目录，只说「这事我让人去做了，跑完告诉你」这一类意思。）`;
+    } catch (e) {
+      return `派不出去：${e instanceof Error ? e.message : e}`;
+    }
+  }) as (a: never, ctx?: ToolCtx) => Promise<string>,
+  dispatch_status: (async () => {
+    const jobs = runningJobs();
+    if (!jobs.length) return "现在没有跑着的外活，都清空了。";
+    return (
+      `有 ${jobs.length} 件在跑：\n` +
+      jobs
+        .map((j) => `${j.id}｜${j.task.slice(0, 50)}｜在 ${j.dir.replace(HOME, "~")}｜已经跑了 ${Math.round((Date.now() - j.since) / 60000)} 分钟`)
+        .join("\n")
+    );
+  }) as (a: never, ctx?: ToolCtx) => Promise<string>,
   humanize_text: (async ({ text, genre }: { text: string; genre?: string }) => {
     if (!text?.trim()) return "没给要改的文字。";
     const out = await humanize(text, genre || "随笔");
@@ -518,6 +570,8 @@ const TASK_TITLE: Record<string, (a: Record<string, unknown>) => string> = {
   show_image: (a) => `打开图片 ${short(path.basename(String(a.path ?? "")))}`,
   generate_image: (a) => `画图：${short(a.prompt)}`,
   set_voice_key: () => "配语音 key",
+  dispatch_task: (a) => `派活：${short(a.task)}`,
+  dispatch_status: () => "看派出去的活",
   write_file: (a) => `写文件 ${short(a.name)}`,
 };
 
