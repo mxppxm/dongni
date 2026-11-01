@@ -105,6 +105,18 @@ async function runPi(request: string): Promise<string> {
   }
 }
 
+/**
+ * 子进程的 locale 由我们补：服务的父进程是 launchd，环境里没有 LANG，
+ * Ruby/Python 一类子进程拿到中文会按 ASCII-8BIT 处理，一编码就崩（clacky 就栽在这上面）。
+ * Node 自己不在乎，但编译脚本、三方 CLI 在乎。
+ */
+const utf8Env = (): NodeJS.ProcessEnv => ({
+  ...process.env,
+  LANG: process.env.LANG || "en_US.UTF-8",
+  LC_ALL: process.env.LC_ALL || "en_US.UTF-8",
+  RUBYOPT: [process.env.RUBYOPT, "-Eutf-8"].filter(Boolean).join(" "),
+});
+
 async function runPiOnce(request: string): Promise<string> {
   const dir = path.join(ROOT, "logs", "pi");
   fs.mkdirSync(dir, { recursive: true });
@@ -113,7 +125,7 @@ async function runPiOnce(request: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn(PI, ["-p", "--no-session", "--no-mcp", "--no-skills", "--mode", "json", "--thinking", "high", piPrompt(request)], {
       cwd: ROOT,
-      env: process.env,
+      env: utf8Env(),
       stdio: ["ignore", "pipe", "pipe"],
     });
     let buf = "";
@@ -305,7 +317,7 @@ export function startRepair(request: string): string {
       restarting = true;
       const child = spawn("/bin/bash", [path.join(ROOT, "scripts", "rebuild.sh"), good], {
         cwd: ROOT,
-        env: process.env,
+        env: utf8Env(),
         detached: true,
         stdio: "ignore",
       });

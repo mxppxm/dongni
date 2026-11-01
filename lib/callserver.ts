@@ -242,6 +242,9 @@ function bridge(page: WebSocket) {
     genDone: boolean;
     replyId: string; // 豆包那边这段声音的编号（ChatTTSText 那条路用，等它念完）
     ttsDone: boolean;
+    lastDelta: number; // 上一次有新字的时间：长时间没动静就往回垫一句
+    fillers: number;
+    stall?: NodeJS.Timeout;
     timer?: NodeJS.Timeout;
   };
   let current: Speaking | null = null;
@@ -301,7 +304,25 @@ function bridge(page: WebSocket) {
         genDone: false,
         replyId: "",
         ttsDone: false,
+        lastDelta: Date.now(),
+        fillers: 0,
       };
+      // 生成卡住（模型/工具半天不回字）时：这条 500 流会空着不吐字，豆包十几分钟就判「异常静音」，
+      // 而 current 一直占着，提醒、改好了这些全排不出去——通着电话却像断了。所以每隔一会儿垫一句。
+      me.stall = setInterval(() => {
+        if (current !== me || me.genDone) {
+          clearInterval(me.stall);
+          return;
+        }
+        if (Date.now() - me.lastDelta < 20_000 || me.fillers >= 6) return;
+        const lines = ["嗯……这个我得想一下，", "稍等啊，我这边还在弄，", "别急，我还没弄完，", "马上，再给我一会儿，"];
+        me.fillers++;
+        me.lastDelta = Date.now();
+        const line = lines[(me.fillers - 1) % lines.length];
+        console.log(`[dongni][call] +${Date.now() - T0}ms 生成卡了 ${me.fillers} 次，先垫一句：${line}`);
+        me.say.push(line + "\n");
+        tell({ type: "her", text: `${me.text}${line}` });
+      }, 5000);
       if (current) clearTimeout(current.timer);
       current = me;
       return;
@@ -309,6 +330,7 @@ function bridge(page: WebSocket) {
     if (!current || e.assistantId !== current.id) return; // 接通前就开始的、被打断的，都不念
     if (e.type === "delta") {
       if (!current.text) console.log(`[dongni][call] +${Date.now() - T0}ms 第一个字`);
+      current.lastDelta = Date.now();
       current.say.push(e.text);
       current.text += e.text;
       tell({ type: "her", text: current.text });
@@ -331,6 +353,7 @@ function bridge(page: WebSocket) {
   const finishSpeaking = (me: Speaking) => {
     if (current !== me) return;
     clearTimeout(me.timer);
+    clearInterval(me.stall);
     current = null;
     speakExtras();
   };
@@ -352,6 +375,7 @@ function bridge(page: WebSocket) {
     if (current) {
       cutReply(current.id, current.spoken);
       clearTimeout(current.timer);
+      clearInterval(current.stall);
       current = null;
     }
     extras.length = 0;
@@ -376,6 +400,26 @@ function bridge(page: WebSocket) {
   let watcher: NodeJS.Timeout | undefined;
   let counted = false;
 
+  /**
+   * 心跳：页面合盖、切网、Chrome 崩了，WebSocket 可能停在「半开」——close 事件迟迟不来，
+   * calls 就永远减不掉：她以为一直在通话（主动消息全静音、改完自己无限等、说话还切成电话腔）。
+   * 30 秒 ping 一次，两轮没回就当作挂了。
+   */
+  let ponged = true;
+  const beat = setInterval(() => {
+    if (page.readyState !== WebSocket.OPEN) return;
+    if (!ponged) {
+      console.log("[dongni][call] 页面一分钟没回心跳，当作挂断");
+      close();
+      return;
+    }
+    ponged = false;
+    page.ping();
+  }, 30_000);
+  page.on("pong", () => {
+    ponged = true;
+  });
+
   /** 你这句说完了：交给她自己的脑子回（和打字是同一条路，念出来交给上面的订阅） */
   const answer = (text: string) => {
     replyMode.run({ fast: true }, () =>
@@ -396,6 +440,7 @@ function bridge(page: WebSocket) {
     },
   });
   const close = () => {
+    clearInterval(beat);
     unsubscribe();
     unsubscribe = () => {};
     clearInterval(watcher);
@@ -421,6 +466,12 @@ function bridge(page: WebSocket) {
   up.on("message", async (data: Buffer) => {
     const m = parse(data);
     if (m.error) {
+      // 「异常静音」不是致命错误：两个人都安静几分钟，豆包就会回这个；以前一律 close()，
+      // 结果聊到一半静一会儿整通电话就断了（logs/server.log 里那次静了 5 分钟）。接着用就行。
+      if (/silence/i.test(JSON.stringify(m.error))) {
+        console.warn("[dongni] 电话那头说「异常静音」，忽略继续：", m.error);
+        return;
+      }
       console.warn("[dongni] 电话那头报错：", m.error);
       tell({ type: "error", message: m.error });
       return close();

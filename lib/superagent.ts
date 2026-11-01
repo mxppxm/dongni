@@ -129,7 +129,31 @@ function log(line: string) {
   fs.appendFileSync(path.join(LOGDIR, "dispatch.log"), `[${new Date().toLocaleString("zh-CN", { hour12: false })}] ${line}\n`);
 }
 
+/**
+ * clacky 是 Ruby 写的：服务的父进程是 launchd，环境里没有 LANG，Ruby 就按 ASCII-8BIT 收参数，
+ * 一句中文就能把 --json 的输出编码搞崩——2026-11-01 那件 Review 任务就是这么「派出去」以后 0 秒退出：
+ *   [报错] incompatible character encodings: ASCII-8BIT and UTF-8
+ * 所以子进程的 locale 我们自己补，不指望外面有。实测补上之后同一条命令 0.9 秒跑完。
+ */
+function childEnv(): NodeJS.ProcessEnv {
+  const utf8 = "en_US.UTF-8";
+  return {
+    ...process.env,
+    LANG: process.env.LANG || utf8,
+    LC_ALL: process.env.LC_ALL || utf8,
+    RUBYOPT: [process.env.RUBYOPT, "-Eutf-8"].filter(Boolean).join(" "),
+  };
+}
+
 export function runningJobs(): Job[] {
+  // 进程被重启、runJob 半路炸掉，都可能留下永远「在跑」的僵尸条目；超时的直接清掉，
+  // 不然 MAX_RUNNING 被它们占满，后面每件都只能回「先排队」，他那边看到的就是「说了派人但啥也没动」。
+  for (const [id, j] of state.jobs) {
+    if (Date.now() - j.since > TIMEOUT_MS + 5 * 60_000) {
+      state.jobs.delete(id);
+      log(`${id} 超期没动静，从在跑名单里清掉`);
+    }
+  }
   return [...state.jobs.values()];
 }
 
@@ -149,7 +173,8 @@ export function dispatch(task: string, dir?: string): string {
   if (!t) return "要派什么活得说清楚。";
   const bin = clackyBin();
   if (!bin) return "这台电脑上没找到 super agent（clacky），派不出去。";
-  if (state.jobs.size >= MAX_RUNNING) return `现在已经有 ${state.jobs.size} 件在 super agent 上跑着，这件先排队，等他问起来再说。`;
+  const running = runningJobs().length;
+  if (running >= MAX_RUNNING) return `现在已经有 ${running} 件在 super agent 上跑着，这件先排队，等他问起来再说。`;
 
   const cwd = safeDir(dir);
   const id = `S${Date.now().toString().slice(-6)}`;
@@ -162,8 +187,25 @@ export function dispatch(task: string, dir?: string): string {
   log(`==== ${id} 开始｜目录 ${cwd}｜${t}`);
 
   const taskId = startTask("super", `交给 super agent：${t.replace(/\s+/g, " ").slice(0, 26)}`);
-  void runJob(job, bin, taskId);
-  return `派出去了（${id}）：super agent 在 ${cwd.replace(HOME, "~")} 里干活，跑完我把结果说给你。这活要几分钟，不用一直等。`;
+  void runJob(job, bin, taskId).catch((e) => {
+    // runJob 自己不该抛；真抛了也不能让这件活从名单里消失（名额被占满，后面全变「先排队」）
+    const msg = e instanceof Error ? e.message : String(e);
+    state.jobs.delete(job.id);
+    setKv(
+      "super_jobs",
+      JSON.stringify([...state.jobs.values()].map((j) => ({ id: j.id, task: j.task.slice(0, 60), dir: j.dir, since: j.since }))),
+    );
+    log(`${id} 半路炸了：${msg}`);
+    finishTask(taskId, false, msg.slice(0, 400));
+    try {
+      postAssistant(`那件事没跑起来（${id}）：${msg}`);
+    } catch {}
+  });
+  // 措辞要诚实：这一步只知道「起了个进程」，还没证明它真在干活。以前一律回「派出去了」，
+  // 结果 clacky 一启动就因编码崩掉，她还照着这句话跟他说「已经交出去了」。
+  return `登记上了（${id}），super agent 正在 ${cwd.replace(HOME, "~")} 里起。${
+    dir?.trim() ? "" : "（他没给目录，默认在主目录里干活；要是这活属于某个项目，把 dir 传进来。）"
+  }要是起不来，几秒内就会知道，我马上说；真跑起来了，跑完把结果说给你。这活要几分钟，不用一直等。回复他时别用「已经交出去了」这种板上钉钉的说法，就说「派下去了，在跑，一会儿给他结果」。`;
 }
 
 async function runJob(job: Job, bin: string, taskId: number) {
@@ -175,7 +217,7 @@ async function runJob(job: Job, bin: string, taskId: number) {
   const t0 = Date.now();
   let failed = false; // 成败只认退出码/超时/起不来，不再拿模型的话去猜
   const text = await new Promise<string>((resolve) => {
-    const child = spawn(bin, args, { cwd: job.dir, env: process.env, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(bin, args, { cwd: job.dir, env: childEnv(), stdio: ["ignore", "pipe", "pipe"] });
     let buf = "";
     let says: string[] = [];
     let err = "";
