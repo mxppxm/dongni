@@ -686,3 +686,39 @@ export function startCallServer() {
   g.__dongniCall = wss;
   console.log(`[dongni] 电话服务在 127.0.0.1:${PORT}`);
 }
+
+/**
+ * 只在测试里用：把「电话里他这句话说完」那一小段接到一个内存里的假豆包上，看它到底挂不挂。
+ * 传进来的 heard 是每句「说完」的识别文字，返回这通电话里服务端往页面发的控制消息（挂断、打断…）。
+ */
+export function __simulateTurns(heard: string[]) {
+  const sent: { type: string }[] = [];
+  let byePending = false;
+  let byeLimit: NodeJS.Timeout | undefined;
+  const cancelBye = () => {
+    byePending = false;
+    clearTimeout(byeLimit);
+  };
+  const endBye = () => {
+    if (!byePending) return;
+    cancelBye();
+    sent.push({ type: "hangup" });
+  };
+  const armBye = () => {
+    cancelBye();
+    byePending = true;
+    byeLimit = setTimeout(endBye, 25_000);
+  };
+  const byeWhenSaid = () => {
+    if (!byePending) return;
+    clearTimeout(byeLimit);
+    endBye();
+  };
+  for (const text of heard) {
+    if (isGoodbye(text)) armBye();
+    else cancelBye();
+    byeWhenSaid(); // 她这句念完了
+  }
+  cancelBye();
+  return sent;
+}
