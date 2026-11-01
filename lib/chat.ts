@@ -242,10 +242,18 @@ export function startReply(clientId: string, content: string, onEvent: (e: ChatE
     user = d.prepare("SELECT * FROM messages WHERE id = ?").get(id) as MessageRow;
   }
 
-  // 同一条消息重发：已有回复就接着用（完成的直接返回，没完成的前端去轮询）
-  const reply = d.prepare("SELECT * FROM messages WHERE id > ? AND role = 'assistant' ORDER BY id LIMIT 1").get(user.id) as
-    | MessageRow
-    | undefined;
+  // 同一条消息重发：已有回复就接着用（完成的直接返回，没完成的前端去轮询）。
+  // 边界必须卡在「下一条用户消息」之前：assistant 行的 client_id 是空的，光按 id > 用户消息查，
+  // 会把别人刚插进来的那轮回复认成自己的——两条消息并发进来时，第二条就这么被当成「已有回复」，
+  // 只回一个 follow 然后永远没人处理它（2026-11-01 实测：三条并发只回了一条）。
+  const reply = d
+    .prepare(
+      `SELECT * FROM messages
+        WHERE role = 'assistant' AND id > ?
+          AND id < COALESCE((SELECT MIN(id) FROM messages WHERE role = 'user' AND id > ?), 9223372036854775807)
+        ORDER BY id LIMIT 1`,
+    )
+    .get(user.id, user.id) as MessageRow | undefined;
   if (reply) {
     onEvent({ type: "meta", userId: user.id, assistantId: reply.id });
     if (reply.status === "done") {
