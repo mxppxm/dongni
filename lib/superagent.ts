@@ -1,5 +1,4 @@
 import "server-only";
-import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -7,10 +6,12 @@ import { getKv, setKv } from "./db";
 import { LLM_CONFIG } from "./portable";
 import { postAssistant } from "./selfrepair";
 import { speakAsHer } from "./speak";
+import { runWorker } from "./worker";
 import { finishTask, startTask } from "./tasks";
 
 /**
- * 派活：把一件「大到一个人干不完」的事交给本机的 super agent（clacky）去做。
+ * 派活：把一件「大到一次对话里干不完」的事交给内置执行器（lib/worker.ts：DeepSeek 跑 agent
+ * 循环，自己读写文件、跑命令），不再外挂 clacky CLI。
  * 小活不派——她自己去查、去写、去改（repair_self 走 pi），派出去反而慢、反而贵。
  *
  * 判断在 judge() 里，是打分的：命中越多越复杂。派不派由分数决定，不由心情决定。
@@ -20,28 +21,6 @@ const ROOT = process.cwd();
 const LOGDIR = path.join(ROOT, "logs", "super");
 const MAX_RUNNING = 2;
 const TIMEOUT_MS = 25 * 60_000;
-
-function clackyBin(): string | null {
-  const cands = [
-    process.env.DONGNI_CLACKY_BIN,
-    path.join(HOME, ".gem", "ruby", "2.6.0", "bin", "clacky"),
-    "/opt/homebrew/bin/clacky",
-    "/usr/local/bin/clacky",
-    path.join(HOME, ".local", "bin", "clacky"),
-  ].filter(Boolean) as string[];
-  for (const p of cands) if (fs.existsSync(p)) return p;
-  return null;
-}
-
-/** super agent 用哪条线：跟项目同一份 config/llm.json，省得两边不一致 */
-function modelName(): string {
-  try {
-    const cfg = JSON.parse(fs.readFileSync(LLM_CONFIG, "utf8")) as { model?: string };
-    return cfg.model?.trim() || "";
-  } catch {
-    return "";
-  }
-}
 
 // ─────────────────────────── 判断：这活该谁干 ───────────────────────────
 
@@ -129,22 +108,6 @@ function log(line: string) {
   fs.appendFileSync(path.join(LOGDIR, "dispatch.log"), `[${new Date().toLocaleString("zh-CN", { hour12: false })}] ${line}\n`);
 }
 
-/**
- * clacky 是 Ruby 写的：服务的父进程是 launchd，环境里没有 LANG，Ruby 就按 ASCII-8BIT 收参数，
- * 一句中文就能把 --json 的输出编码搞崩——2026-11-01 那件 Review 任务就是这么「派出去」以后 0 秒退出：
- *   [报错] incompatible character encodings: ASCII-8BIT and UTF-8
- * 所以子进程的 locale 我们自己补，不指望外面有。实测补上之后同一条命令 0.9 秒跑完。
- */
-function childEnv(): NodeJS.ProcessEnv {
-  const utf8 = "en_US.UTF-8";
-  return {
-    ...process.env,
-    LANG: process.env.LANG || utf8,
-    LC_ALL: process.env.LC_ALL || utf8,
-    RUBYOPT: [process.env.RUBYOPT, "-Eutf-8"].filter(Boolean).join(" "),
-  };
-}
-
 export function runningJobs(): Job[] {
   // 进程被重启、runJob 半路炸掉，都可能留下永远「在跑」的僵尸条目；超时的直接清掉，
   // 不然 MAX_RUNNING 被它们占满，后面每件都只能回「先排队」，他那边看到的就是「说了派人但啥也没动」。
@@ -171,8 +134,6 @@ function safeDir(dir?: string): string {
 export function dispatch(task: string, dir?: string): string {
   const t = (task || "").trim();
   if (!t) return "要派什么活得说清楚。";
-  const bin = clackyBin();
-  if (!bin) return "这台电脑上没找到 super agent（clacky），派不出去。";
   const running = runningJobs().length;
   if (running >= MAX_RUNNING) return `现在已经有 ${running} 件在 super agent 上跑着，这件先排队，等他问起来再说。`;
 
@@ -187,7 +148,7 @@ export function dispatch(task: string, dir?: string): string {
   log(`==== ${id} 开始｜目录 ${cwd}｜${t}`);
 
   const taskId = startTask("super", `交给 super agent：${t.replace(/\s+/g, " ").slice(0, 26)}`);
-  void runJob(job, bin, taskId).catch((e) => {
+  void runJob(job, taskId).catch((e) => {
     // runJob 自己不该抛；真抛了也不能让这件活从名单里消失（名额被占满，后面全变「先排队」）
     const msg = e instanceof Error ? e.message : String(e);
     state.jobs.delete(job.id);
@@ -201,82 +162,36 @@ export function dispatch(task: string, dir?: string): string {
       postAssistant(`那件事没跑起来（${id}）：${msg}`);
     } catch {}
   });
-  // 措辞要诚实：这一步只知道「起了个进程」，还没证明它真在干活。以前一律回「派出去了」，
-  // 结果 clacky 一启动就因编码崩掉，她还照着这句话跟他说「已经交出去了」。
-  return `登记上了（${id}），super agent 正在 ${cwd.replace(HOME, "~")} 里起。${
-    dir?.trim() ? "" : "（他没给目录，默认在主目录里干活；要是这活属于某个项目，把 dir 传进来。）"
-  }要是起不来，几秒内就会知道，我马上说；真跑起来了，跑完把结果说给你。这活要几分钟，不用一直等。回复他时别用「已经交出去了」这种板上钉钉的说法，就说「派下去了，在跑，一会儿给他结果」。`;
+  // 措辞要诚实：这一步只知道「活登记上了」，还没证明它真干成。以前一律回「派出去了」，
+  // 结果执行器一启动就崩，她还照着这句话跟他说「已经交出去了」。
+  return `接下来我自己干（${id}），在 ${cwd.replace(HOME, "~")} 里，一步一步来，跑完把结果说给你。${
+    dir?.trim() ? "" : "（他没给目录，我默认在主目录里干；要是这活属于某个项目，把 dir 传进来。）"
+  }这活要几分钟，不用一直等，也别用「已经交出去了」这种说法，就说「我自己上手了，正在弄」。`;
 }
 
-async function runJob(job: Job, bin: string, taskId: number) {
+async function runJob(job: Job, taskId: number) {
   const trace = path.join(LOGDIR, `${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`);
-  const args = ["agent", "-m", job.task, "--mode", "auto_approve", "--path", job.dir, "--json"];
-  const model = modelName();
-  if (model) args.push("--model", model);
-
   const t0 = Date.now();
-  let failed = false; // 成败只认退出码/超时/起不来，不再拿模型的话去猜
-  const text = await new Promise<string>((resolve) => {
-    const child = spawn(bin, args, { cwd: job.dir, env: childEnv(), stdio: ["ignore", "pipe", "pipe"] });
-    let buf = "";
-    let says: string[] = [];
-    let err = "";
-    let killed = false;
-    const timer = setTimeout(() => {
-      killed = true;
-      child.kill("SIGTERM");
-      setTimeout(() => child.kill("SIGKILL"), 5000);
-    }, TIMEOUT_MS);
-
-    child.stdout.on("data", (c: Buffer) => {
-      buf += c.toString("utf8");
-      let i;
-      while ((i = buf.indexOf("\n")) >= 0) {
-        const line = buf.slice(0, i);
-        buf = buf.slice(i + 1);
-        if (!line.trim()) continue;
+  let failed = false;
+  let text = "";
+  try {
+    text = await runWorker({
+      task: job.task,
+      dir: job.dir,
+      budgetMs: TIMEOUT_MS - 60_000,
+      log: (entry) => {
         try {
-          const e = JSON.parse(line) as { type?: string; content?: string; message?: string };
-          if (e.type === "assistant_message" && e.content?.trim()) {
-            // 模型自言的思考块不算「她说的结果」，混进去会把成败判错、也说得莫名其妙
-            const said = e.content
-              .replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/g, "")
-              .replace(/^\s*<think(?:ing)?>[\s\S]*$/g, "")
-              .trim();
-            if (said) says.push(said);
-          }
-          if (e.type === "error") says.push(`[报错] ${e.message ?? "未知"}`);
-          fs.appendFileSync(trace, line.slice(0, 4000) + "\n");
-        } catch {
-          // 非 json 行忽略
-        }
-      }
+          fs.appendFileSync(trace, JSON.stringify(entry) + "\n");
+        } catch {}
+      },
     });
-    child.stderr.on("data", (b) => (err += b));
-    child.on("error", (e) => {
-      clearTimeout(timer);
-      failed = true;
-      resolve(`super agent 起不来：${e.message}`);
-    });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      const tail = says.slice(-3).join("\n\n").trim();
-      if (killed) {
-        failed = true;
-        return resolve(`跑了 ${Math.round((Date.now() - t0) / 60000)} 分钟还没完，我把它停了。日志在 ${trace}`);
-      }
-      if (says.some((s) => s.startsWith("[报错]")) || (code !== 0 && !tail)) failed = true;
-      if (tail) return resolve(tail);
-      failed = true;
-      resolve(`super agent 退出码 ${code}：${(err || "没有输出").slice(-400)}`);
-    });
-  });
-
-  state.jobs.delete(job.id);
-  setKv(
-    "super_jobs",
-    JSON.stringify([...state.jobs.values()].map((j) => ({ id: j.id, task: j.task.slice(0, 60), dir: j.dir, since: j.since }))),
-  );
+    if (/^(没做成|步数用完了|那件事没跑起来)/.test(text)) failed = true;
+  } catch (e) {
+    failed = true;
+    const msg = e instanceof Error ? e.message : String(e);
+    text = `执行器半路出错：${msg}`;
+    log(`${job.id} 抛错：${msg}`);
+  }
   const ok = !failed;
   setKv("super_last", JSON.stringify({ id: job.id, at: Date.now(), ok, text: text.slice(0, 2000) }));
   log(`${job.id} 结束｜${ok ? "ok" : "失败"}｜用时 ${Math.round((Date.now() - t0) / 1000)} 秒｜${text.slice(0, 300)}`);
