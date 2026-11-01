@@ -28,12 +28,54 @@ const TIMEOUT_MS = 5 * 60_000;
  * 没说过的、没试过的，状态就是「没验证过」——不许说成好的。
  */
 const PROOF_KEY = "imagegen_proof";
+/** 同一个失败原因，只让他听一次；之后是沉默，等有新情况或他主动问 */
+const TOLD_KEY = "imagegen_fail_told";
+const SAME_REASON_QUIET_MS = 3 * 60 * 60_000;
 const PROBE_PROMPT = "一朵白色小花，浅灰背景，极简";
 const PROBE_TIMEOUT_MS = 90_000;
 const PROOF_FRESH_MS = 10 * 60_000;
 
 export type GenOutcome = { ok: true; markdown: string; id: number } | { ok: false; message: string };
 export type GenProof = { at: number; ok: boolean; why: string; id?: number };
+type Told = { why: string; at: number };
+
+function readTold(): Told | null {
+  try {
+    const raw = getKv(TOLD_KEY);
+    if (!raw) return null;
+    const t = JSON.parse(raw) as Told;
+    return t && typeof t.at === "number" ? t : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 失败时交给模型的话。同一个原因短时间内只播报一次：
+ * 重复的失败告诉她「这个原因已经说过了」，让她别再刷同一句，除非真有新的。
+ */
+function failNote(why: string): string {
+  const now = Date.now();
+  const prev = readTold();
+  if (prev && prev.why === why && now - prev.at < SAME_REASON_QUIET_MS) {
+    const mins = Math.max(1, Math.round((now - prev.at) / 60000));
+    return `图还是没画出来，原因跟 ${mins} 分钟前那次一模一样：${why}。这个原因你已经跟他说过了，这次别再重复播报同一句；除非你换了别的画法、拿到了新情况，或者他主动问起，就说一句真正新的，否则别提，接着刚才的话往下说。`;
+  }
+  try {
+    setKv(TOLD_KEY, JSON.stringify({ why, at: now } satisfies Told));
+  } catch {
+    // 记不下也不影响出图
+  }
+  return `图没画出来，真实原因是：${why}。跟他用大白话说这个原因（别提路径、别贴代码），别说自己手里没有画图工具。`;
+}
+
+function clearTold() {
+  try {
+    setKv(TOLD_KEY, "");
+  } catch {
+    // 无关紧要
+  }
+}
 
 function keepProof(ok: boolean, why: string, id?: number) {
   try {
@@ -69,7 +111,7 @@ export async function proveImagegen(): Promise<GenProof | null> {
   if (last && Date.now() - last.at < PROOF_FRESH_MS) return last;
   if (proving) return proving;
   proving = (async () => {
-    await generateImage(PROBE_PROMPT, { quality: "low", timeoutMs: PROBE_TIMEOUT_MS });
+    await generateImage(PROBE_PROMPT, { quality: "low", timeoutMs: PROBE_TIMEOUT_MS, probe: true });
     const p = lastGenProof();
     console.log(`[dongni] 生图自检：${p?.ok ? "画出来了" : `没画出来（${p?.why ?? "不知道什么原因"}）`}`);
     return p;
@@ -105,14 +147,15 @@ function whyFailed(e: unknown, timeoutMs: number) {
   return last.slice(0, 160) || "不知道什么原因";
 }
 
-export async function generateImage(prompt: string, opts?: { quality?: "low" | "medium" | "high" | "auto"; timeoutMs?: number; ref?: string }): Promise<GenOutcome> {
+export async function generateImage(prompt: string, opts?: { quality?: "low" | "medium" | "high" | "auto"; timeoutMs?: number; ref?: string; probe?: boolean }): Promise<GenOutcome> {
   const p = prompt.trim();
   if (!p) return { ok: false, message: "没说要画什么，先问清一句再画。" };
   const missing = notInstalled();
   if (missing) {
     console.error(`[dongni] 画不了：${missing}`);
     keepProof(false, missing);
-    return { ok: false, message: `画不了，真实原因是：${missing}。跟他用大白话说这个原因，别说成「我不愿意画」或者别的。` };
+    if (opts?.probe) return { ok: false, message: `画不了，真实原因是：${missing}。` };
+    return { ok: false, message: failNote(missing) };
   }
 
   const quality = opts?.quality ?? "medium";
@@ -131,16 +174,15 @@ export async function generateImage(prompt: string, opts?: { quality?: "low" | "
     fs.rmSync(file, { force: true });
     const rec = addImageBuffer(buf, "image/png", "gen", p);
     keepProof(true, "", rec.id);
+    clearTold();
     console.log(`[dongni] 画好一张图 #${rec.id}`);
     return { ok: true, markdown: imageMarkdown(rec.id), id: rec.id };
   } catch (e) {
     const why = whyFailed(e, timeoutMs);
     keepProof(false, why);
     console.warn(`[dongni] 画图失败：${why}`);
-    return {
-      ok: false,
-      message: `图没画出来，真实原因是：${why}。跟他用大白话说这个原因（别提路径、别贴代码），别说自己手里没有画图工具。`,
-    };
+    if (opts?.probe) return { ok: false, message: `图没画出来，真实原因是：${why}。` };
+    return { ok: false, message: failNote(why) };
   } finally {
     fs.rmSync(out, { force: true });
   }

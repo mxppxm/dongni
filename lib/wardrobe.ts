@@ -564,7 +564,47 @@ function post(content: string) {
 }
 
 /**
- * 今天这张：先说一声 → 拍（穿当天那套）→ 入相册 → 拿给他看。
+ * 拍失败的时候：同一句「照片没拍出来」只说一次，别自动一遍遍重试、一遍遍刷屏。
+ * 只有换了个原因、真有了新情况，或者他自己问起，才再说。
+ */
+const PHOTO_FAIL_KEY = "photo_fail";
+const PHOTO_TOLD_KEY = "photo_fail_told";
+const PHOTO_RETRY_QUIET_MS = 30 * 60_000;
+const PHOTO_TOLD_QUIET_MS = 6 * 60 * 60_000;
+type PhotoFail = { at: number; why: string };
+
+function readPhotoFail(key: string): PhotoFail | null {
+  try {
+    const raw = getKv(key);
+    if (!raw) return null;
+    const v = JSON.parse(raw) as PhotoFail;
+    return v && typeof v.at === "number" ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+function writePhotoFail(key: string, v: PhotoFail | null) {
+  try {
+    setKv(key, v ? JSON.stringify(v) : "");
+  } catch {
+    // 记不下不影响拍照
+  }
+}
+
+/** 脚本的报错原话在 stderr 里，e.message 只有一行 Command failed */
+function photoWhy(e: unknown) {
+  const err = e as { stderr?: string; message?: string; killed?: boolean; signal?: string };
+  if (err?.killed || err?.signal) return "画图超时了";
+  const lines = String(err?.stderr ?? "")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const last = (lines.pop() ?? err?.message ?? "").replace(/^gptimg:\s*/, "").replace(/\s+/g, " ").trim();
+  return last.slice(0, 120) || "不知道什么原因";
+}
+
+/** 今天这张：先说一声 → 拍（穿当天那套）→ 入相册 → 拿给他看。
  * force=true 是他让拍的（今天已经有了也重拍）。
  */
 const photoFlag = globalThis as unknown as { __dongniPhotoBusy?: boolean };
@@ -590,6 +630,10 @@ async function takeDailyPhotoInner(force: boolean): Promise<string> {
   albumTable();
   const date = dayKey();
   if (!force && db().prepare("SELECT 1 FROM album_photos WHERE date = ?").get(date)) return "今天已经拍过了。";
+  // 自动那张：刚试过没成，就先别接着重试；重试也不吭声，拍成了再给他看
+  const lastFail = readPhotoFail(PHOTO_FAIL_KEY);
+  if (!force && lastFail && Date.now() - lastFail.at < PHOTO_RETRY_QUIET_MS) return `刚试过没拍成（${lastFail.why}），等会儿再试。`;
+  const quietRetry = !force && !!lastFail && Date.now() - lastFail.at < PHOTO_TOLD_QUIET_MS;
   if (g.__dongniWardrobeBusy) return "衣橱还在准备，等一会儿再拍。";
   const t = await today();
   const ref = path.join(DIR, `${t.outfit.key}.jpg`);
@@ -615,7 +659,7 @@ async function takeDailyPhotoInner(force: boolean): Promise<string> {
     "low",
   );
 
-  post(plan.before || "今天的照片我去拍一张～");
+  if (!quietRetry) post(plan.before || "今天的照片我去拍一张～");
   const file = `album-${date}-${Date.now().toString(36)}.png`;
   const jpg = file.replace(/\.png$/, ".jpg");
   try {
@@ -631,9 +675,21 @@ async function takeDailyPhotoInner(force: boolean): Promise<string> {
       () => ({ ok: true, result: `![今天](/api/wardrobe/${jpg})` }),
     );
   } catch (e) {
-    post("诶，照片没拍出来……晚点我再试一次");
-    return `没拍成：${e instanceof Error ? e.message : e}`;
+    const why = photoWhy(e);
+    const now = Date.now();
+    console.warn(`[dongni] 拍今天的照片没成：${why}`);
+    writePhotoFail(PHOTO_FAIL_KEY, { at: now, why });
+    const told = readPhotoFail(PHOTO_TOLD_KEY);
+    const same = !!told && told.why === why && now - told.at < PHOTO_TOLD_QUIET_MS;
+    // 他问了就解释；自动拍的同一个原因只说一次，重复的失败只写日志，不刷屏
+    if (force || !same) {
+      post(force && same ? `还是没拍成，原因没变：${why}` : `诶，照片没拍出来（${why}）。${force ? "我再试一次，不行就晚点再说" : "晚点我再试一次"}`);
+      writePhotoFail(PHOTO_TOLD_KEY, { why, at: now });
+    }
+    return `没拍成：${why}`;
   }
+  writePhotoFail(PHOTO_FAIL_KEY, null);
+  writePhotoFail(PHOTO_TOLD_KEY, null);
   db()
     .prepare("INSERT OR IGNORE INTO album_photos(date, file, outfit, weather, caption, created_at) VALUES(?, ?, ?, ?, ?, ?)")
     .run(date, jpg, t.outfit.name, weatherText, plan.caption || "", Date.now());
