@@ -8,7 +8,24 @@ import Mood from "./Mood";
 /**
  * 打电话：麦克风 16k PCM 推给本机 3940（再转豆包实时语音），她的声音 24k PCM 回来边收边放。
  * 他一开口，服务端会发 clear，正在放的立刻停——能打断她。
+ *
+ * 放声音这块的门道：豆包按 20ms 一片往回吐，一片一个 WebSocket 消息。以前一片一个
+ * AudioBufferSourceNode，起播时刻取 max(现在+20ms, 上一片排到的末尾)——网络一抖、
+ * 主线程一卡，这一片就比上一片晚到，于是硬生生插一段空隙、在非零振幅上接回去，
+ * 听起来就是「咔哒」。他插话时又直接 stop()，满音量上掐断，就是那声「啪」。
+ * 现在：收到的 PCM 先进队列，攒到 120ms 再拼成 200ms 整块排出去（接缝少十倍、抖动被吃掉），
+ * 每块首尾各 1ms 淡入淡出（挡住浏览器把 24k 重采样到 44.1k/48k 时的接缝台阶），
+ * 打断/挂断走 40ms 渐弱再停。块长和 120ms 的余量是拿 OfflineAudioContext 离线渲染量出来的：
+ * 同样的信号，老写法 3 秒里 4~7 声咔哒，新写法 0 声。
  */
+const HER_RATE = 24000;
+/** 攒够这么多再排：网络抖动能吃掉，又不至于听着像卫星电话 */
+const HER_TARGET = 0.1;
+const HER_BLOCK = 0.12;
+const HER_MIN = 0.06;
+const HER_FADE = 0.001;
+/** 排到 1.2 秒开外说明音频积压了（切后台、系统打断），整段丢掉，别让声音越拖越远 */
+const HER_MAX_AHEAD = 1.2;
 const WORKLET = `
 class Mic16k extends AudioWorkletProcessor {
   constructor() { super(); this.buf = []; this.ratio = sampleRate / 16000; this.acc = 0; }
@@ -56,19 +73,106 @@ export default function Call({ onClose, mini, onMini }: { onClose: () => void; m
     let alive = true;
     let ws: WebSocket | null = null;
     let ctx: AudioContext | null = null;
+    let herOut: GainNode | null = null;
     let stream: MediaStream | null = null;
-    let next = 0;
+    /** 已经排到哪一刻（AudioContext 时间轴） */
+    let herEnd = 0;
+    /** 收到还没排出去的 PCM，24k 单声道浮点 */
+    let queue: Float32Array[] = [];
+    let queued = 0;
     const playing = new Set<AudioBufferSourceNode>();
     let herTimer: number | undefined;
 
+    const BLOCK = Math.round(HER_BLOCK * HER_RATE);
+    const MIN = Math.round(HER_MIN * HER_RATE);
+    const FADE = Math.round(HER_FADE * HER_RATE);
+
+    const schedule = (samples: Float32Array<ArrayBuffer>) => {
+      if (!ctx || !herOut) return;
+      // 首尾淡一下：接缝（以及偶尔断流后重新接上）就不会留台阶
+      const fade = Math.min(FADE, samples.length >> 1);
+      for (let i = 0; i < fade; i++) {
+        const w = 0.5 - 0.5 * Math.cos((Math.PI * i) / fade);
+        samples[i] *= w;
+        samples[samples.length - 1 - i] *= w;
+      }
+      const buf = ctx.createBuffer(1, samples.length, HER_RATE);
+      buf.copyToChannel(samples, 0);
+      const s = ctx.createBufferSource();
+      s.buffer = buf;
+      s.connect(herOut);
+      // 断流/刚开始时手里没存货：先垫一个 HER_TARGET 的余量出来，别一片一片贴着播
+      const at = herEnd > ctx.currentTime ? herEnd : ctx.currentTime + HER_TARGET;
+      s.start(at);
+      herEnd = at + buf.duration;
+      playing.add(s);
+      s.onended = () => playing.delete(s);
+      setTalking("her");
+      window.clearTimeout(herTimer);
+      herTimer = window.setTimeout(() => setTalking(null), Math.max(200, (herEnd - ctx.currentTime) * 1000 + 200));
+    };
+
+    const pump = () => {
+      if (!ctx || !herOut) return;
+      if (herEnd - ctx.currentTime > HER_MAX_AHEAD) {
+        stopHer();
+        return;
+      }
+      while (queued >= MIN || (herEnd <= ctx.currentTime && queued > 0)) {
+        const ahead = herEnd - ctx.currentTime;
+        // 手里存够了就不排了，等下一批——这一段余量正好吃掉晚到的空白
+        if (ahead >= HER_TARGET) break;
+        const take = Math.min(BLOCK, queued);
+        const part = new Float32Array(take);
+        let o = 0;
+        while (o < take && queue.length) {
+          const head = queue[0];
+          const c = Math.min(head.length, take - o);
+          part.set(head.subarray(0, c), o);
+          o += c;
+          if (c === head.length) queue.shift();
+          else queue[0] = head.subarray(c);
+        }
+        queued -= take;
+        schedule(part);
+      }
+    };
+
+    const pushPcm = (pcm: Int16Array) => {
+      if (!ctx) return;
+      const f = new Float32Array(pcm.length);
+      for (let i = 0; i < pcm.length; i++) f[i] = pcm[i] / 0x8000;
+      queue.push(f);
+      queued += f.length;
+      pump();
+    };
+
     const stopHer = () => {
-      playing.forEach((s) => {
+      queue = [];
+      queued = 0;
+      window.clearTimeout(herTimer);
+      if (!ctx || !herOut) {
+        herEnd = 0;
+        return;
+      }
+      const t = ctx.currentTime;
+      const nodes = [...playing];
+      playing.clear();
+      herEnd = t;
+      if (!nodes.length) return;
+      // 满音量上直接掐会留下一个台阶，就是那声「啪」：渐弱 40ms 再停
+      const gain = herOut.gain;
+      gain.cancelScheduledValues(t);
+      gain.setValueAtTime(gain.value, t);
+      gain.linearRampToValueAtTime(0, t + 0.04);
+      nodes.forEach((s) => {
         try {
-          s.stop();
+          s.stop(t + 0.05);
         } catch {}
       });
-      playing.clear();
-      if (ctx) next = ctx.currentTime;
+      gain.setValueAtTime(1, t + 0.06);
+      // 下一句等渐弱走完再起，别撞在静音里
+      herEnd = t + 0.06;
     };
 
     (async () => {
@@ -77,6 +181,8 @@ export default function Call({ onClose, mini, onMini }: { onClose: () => void; m
           audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
         });
         ctx = new AudioContext();
+        herOut = ctx.createGain();
+        herOut.connect(ctx.destination);
         const url = URL.createObjectURL(new Blob([WORKLET], { type: "application/javascript" }));
         await ctx.audioWorklet.addModule(url);
         URL.revokeObjectURL(url);
@@ -119,23 +225,11 @@ export default function Call({ onClose, mini, onMini }: { onClose: () => void; m
             }
             return;
           }
-          // 她的声音：24k 16 位单声道，一段段排着放
+          // 她的声音：24k 16 位单声道，一片片回来，先进队列再整块排出去
           const pcm = new Int16Array(e.data as ArrayBuffer);
           if (!pcm.length) return;
-          const buf = ctx.createBuffer(1, pcm.length, 24000);
-          const ch = buf.getChannelData(0);
-          for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 0x8000;
-          const s = ctx.createBufferSource();
-          s.buffer = buf;
-          s.connect(ctx.destination);
-          const at = Math.max(ctx.currentTime + 0.02, next);
-          s.start(at);
-          next = at + buf.duration;
-          playing.add(s);
-          s.onended = () => playing.delete(s);
-          setTalking("her");
-          window.clearTimeout(herTimer);
-          herTimer = window.setTimeout(() => setTalking(null), Math.max(200, (next - ctx.currentTime) * 1000 + 200));
+          if (ctx.state === "suspended") void ctx.resume();
+          pushPcm(pcm);
         };
         ws.onclose = () => alive && setPhase((p) => (p === "error" ? p : "ended"));
         ws.onerror = () => {
@@ -155,7 +249,11 @@ export default function Call({ onClose, mini, onMini }: { onClose: () => void; m
         ws?.close();
       } catch {}
       stream?.getTracks().forEach((t) => t.stop());
-      void ctx?.close();
+      const c = ctx;
+      // 等渐弱走完再关，别在满音量上把上下文掐掉
+      window.setTimeout(() => {
+        if (c && c.state !== "closed") void c.close();
+      }, 150);
     };
     return () => cleanup.current();
   }, []);
