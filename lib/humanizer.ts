@@ -1,6 +1,7 @@
 import "server-only";
 import fs from "node:fs";
 import path from "node:path";
+import { getKv, setKv } from "./db";
 import { completeJson } from "./llm";
 
 /**
@@ -13,6 +14,67 @@ import { completeJson } from "./llm";
 const SKILL = path.join(process.cwd(), "vendor", "humanizer-zh", "SKILL.md");
 let skillText: string | null = null;
 const skill = () => (skillText ??= fs.readFileSync(SKILL, "utf8"));
+
+/**
+ * 改这一段用哪个模型。默认 deepseek-flash——接口明确支持的模型名。
+ * 之前这里写死 kimi/kimi-k3，接口不认这个名字，每篇都是 400，改写一直在空转。
+ * 想换就设 DONGNI_HUMANIZE_MODEL，但必须是接口真的支持的模型名；
+ * 名字不对也不会白改：先换默认模型再试一次，还不行才降级，并且记下来。
+ */
+const MODEL = () => process.env.DONGNI_HUMANIZE_MODEL?.trim() || "deepseek-flash";
+
+/** 上一次改写是什么状态（成功 / 降级），存在 kv 里，日志之外也看得到 */
+const STATE_KEY = "humanize_state";
+
+export type HumanizeState = {
+  ok: boolean;
+  at: number;
+  /** 连续失败次数 */
+  count: number;
+  why?: string;
+  genre?: string;
+  model?: string;
+};
+
+function readState(): HumanizeState | null {
+  try {
+    const raw = getKv(STATE_KEY);
+    if (!raw) return null;
+    const s = JSON.parse(raw) as HumanizeState;
+    return typeof s?.at === "number" ? s : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 现在的状态：ok=false 就是「最近一次没改成，落了原文」 */
+export function humanizeState(): HumanizeState | null {
+  return readState();
+}
+
+function noteOk() {
+  const prev = readState();
+  // 只在「从坏到好」的那一刻写一次，别每篇都写库
+  if (!prev || prev.ok) return;
+  try {
+    setKv(STATE_KEY, JSON.stringify({ ...prev, ok: true, at: Date.now(), count: 0 } satisfies HumanizeState));
+  } catch {
+    // 记不下不影响改写本身
+  }
+  console.warn(`[dongni] 去 AI 味改写恢复了（上次失败 ${prev.count} 次，原因：${prev.why ?? "不明"}）`);
+}
+
+function noteFail(genre: string, why: string) {
+  const prev = readState();
+  const count = prev && !prev.ok ? prev.count + 1 : 1;
+  const model = MODEL();
+  try {
+    setKv(STATE_KEY, JSON.stringify({ ok: false, at: Date.now(), count, why, genre, model } satisfies HumanizeState));
+  } catch {
+    // 记不下也照样打日志
+  }
+  console.error(`[dongni] 去 AI 味改写失败，这篇用的是原文（连第 ${count} 次；模型 ${model}；文体 ${genre}）：${why}`);
+}
 
 /** 从 Humanizer-zh 31 条模式里挑出聊天里最常见的，写给她自己看 */
 export const CHAT_TELLS = `【别有 AI 味】（照开源的 Humanizer-zh 整理，写的时候就避开）
@@ -30,28 +92,36 @@ export const CHAT_TELLS = `【别有 AI 味】（照开源的 Humanizer-zh 整�
 /**
  * 按 Humanizer-zh 改一遍。只改表达，不加事实、不丢信息；改坏了（太短、空了）就用原文。
  * genre 用来告诉它文体（日记、聊天、说明文档……），它会保留那种文体该有的东西。
+ *
+ * degraded=true 表示「这次没改，给的是原文」——调用方不能当成改好了去说。
  */
-export async function humanize(text: string, genre = "随笔"): Promise<string> {
+export async function humanize(text: string, genre = "随笔"): Promise<{ text: string; degraded: boolean }> {
   const src = text.trim();
-  if (src.length < 20) return src;
-  try {
-    const r = await completeJson<{ text: string }>(
-      [
-        {
-          role: "system",
-          content: `${skill()}\n\n---\n你现在按上面的规则改一段文字。文体：${genre}。只输出 JSON：{"text":"改好的全文"}`,
-        },
-        { role: "user", content: src },
-      ],
-      Math.min(8000, src.length * 3 + 500),
-      "low",
-      // 这一步不赶时间，用写得更好的 Kimi K3（flash 改完常常还留着「不只是……」这种句式）
-      process.env.DONGNI_HUMANIZE_MODEL || "kimi/kimi-k3",
-    );
-    const out = r.text?.trim() ?? "";
-    return out && out.length > src.length * 0.5 ? out : src;
-  } catch (e) {
-    console.warn("[dongni] 去 AI 味没改成，用原文：", e instanceof Error ? e.message : e);
-    return src;
+  if (src.length < 20) return { text: src, degraded: false };
+  const messages = [
+    {
+      role: "system" as const,
+      content: `${skill()}\n\n---\n你现在按上面的规则改一段文字。文体：${genre}。只输出 JSON：{"text":"改好的全文"}`,
+    },
+    { role: "user" as const, content: src },
+  ];
+  const maxTokens = Math.min(8000, src.length * 3 + 500);
+  let why = "";
+  // 先用配置的模型；它不被接口认（或者挂了）就用主线那台默认模型再来一次
+  for (const model of [MODEL(), undefined]) {
+    try {
+      const r = await completeJson<{ text: string }>(messages, maxTokens, "low", model);
+      const out = r.text?.trim() ?? "";
+      if (out && out.length > src.length * 0.5) {
+        noteOk();
+        return { text: out, degraded: false };
+      }
+      why = out ? `改出来的太短（${out.length} 字，原文 ${src.length} 字）` : "改出来是空的";
+      break; // 模型通了，只是这次结果不能用：换模型也没意义
+    } catch (e) {
+      why = e instanceof Error ? e.message : String(e);
+    }
   }
+  noteFail(genre, why);
+  return { text: src, degraded: true };
 }

@@ -47,7 +47,7 @@ async function writeToday() {
       600,
       "low",
     );
-    if (r.text?.trim()) setKv(k, await humanize(r.text.trim(), "第一人称的随手记"));
+    if (r.text?.trim()) setKv(k, (await humanize(r.text.trim(), "第一人称的随手记")).text);
   } catch {
     flag.__dongniTodayMe = undefined; // 下次再试
   }

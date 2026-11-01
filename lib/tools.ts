@@ -287,7 +287,7 @@ async function writeFile({ name, content, dir }: { name: string; content: string
 
   // 写给他的文档（不是代码）：按 Humanizer-zh 去一遍 AI 味再存
   const prose = /\.(md|txt|markdown)$/i.test(file) && !/```/.test(content);
-  const body = prose ? await humanize(content, "写给对方看的文档") : content;
+  const body = prose ? (await humanize(content, "写给对方看的文档")).text : content;
   try {
     await fs.writeFile(file, body, "utf8");
   } catch (e) {
@@ -547,7 +547,10 @@ const IMPL: Record<string, (a: never, ctx?: ToolCtx) => Promise<string>> = {
   humanize_text: (async ({ text, genre }: { text: string; genre?: string }) => {
     if (!text?.trim()) return "没给要改的文字。";
     const out = await humanize(text, genre || "随笔");
-    return `改好了（按开源的 Humanizer-zh 规则，只改表达、不动事实）。把下面这段原样给他，前后可以说一两句：\n\n${out}`;
+    if (out.degraded) {
+      return `这次没改成功，下面是他的原文（一个字没动）。别跟他说「改好了」「润色过了」；要么直接原样给他，并说一句这次没改成功，要么你自己按去 AI 味的规则改一版再给他。\n\n${out.text}`;
+    }
+    return `改好了（按开源的 Humanizer-zh 规则，只改表达、不动事实）。把下面这段原样给他，前后可以说一两句：\n\n${out.text}`;
   }) as (a: never, ctx?: ToolCtx) => Promise<string>,
   set_city: (async ({ city }: { city: string }) => {
     if (!city?.trim()) return "城市名不能为空。";

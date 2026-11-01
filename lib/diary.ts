@@ -39,7 +39,7 @@ async function write(date: string, start: number, end: number) {
     { role: "user", content: chat },
   ]);
   // 日记不赶时间：按 Humanizer-zh 再去一遍 AI 味
-  const text = r.text?.trim() ? await humanize(r.text.trim(), "私人日记（第一人称、口语）") : "";
+  const text = r.text?.trim() ? (await humanize(r.text.trim(), "私人日记（第一人称、口语）")).text : "";
   if (text) db().prepare("INSERT OR REPLACE INTO diary(date, text, created_at) VALUES(?, ?, ?)").run(date, text, Date.now());
 }
 
