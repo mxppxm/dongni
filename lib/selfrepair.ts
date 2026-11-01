@@ -56,8 +56,8 @@ export function postAssistant(content: string, kind: "chat" | "system" = "chat")
 }
 
 /** 让她用自己的话说出来（接着刚才的话头），说不出来就用简短的原意 */
-async function say(what: string, fallback: string) {
-  postAssistant(await speakAsHer(what, fallback));
+async function say(what: string, fallback: string, opts?: { fresh?: boolean }) {
+  postAssistant(await speakAsHer(what, fallback, opts));
 }
 
 const git = (...args: string[]) => run("git", args, { cwd: ROOT, maxBuffer: 20 << 20 });
@@ -303,7 +303,8 @@ export function reportRebuild() {
     const what = r.ok
       ? ["你重启回来了，刚才改的已经生效，可以让他试试。", "我回来啦，改好的已经能用了，你试试～"]
       : ["你重启回来了，但新改的没通过，已经退回改之前的样子，一切照旧。", "我回来了，不过新改的没成，已经退回原样了。"];
-    void say(what[0], what[1]);
+    // 这是状态播报，不能被「跟刚才那句太像」的闸门吞掉
+    void say(what[0], what[1], { fresh: true });
     finishTask(Number(getKv("repair_task_id") ?? 0), r.ok, r.ok ? "改好了，已生效" : "新改的没通过，已退回");
     log(`重启完成 ok=${r.ok}`);
   } finally {
