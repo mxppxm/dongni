@@ -19,7 +19,7 @@ import { finishTask, startTask } from "./tasks";
 const HOME = os.homedir();
 const ROOT = process.cwd();
 const LOGDIR = path.join(ROOT, "logs", "super");
-const MAX_RUNNING = 2;
+const MAX_RUNNING = 5;
 const TIMEOUT_MS = 25 * 60_000;
 
 // ─────────────────────────── 判断：这活该谁干 ───────────────────────────
@@ -135,7 +135,7 @@ export function dispatch(task: string, dir?: string): string {
   const t = (task || "").trim();
   if (!t) return "要派什么活得说清楚。";
   const running = runningJobs().length;
-  if (running >= MAX_RUNNING) return `现在已经有 ${running} 件在后台跑着，这件先排队，等他问起来再说。`;
+  if (running >= MAX_RUNNING) return `现在已经有 ${running} 件在后台跑着（最多 5 件同时跑），这件先排队，等他问起来再说。`;
 
   const cwd = safeDir(dir);
   const id = `S${Date.now().toString().slice(-6)}`;
