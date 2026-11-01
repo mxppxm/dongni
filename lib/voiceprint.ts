@@ -6,7 +6,7 @@ import path from "node:path";
  * 声纹：只认他的声音。全在本机算——sherpa-onnx + 3D-Speaker 的 CAM++ 中文声纹模型（28MB，第一次用时下载）。
  * 录入：他随便说几秒，切成几段各算一个声纹向量，取平均存 data/voiceprint.json。
  * 比对：一段 16k PCM 算出向量，和存的那个算余弦相似度，过线就是他。
- * 实测：同一个人 0.85 以上，不同人 0.3～0.7；线默认 0.55，日志里会打分，不准可以用 DONGNI_VOICEPRINT_MIN 调。
+ * 实测：同一个人 0.85 以上，不同人 0.3～0.7；线默认 0.45（见下），日志里会打分，不准可以用 DONGNI_VOICEPRINT_MIN 调。
  */
 const DATA_DIR = process.env.DONGNI_DATA_DIR || path.join(process.cwd(), "data");
 const MODEL = path.join(DATA_DIR, "models", "campplus.onnx");
