@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { db, getKv, setKv } from "./db";
 import { speakAsHer } from "./speak";
 import { onCall, whenOffCall } from "./presence";
+import { stallWatchdog } from "./stall";
 import { finishTask, startTask } from "./tasks";
 
 /**
@@ -89,7 +90,22 @@ ${request}
  * 跑 pi。用 json 模式把每一步都记到 logs/pi/ 下，慢在哪一步事后能查：
  * 一共几步、模型想了多久、命令跑了多久、最慢的是哪条。
  */
+/** 卡住的判定：这么久没有任何输出，就当这条连接死了，杀掉重来（曾经有次干了等 57 分钟） */
+const STALL_MS = Number(process.env.DONGNI_STALL_MS ?? 180_000);
+
 async function runPi(request: string): Promise<string> {
+  try {
+    return await runPiOnce(request);
+  } catch (e) {
+    if (!/STALLED/.test(String(e))) throw e;
+    log("上一轮卡在网络上，重来一遍（已经改到磁盘上的文件还在）");
+    return await runPiOnce(
+      `${request}\n\n（刚才那一轮卡在网络上了，代码可能已经改了一部分。先看现在代码的真实状态，接着改完，别从头再来一遍）`,
+    );
+  }
+}
+
+async function runPiOnce(request: string): Promise<string> {
   const dir = path.join(ROOT, "logs", "pi");
   fs.mkdirSync(dir, { recursive: true });
   const trace = path.join(dir, `${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`);
@@ -103,6 +119,8 @@ async function runPi(request: string): Promise<string> {
     let buf = "";
     let err = "";
     let finalText = "";
+    let lastAt = Date.now();
+    let stalled = false;
     let steps = 0;
     let toolMs = 0;
     const toolStart = new Map<string, { at: number; what: string }>();
@@ -131,8 +149,21 @@ async function runPi(request: string): Promise<string> {
         }
       }
     };
+    // 看门狗：连接挂死时 pi 自己不设超时，会一直干等（曾经一次等了 57 分钟）
+    const stopWatchdog = stallWatchdog({
+      stallMs: STALL_MS,
+      touch: () => lastAt,
+      onStall: () => {
+        stalled = true;
+        log(`pi 卡住了：${Math.round(STALL_MS / 1000)} 秒没有任何输出，杀掉重来`);
+        child.kill("SIGTERM");
+        setTimeout(() => child.kill("SIGKILL"), 5000);
+      },
+    });
+
     child.stdout.on("data", (chunk: Buffer) => {
       const at = Date.now();
+      lastAt = at;
       buf += chunk.toString("utf8");
       let i;
       while ((i = buf.indexOf("\n")) >= 0) {
@@ -149,9 +180,14 @@ async function runPi(request: string): Promise<string> {
         }
       }
     });
-    child.stderr.on("data", (b) => (err += b));
+    child.stderr.on("data", (b) => {
+      lastAt = Date.now();
+      err += b;
+    });
     child.on("error", reject);
     child.on("close", (code) => {
+      stopWatchdog();
+      if (stalled) return reject(new Error(`STALLED：${Math.round((Date.now() - t0) / 1000)} 秒没动静，已杀掉`));
       const total = Date.now() - t0;
       const sec = (ms: number) => `${Math.round(ms / 1000)} 秒`;
       log(
