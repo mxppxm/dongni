@@ -249,12 +249,21 @@ export function startRepair(request: string): string {
       await git("add", "-A");
       await git("commit", "-q", "-m", `自我修复：${request.slice(0, 60)}`);
       setKv("repair_summary", summary);
-      await say(`你刚把自己改好了，马上要重启，半分钟左右回来。改了什么（编码助手的说明，挑他关心的说一句就够）：${summary}`, "改好啦，我重启一下，半分钟就回来～");
       log("提交完成，后台重新编译并重启");
-      // 正在打电话就先别重启（重启会把电话挂断），挂了再重启
+      // 正在打电话就先别重启（重启会把电话挂断），挂了再重启；但不能一直等——挂了电话这件事本身也可能正是这次改的内容
       if (onCall()) {
-        log("在通话，等挂断再重启");
-        await whenOffCall();
+        await say(
+          `你刚把自己改好了，但你正在打电话，我不挂你电话：等你挂了我就重启，半分钟回来。改了什么（编码助手的说明，挑他关心的说一句就够）：${summary}`,
+          "改好啦，你还在打电话，我不挂你，等你挂了我再重启～",
+        );
+        log("在通话，等挂断再重启（最多等 12 分钟）");
+        await Promise.race([whenOffCall(), new Promise((ok) => setTimeout(ok, 12 * 60_000))]);
+        if (onCall()) log("等了 12 分钟还没挂断，先重启（这通电话会被打断）");
+      } else {
+        await say(
+          `你刚把自己改好了，马上要重启，半分钟左右回来。改了什么（编码助手的说明，挑他关心的说一句就够）：${summary}`,
+          "改好啦，我重启一下，半分钟就回来～",
+        );
       }
       // 新起一个进程组去编译重启，自己被重启也不影响它
       restarting = true;

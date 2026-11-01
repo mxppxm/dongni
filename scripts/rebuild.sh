@@ -7,7 +7,10 @@ GOOD="$1"
 LOG=logs/self-repair.log
 STATUS=data/rebuild-result.json
 SVC="gui/$(id -u)/com.mico.dongni"
+PLIST="$HOME/Library/LaunchAgents/com.mico.dongni.plist"
 log() { echo "[$(date '+%F %T')] $*" >> "$LOG"; }
+
+pid_of_listener() { lsof -nP -iTCP:3939 -sTCP:LISTEN -t 2>/dev/null | head -1; }
 
 healthy() {
   for _ in $(seq 1 30); do
@@ -23,12 +26,35 @@ healthy() {
   return 1
 }
 
+# 真正把进程换成新的：认的是「3939 上的 pid 变了」，不是「谁能回 200」。
+# 否则老进程还活着，体检照样通过，会假装重启成功。
+restart() {
+  old=$(pid_of_listener)
+  log "重启：当前监听进程 ${old:-无}"
+  if ! launchctl print "$SVC" >> "$LOG" 2>&1; then
+    log "launchd 里没有这个服务（可能是手动起的），重新登记：$PLIST"
+    if [ -n "$old" ]; then kill "$old" >> "$LOG" 2>&1; sleep 3; fi
+    launchctl bootstrap "gui/$(id -u)" "$PLIST" >> "$LOG" 2>&1
+  fi
+  launchctl kickstart -k "$SVC" >> "$LOG" 2>&1
+  for _ in $(seq 1 25); do
+    sleep 1
+    now=$(pid_of_listener)
+    if [ -n "$now" ] && [ "$now" != "$old" ]; then
+      log "新进程 $now（旧 ${old:-无}）"
+      return 0
+    fi
+  done
+  log "重启没生效：旧 ${old:-无}，现在 $(pid_of_listener)"
+  return 1
+}
+
 rollback() {
   log "退回 $GOOD（原因：$1）"
   git reset --hard "$GOOD" >> "$LOG" 2>&1
   pnpm build >> "$LOG" 2>&1
   echo "{\"ok\":false,\"reason\":\"$1\"}" > "$STATUS"
-  launchctl kickstart -k "$SVC" >> "$LOG" 2>&1
+  restart || log "退回后重启也没换成功，需要人工看一眼"
 }
 
 log "==== rebuild (good=$GOOD)"
@@ -38,7 +64,10 @@ if ! pnpm build >> "$LOG" 2>&1; then
   exit 0
 fi
 rm -f "$STATUS"
-launchctl kickstart -k "$SVC" >> "$LOG" 2>&1
+if ! restart; then
+  rollback restart
+  exit 0
+fi
 if healthy; then
   # 新进程已经起来了，通过这个请求让它在对话里报告结果
   echo '{"ok":true}' > "$STATUS"
