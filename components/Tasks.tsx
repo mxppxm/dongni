@@ -3,6 +3,7 @@
 import { AnimatePresence, motion } from "motion/react";
 import { Check, ListTodo, LoaderCircle, X } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
+import Balance from "./Balance";
 
 type Task = {
   id: number;
@@ -188,7 +189,7 @@ export default function Tasks() {
 
   useEffect(() => setNow(Date.now()), [tasks]);
 
-  if (!tasks.length) return null;
+  const has = tasks.length > 0;
 
   const toggle = (id: number) => setOpenId((cur) => (cur === id ? null : id));
 
@@ -206,19 +207,26 @@ export default function Tasks() {
     <>
       {/* 宽屏：常驻左边，列表自己滚 */}
       <aside className="fixed top-16 bottom-6 left-4 z-20 hidden w-[230px] flex-col xl:flex">
-        <div className="mb-2 shrink-0 px-2 text-xs tracking-wide text-[var(--faint)] select-none">任务</div>
-        {list}
+        <Balance />
+        {has && (
+          <>
+            <div className="mb-2 shrink-0 px-2 text-xs tracking-wide text-[var(--faint)] select-none">任务</div>
+            {list}
+          </>
+        )}
       </aside>
 
       {/* 窄屏：左上角一个按钮，点开抽屉 */}
-      <button
-        type="button"
-        onClick={() => setDrawer(true)}
-        className="fixed top-4 left-4 z-20 flex h-10 w-10 items-center justify-center rounded-full text-[var(--icon)] transition-colors hover:bg-[var(--hover)] hover:text-[var(--icon-hover)] xl:hidden"
-        aria-label="任务"
-      >
-        {running ? <LoaderCircle size={18} strokeWidth={1.6} className="animate-spin" /> : <ListTodo size={18} strokeWidth={1.6} />}
-      </button>
+      {has && (
+        <button
+          type="button"
+          onClick={() => setDrawer(true)}
+          className="fixed top-4 left-4 z-20 flex h-10 w-10 items-center justify-center rounded-full text-[var(--icon)] transition-colors hover:bg-[var(--hover)] hover:text-[var(--icon-hover)] xl:hidden"
+          aria-label="任务"
+        >
+          {running ? <LoaderCircle size={18} strokeWidth={1.6} className="animate-spin" /> : <ListTodo size={18} strokeWidth={1.6} />}
+        </button>
+      )}
       <AnimatePresence>
         {drawer && (
           <>
@@ -236,6 +244,7 @@ export default function Tasks() {
               transition={{ type: "spring", stiffness: 380, damping: 36 }}
               className="fixed top-0 bottom-0 left-0 z-30 flex w-[270px] flex-col border-r border-[var(--border)] bg-[var(--panel)] px-3 pt-5 pb-6 backdrop-blur-xl xl:hidden"
             >
+              <Balance />
               <div className="mb-2 shrink-0 px-2 text-xs tracking-wide text-[var(--faint)] select-none">任务</div>
               {list}
             </motion.aside>
