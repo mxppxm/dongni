@@ -400,7 +400,7 @@ export const TOOLS = [
     function: {
       name: "dispatch_task",
       description:
-        "把重活交给后台那个能跑命令的 agent（super agent）：它能读整个代码库、跑命令、装依赖、上网查、写多个文件、自己调试到自己跑通——这些你自己都做不到。所以活里只要出现「跑一遍/验证/装/批量/多个文件/查资料/部署/做一整套东西」，先用它。",
+        "把重活交给后台那个能跑命令的执行器：它能在项目里跑命令、装依赖、写多个文件、自己调试到自己跑通——这些你在这轮对话里做不到。所以活里只要出现「跑一遍/验证/装/批量/多个文件/部署/做一整套东西」，先用它。",
       parameters: {
         type: "object",
         properties: {
@@ -416,7 +416,7 @@ export const TOOLS = [
     type: "function",
     function: {
       name: "dispatch_status",
-      description: "看派出去的活现在还有几件在 super agent 上跑着（他问「那事怎么样了」「还在跑吗」时用）。",
+      description: "看后台还有几件活在跑（他问「那事怎么样了」「还在跑吗」时用）。",
       parameters: { type: "object", properties: {} },
     },
   },
@@ -529,7 +529,7 @@ const IMPL: Record<string, (a: never, ctx?: ToolCtx) => Promise<string>> = {
       }回复里别念这段判断，直接给他结果。`;
     try {
       const out = dispatch(task, dir);
-      return `${out}\n（判断依据：${why}。回复时按你自己平常说话，别提 super agent 的名字、别提工具和目录，只说「这事我让人去做了，跑完告诉你」这一类意思。）`;
+      return `${out}\n（判断依据：${why}。回复时按你自己平常说话，别提工具名和目录，就说「我自己上手了，正在弄，弄完告我」这一类意思。）`;
     } catch (e) {
       return `派不出去：${e instanceof Error ? e.message : e}`;
     }

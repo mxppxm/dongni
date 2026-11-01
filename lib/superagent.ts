@@ -135,7 +135,7 @@ export function dispatch(task: string, dir?: string): string {
   const t = (task || "").trim();
   if (!t) return "要派什么活得说清楚。";
   const running = runningJobs().length;
-  if (running >= MAX_RUNNING) return `现在已经有 ${running} 件在 super agent 上跑着，这件先排队，等他问起来再说。`;
+  if (running >= MAX_RUNNING) return `现在已经有 ${running} 件在后台跑着，这件先排队，等他问起来再说。`;
 
   const cwd = safeDir(dir);
   const id = `S${Date.now().toString().slice(-6)}`;
@@ -147,7 +147,7 @@ export function dispatch(task: string, dir?: string): string {
   );
   log(`==== ${id} 开始｜目录 ${cwd}｜${t}`);
 
-  const taskId = startTask("super", `交给 super agent：${t.replace(/\s+/g, " ").slice(0, 26)}`);
+  const taskId = startTask("super", `后台执行：${t.replace(/\s+/g, " ").slice(0, 26)}`);
   void runJob(job, taskId).catch((e) => {
     // runJob 自己不该抛；真抛了也不能让这件活从名单里消失（名额被占满，后面全变「先排队」）
     const msg = e instanceof Error ? e.message : String(e);
@@ -201,7 +201,7 @@ async function runJob(job: Job, taskId: number) {
   // 兜底句必须自带正文：说不上话的时候，用户至少能看到到底做成了什么
   const fallback = ok ? `那件事办完了，它是这么说的：\n\n${short}` : `那件事没办成，它是这么说的：\n\n${short}`;
   try {
-    const said = await speakAsHer(`你让 super agent 干的那件事（${job.task.slice(0, 40)}）回来了，结果原文是：\n${short}`, fallback, {
+    const said = await speakAsHer(`你让后台执行器干的那件事（${job.task.slice(0, 40)}）回来了，结果原文是：\n${short}`, fallback, {
       fresh: true,
     });
     postAssistant(said && said.trim() ? said : fallback);
