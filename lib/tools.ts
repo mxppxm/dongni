@@ -287,7 +287,8 @@ async function writeFile({ name, content, dir }: { name: string; content: string
 
   // 写给他的文档（不是代码）：按 Humanizer-zh 去一遍 AI 味再存
   const prose = /\.(md|txt|markdown)$/i.test(file) && !/```/.test(content);
-  const body = prose ? (await humanize(content, "写给对方看的文档")).text : content;
+  const humanized = prose ? await humanize(content, "写给对方看的文档") : null;
+  const body = humanized?.text ?? content;
   try {
     await fs.writeFile(file, body, "utf8");
   } catch (e) {
@@ -299,9 +300,11 @@ async function writeFile({ name, content, dir }: { name: string; content: string
     await fs.writeFile(file, body, "utf8");
   }
   ctx?.attach(card({ type: "file", path: file }));
+  // 去 AI 味这步没成时别让她当成「润色过了」——日志里已经记了一条，这里再明说一句
+  const note = humanized?.degraded ? "（这次去 AI 味没改成功，存的是原文，别跟他说润色过了。）" : "";
   return fellBack
-    ? `那个位置写不进去（路径不合法），文件改放到我自己的文件夹了，名字是「${path.basename(file)}」。回复里别写路径，卡片会自动带上。`
-    : "文件写好了，回复末尾会自动带一张文件卡片，对方点一下就能在 Finder 里看到。回复里不用写路径。";
+    ? `那个位置写不进去（路径不合法），文件改放到我自己的文件夹了，名字是「${path.basename(file)}」。${note}回复里别写路径，卡片会自动带上。`
+    : `文件写好了，回复末尾会自动带一张文件卡片，对方点一下就能在 Finder 里看到。${note}回复里不用写路径。`;
 }
 
 export const TOOLS = [

@@ -23,6 +23,9 @@ const skill = () => (skillText ??= fs.readFileSync(SKILL, "utf8"));
  */
 const MODEL = () => process.env.DONGNI_HUMANIZE_MODEL?.trim() || "deepseek-flash";
 
+/** 「配置的模型用不了、退到主线模型」这件事一个进程只喊一次，别每篇都刷一屏 */
+let warnedFallback = false;
+
 /** 上一次改写是什么状态（成功 / 降级），存在 kv 里，日志之外也看得到 */
 const STATE_KEY = "humanize_state";
 
@@ -120,6 +123,12 @@ export async function humanize(text: string, genre = "随笔"): Promise<{ text: 
       break; // 模型通了，只是这次结果不能用：换模型也没意义
     } catch (e) {
       why = e instanceof Error ? e.message : String(e);
+      // 配置的模型名不对时别闷声绕过去——不然他以为换模型生效了，其实一直在用主线那台
+      if (model && !warnedFallback) {
+        warnedFallback = true;
+        const who = process.env.DONGNI_HUMANIZE_MODEL?.trim() ? `配置的模型「${model}」` : `去 AI 味用的模型「${model}」`;
+        console.warn(`[dongni] ${who}调不通，改用主线的默认模型再试：${why}`);
+      }
     }
   }
   noteFail(genre, why);
