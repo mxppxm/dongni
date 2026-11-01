@@ -23,31 +23,104 @@ const ago = (ts: number, now: number) => {
   return new Date(now).toDateString() === d.toDateString() ? hm : `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
 };
 const took = (ms: number) => (ms < 60_000 ? `${Math.max(1, Math.round(ms / 1000))} 秒` : `${Math.floor(ms / 60_000)} 分 ${Math.round((ms % 60_000) / 1000)} 秒`);
-
-const firstImage = (md: string) => md.match(/!\[[^\]]*\]\((\/api\/[^)\s]+)\)/)?.[1];
-const filePath = (md: string) => {
-  const m = md.match(/```card\n([\s\S]*?)\n```/);
-  if (!m) return null;
-  try {
-    const c = JSON.parse(m[1]);
-    return c.type === "file" ? (c.path as string) : null;
-  } catch {
-    return null;
-  }
+const clock = (ts: number) => {
+  const d = new Date(ts);
+  const hm = d.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
+  return `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
 };
 
-function Row({ t, now }: { t: Task; now: number }) {
-  const [open, setOpen] = useState(false);
-  const img = t.status === "done" ? firstImage(t.result) : undefined;
-  const file = t.status === "done" ? filePath(t.result) : null;
-  const note = t.status === "error" ? t.result : "";
-  const more = !!(img || file || note);
+const LABEL: Record<Task["status"], string> = { running: "正在跑", done: "完成", error: "出错" };
+
+const images = (md: string) => [...md.matchAll(/!\[[^\]]*\]\((\/api\/[^)\s]+)\)/g)].map((m) => m[1]);
+const files = (md: string) =>
+  [...md.matchAll(/```card\n([\s\S]*?)\n```/g)]
+    .map((m) => {
+      try {
+        const c = JSON.parse(m[1]);
+        return c.type === "file" ? (c.path as string) : null;
+      } catch {
+        return null;
+      }
+    })
+    .filter((p): p is string => !!p);
+const plain = (md: string) =>
+  md
+    .replace(/```card\n[\s\S]*?\n```/g, "")
+    .replace(/!\[[^\]]*\]\(\/api\/[^)\s]+\)/g, "")
+    .trim();
+
+/** 点开一条任务：状态、开始时间、跑了多久、描述和输出都在这儿，右上角能关掉 */
+function Detail({ t, now, onClose }: { t: Task; now: number; onClose: () => void }) {
+  const imgs = images(t.result);
+  const fs = files(t.result);
+  const text = plain(t.result);
+  const ms = (t.status === "running" ? now : (t.endedAt ?? t.startedAt)) - t.startedAt;
+  return (
+    <div className="mt-1 mb-2 rounded-xl border border-[var(--border)] bg-[var(--panel)] p-2.5 backdrop-blur-xl">
+      <div className="mb-1.5 flex items-center gap-1.5">
+        <span className={`text-[11.5px] ${t.status === "error" ? "text-[#f05252]/80" : t.status === "running" ? "text-[var(--text)]" : "text-[var(--dim)]"}`}>
+          {LABEL[t.status]}
+        </span>
+        <span className="ml-auto text-[11px] text-[var(--faint)] tabular-nums">
+          {t.status === "running" ? `已 ${took(ms)}` : `用时 ${took(ms)}`}
+        </span>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="关闭"
+          className="-mr-1 flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[var(--faint)] transition-colors hover:bg-[var(--hover)] hover:text-[var(--icon-hover)]"
+        >
+          <X size={11} />
+        </button>
+      </div>
+      <div className="space-y-0.5 text-[11.5px] leading-relaxed">
+        <div className="flex gap-2">
+          <span className="w-7 shrink-0 text-[var(--faint)]">开始</span>
+          <span className="min-w-0 flex-1 text-[var(--dim)] tabular-nums">{clock(t.startedAt)}</span>
+        </div>
+        <div className="flex gap-2">
+          <span className="w-7 shrink-0 text-[var(--faint)]">描述</span>
+          <span className="min-w-0 flex-1 break-words text-[var(--dim)]">{t.title}</span>
+        </div>
+      </div>
+      {(!!text || !!imgs.length || !!fs.length || t.status === "running") && (
+        <div className="mt-2 space-y-1.5 border-t border-[var(--border)] pt-2">
+          {!!imgs.length &&
+            imgs.map((src) => (
+              <a key={src} href={src} target="_blank" rel="noreferrer" className="block">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={src} alt="" className="max-h-40 rounded-lg border border-[var(--border)] object-cover" />
+              </a>
+            ))}
+          {fs.map((p) => (
+            <button
+              key={p}
+              type="button"
+              onClick={() => fetch("/api/file", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: p }) })}
+              className="block max-w-full truncate text-left text-[11.5px] text-[var(--dim)] underline-offset-2 hover:underline"
+              title={p}
+            >
+              {p.split("/").pop()}
+            </button>
+          ))}
+          {text && <div className="scroll-thin max-h-40 overflow-y-auto overscroll-contain text-[11.5px] leading-relaxed break-words whitespace-pre-wrap text-[var(--faint)]">{text}</div>}
+          {t.status === "running" && !text && (
+            <div className="text-[11.5px] leading-relaxed text-[var(--faint)]">还在跑，暂时没有输出</div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Row({ t, now, open, onToggle }: { t: Task; now: number; open: boolean; onToggle: () => void }) {
   return (
     <motion.li layout initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} transition={{ duration: 0.3 }}>
       <button
         type="button"
-        onClick={() => more && setOpen((o) => !o)}
-        className={`flex w-full items-start gap-2 rounded-xl px-2 py-1.5 text-left transition-colors ${more ? "hover:bg-[var(--hover)]" : "cursor-default"}`}
+        onClick={onToggle}
+        aria-expanded={open}
+        className={`flex w-full items-start gap-2 rounded-xl px-2 py-1.5 text-left transition-colors ${open ? "bg-[var(--hover)]" : "hover:bg-[var(--hover)]"}`}
       >
         <span className="mt-[3px] flex h-3.5 w-3.5 shrink-0 items-center justify-center">
           {t.status === "running" ? (
@@ -74,25 +147,9 @@ function Row({ t, now }: { t: Task; now: number }) {
             animate={{ height: "auto", opacity: 1 }}
             exit={{ height: 0, opacity: 0 }}
             transition={{ duration: 0.25 }}
-            className="overflow-hidden pl-7"
+            className="overflow-hidden pl-5 pr-0.5"
           >
-            {img && (
-              <a href={img} target="_blank" rel="noreferrer" className="mt-1 mb-2 block">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={img} alt="" className="max-h-40 rounded-lg border border-[var(--border)] object-cover" />
-              </a>
-            )}
-            {file && (
-              <button
-                type="button"
-                onClick={() => fetch("/api/file", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: file }) })}
-                className="mt-0.5 mb-2 block max-w-full truncate text-left text-[12px] text-[var(--dim)] underline-offset-2 hover:underline"
-                title={file}
-              >
-                {file.split("/").pop()}
-              </button>
-            )}
-            {note && <div className="mt-0.5 mb-2 text-[12px] leading-relaxed break-words text-[var(--faint)]">{note}</div>}
+            <Detail t={t} now={now} onClose={onToggle} />
           </motion.div>
         )}
       </AnimatePresence>
@@ -100,11 +157,12 @@ function Row({ t, now }: { t: Task; now: number }) {
   );
 }
 
-/** 左边的任务栏：她动手干的事一件件列着，跑着的转圈，画好的点开能看图 */
+/** 左边的任务栏：她动手干的事一件件列着，跑着的转圈，点开能看细节和结果 */
 export default function Tasks() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [now, setNow] = useState(() => Date.now());
   const [drawer, setDrawer] = useState(false);
+  const [openId, setOpenId] = useState<number | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -132,11 +190,13 @@ export default function Tasks() {
 
   if (!tasks.length) return null;
 
+  const toggle = (id: number) => setOpenId((cur) => (cur === id ? null : id));
+
   const list = (
-    <ul className="space-y-0.5">
+    <ul className="scroll-thin min-h-0 flex-1 space-y-0.5 overflow-y-auto overscroll-contain pr-0.5">
       <AnimatePresence initial={false}>
         {tasks.map((t) => (
-          <Row key={t.id} t={t} now={now} />
+          <Row key={t.id} t={t} now={now} open={openId === t.id} onToggle={() => toggle(t.id)} />
         ))}
       </AnimatePresence>
     </ul>
@@ -144,9 +204,9 @@ export default function Tasks() {
 
   return (
     <>
-      {/* 宽屏：常驻左边 */}
-      <aside className="scroll-thin fixed top-16 bottom-6 left-4 z-10 hidden w-[230px] overflow-y-auto xl:block">
-        <div className="mb-2 px-2 text-xs tracking-wide text-[var(--faint)] select-none">任务</div>
+      {/* 宽屏：常驻左边，列表自己滚 */}
+      <aside className="fixed top-16 bottom-6 left-4 z-20 hidden w-[230px] flex-col xl:flex">
+        <div className="mb-2 shrink-0 px-2 text-xs tracking-wide text-[var(--faint)] select-none">任务</div>
         {list}
       </aside>
 
@@ -174,9 +234,9 @@ export default function Tasks() {
               animate={{ x: 0 }}
               exit={{ x: -280 }}
               transition={{ type: "spring", stiffness: 380, damping: 36 }}
-              className="scroll-thin fixed top-0 bottom-0 left-0 z-30 w-[270px] overflow-y-auto border-r border-[var(--border)] bg-[var(--panel)] px-3 pt-5 pb-6 backdrop-blur-xl xl:hidden"
+              className="fixed top-0 bottom-0 left-0 z-30 flex w-[270px] flex-col border-r border-[var(--border)] bg-[var(--panel)] px-3 pt-5 pb-6 backdrop-blur-xl xl:hidden"
             >
-              <div className="mb-2 px-2 text-xs tracking-wide text-[var(--faint)] select-none">任务</div>
+              <div className="mb-2 shrink-0 px-2 text-xs tracking-wide text-[var(--faint)] select-none">任务</div>
               {list}
             </motion.aside>
           </>
