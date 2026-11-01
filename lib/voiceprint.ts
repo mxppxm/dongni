@@ -13,7 +13,15 @@ const MODEL = path.join(DATA_DIR, "models", "campplus.onnx");
 const MODEL_URL =
   "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx";
 const FILE = path.join(DATA_DIR, "voiceprint.json");
-export const VOICEPRINT_MIN = Number(process.env.DONGNI_VOICEPRINT_MIN) || 0.55;
+/**
+ * 判「是他」的线。原来 0.55，实测他自己的正常一句话经常落在 0.42~0.53（见 logs/server.log：
+ * 「生图的停掉」0.32、「挂电话的功能不能并发吗」0.42、「报告一下进度」0.53 都被当成别人吞掉，
+ * 而他重复一遍就能过线）——真杂音（电视、旁人）稳定在 0.05~0.19，两层根本不重叠。
+ * 所以线降到 0.45，再留一个 0.30~0.45 的「听着像你」中间带：照常回答，只是字幕上标一下。
+ */
+export const VOICEPRINT_MIN = Number(process.env.DONGNI_VOICEPRINT_MIN) || 0.45;
+/** 中间带下界：到这就算「大概是他」，认下来别装聋 */
+export const VOICEPRINT_MAYBE = Number(process.env.DONGNI_VOICEPRINT_MAYBE) || 0.3;
 /** 录入要说够这么久（秒） */
 export const ENROLL_SECONDS = 8;
 

@@ -223,7 +223,8 @@ export default function Call({ onClose, mini, onMini }: { onClose: () => void; m
               cleanup.current();
               onClose();
             }
-            else if (m.type === "you") setLine(m.text);
+            // 声纹在「像你」的中间带：也答，但字幕上标一下，免得他以为自己被吞了
+            else if (m.type === "you") setLine(m.unsure ? `（听着像你）${m.text}` : m.text);
             else if (m.type === "her") setLine(m.text);
             else if (m.type === "error") {
               setErr(m.message);

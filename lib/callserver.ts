@@ -11,7 +11,15 @@ import { cutReply, startReply } from "./chat";
 import { replyMode } from "./llm";
 import { callEnded, callStarted, type ReplyEvent, subscribeReplies } from "./presence";
 import { speakableText } from "./tts";
-import { ENROLL_SECONDS, enrollVoiceprint, VOICEPRINT_MIN, voiceprint, voiceprintScore, warmVoiceprint } from "./voiceprint";
+import {
+  ENROLL_SECONDS,
+  enrollVoiceprint,
+  VOICEPRINT_MAYBE,
+  VOICEPRINT_MIN,
+  voiceprint,
+  voiceprintScore,
+  warmVoiceprint,
+} from "./voiceprint";
 import { wardrobeNote } from "./wardrobe";
 
 /**
@@ -450,7 +458,7 @@ function bridge(page: WebSocket) {
       case 450: // 有人开口了：她要是正在说，马上停；上一轮还没念的也不念了
         if (!voiceprint()) {
           interrupt();
-          utter = [...pre]; // 还没声纹：这句攒下来，自动拿去录（见 459）
+          utter = []; // 还没声纹：这句攒下来拿去自动录（见 459）；不用 pre——那是他开口前的声音，多半是她的尾音
           break;
         }
         // 录过声纹：先攒一秒多的声音认一认是不是他，是他才打断（见下面 page.on("message")）
@@ -476,16 +484,21 @@ function bridge(page: WebSocket) {
         utter = null;
         if (heard && !voiceprint() && text.length >= 2) autoEnroll(heard);
         else if (heard && voiceprint()) {
-          // 整句再认一遍（比开头那一秒准）；不是他就当没听见
+          // 整句再认一遍（比开头那一秒准）；真杂音才当没听见
           const score = await voiceprintScore(Buffer.concat(heard)).catch(() => null);
           const ok = score === null || score >= VOICEPRINT_MIN;
-          console.log(`[dongni][call] 声纹 整句 ${score?.toFixed(2)} ${ok ? "是他" : "不是他，不理"}：${text.slice(0, 20)}`);
-          if (!ok) {
+          const maybe = !ok && (score ?? 0) >= VOICEPRINT_MAYBE;
+          console.log(
+            `[dongni][call] 声纹 整句 ${score?.toFixed(2)} ${
+              ok ? "是他" : maybe ? "大概是他，先接着" : "不是他，不理"
+            }：${text.slice(0, 20)}`,
+          );
+          if (!ok && !maybe) {
             verdict = null;
             break;
           }
           if (verdict !== true) interrupt();
-          if (verdict !== true && text) tell({ type: "you", text });
+          if (verdict !== true && text) tell({ type: "you", text, unsure: maybe });
         }
         verdict = null;
         console.log(`[dongni][call] 459 说完`);
@@ -540,8 +553,10 @@ function bridge(page: WebSocket) {
     try {
       const score = await voiceprintScore(Buffer.concat(buf));
       if (utter !== buf || score === null) return; // 这句已经说完/换了下一句
-      verdict = score >= VOICEPRINT_MIN;
-      console.log(`[dongni][call] 声纹 开头 ${score.toFixed(2)} ${verdict ? "是他" : "不像他"}`);
+      verdict = score >= VOICEPRINT_MAYBE;
+      console.log(
+        `[dongni][call] 声纹 开头 ${score.toFixed(2)} ${score >= VOICEPRINT_MIN ? "是他" : verdict ? "大概是他" : "不像他"}`,
+      );
       if (verdict) {
         interrupt();
         if (userText) tell({ type: "you", text: userText });
@@ -568,8 +583,8 @@ function bridge(page: WebSocket) {
     autoBusy = true;
     const r = await enrollVoiceprint(all).catch((e) => ({ ok: false as const, message: e instanceof Error ? e.message : String(e) }));
     console.log(`[dongni][call] 声纹自动录入 ${r.ok ? "好了" : `没成：${r.message}`}（${(all.length / 32000).toFixed(1)} 秒）`);
+    auto.length = 0; // 没录成要重攒；录成了也不用留着（voiceprint() 已经有值了）
     if (r.ok) tell({ type: "enrolled" });
-    else auto.length = 0;
     autoBusy = false;
   };
 
