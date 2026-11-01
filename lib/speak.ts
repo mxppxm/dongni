@@ -35,7 +35,7 @@ async function reportState(): Promise<{ ok: boolean; state: string; why: string 
  * 系统要告诉对方的事（改完代码、改失败了、重启回来了），交给她用自己的口吻、接着刚才的话头说。
  * 模型失败就退回一句简短的原意——消息不能丢。
  */
-export async function speakAsHer(what: string, fallback: string): Promise<string> {
+export async function speakAsHer(what: string, fallback: string, opts?: { fresh?: boolean }): Promise<string> {
   try {
     const note = await reportState();
     const recent = (
@@ -68,6 +68,11 @@ export async function speakAsHer(what: string, fallback: string): Promise<string
     // 但「刚做完的改动结果」本身就算新的由头：他没回话也能说一条，同一个结果不重复说。
     // 由头用 fallback（这是这件事最短的原话）认，同一件事的说明文字里带了多少细节都一样。
     const reason = `你自己这边的事：${fallback}`;
+    // 派出去的活跑完的结果是「新消息」，不是她自言自语，别让复读闸门吞掉
+    if (opts?.fresh) {
+      usedReason(reason);
+      return text;
+    }
     const v = verdict(text, quiet, Date.now(), reason);
     if (!v.ok) {
       suppress(text);

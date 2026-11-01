@@ -173,6 +173,7 @@ async function runJob(job: Job, bin: string, taskId: number) {
   if (model) args.push("--model", model);
 
   const t0 = Date.now();
+  let failed = false; // 成败只认退出码/超时/起不来，不再拿模型的话去猜
   const text = await new Promise<string>((resolve) => {
     const child = spawn(bin, args, { cwd: job.dir, env: process.env, stdio: ["ignore", "pipe", "pipe"] });
     let buf = "";
@@ -194,7 +195,14 @@ async function runJob(job: Job, bin: string, taskId: number) {
         if (!line.trim()) continue;
         try {
           const e = JSON.parse(line) as { type?: string; content?: string; message?: string };
-          if (e.type === "assistant_message" && e.content?.trim()) says.push(e.content.trim());
+          if (e.type === "assistant_message" && e.content?.trim()) {
+            // 模型自言的思考块不算「她说的结果」，混进去会把成败判错、也说得莫名其妙
+            const said = e.content
+              .replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/g, "")
+              .replace(/^\s*<think(?:ing)?>[\s\S]*$/g, "")
+              .trim();
+            if (said) says.push(said);
+          }
           if (e.type === "error") says.push(`[报错] ${e.message ?? "未知"}`);
           fs.appendFileSync(trace, line.slice(0, 4000) + "\n");
         } catch {
@@ -205,14 +213,20 @@ async function runJob(job: Job, bin: string, taskId: number) {
     child.stderr.on("data", (b) => (err += b));
     child.on("error", (e) => {
       clearTimeout(timer);
+      failed = true;
       resolve(`super agent 起不来：${e.message}`);
     });
     child.on("close", (code) => {
       clearTimeout(timer);
       const tail = says.slice(-3).join("\n\n").trim();
-      if (killed) return resolve(`跑了 ${Math.round((Date.now() - t0) / 60000)} 分钟还没完，我把它停了。日志在 ${trace}`);
-      if (code === 0 && tail) return resolve(tail);
-      resolve(tail || `super agent 退出码 ${code}：${(err || "没有输出").slice(-400)}`);
+      if (killed) {
+        failed = true;
+        return resolve(`跑了 ${Math.round((Date.now() - t0) / 60000)} 分钟还没完，我把它停了。日志在 ${trace}`);
+      }
+      if (says.some((s) => s.startsWith("[报错]")) || (code !== 0 && !tail)) failed = true;
+      if (tail) return resolve(tail);
+      failed = true;
+      resolve(`super agent 退出码 ${code}：${(err || "没有输出").slice(-400)}`);
     });
   });
 
@@ -221,19 +235,26 @@ async function runJob(job: Job, bin: string, taskId: number) {
     "super_jobs",
     JSON.stringify([...state.jobs.values()].map((j) => ({ id: j.id, task: j.task.slice(0, 60), dir: j.dir, since: j.since }))),
   );
-  const ok = !/起不来|退出码|还没完/.test(text);
+  const ok = !failed;
   setKv("super_last", JSON.stringify({ id: job.id, at: Date.now(), ok, text: text.slice(0, 2000) }));
   log(`${job.id} 结束｜${ok ? "ok" : "失败"}｜用时 ${Math.round((Date.now() - t0) / 1000)} 秒｜${text.slice(0, 300)}`);
   finishTask(taskId, ok, text.slice(0, 400));
 
   const short = text.length > 700 ? text.slice(0, 700) + "\n……（后面还有，日志里有）" : text;
+  // 兜底句必须自带正文：说不上话的时候，用户至少能看到到底做成了什么
+  const fallback = ok ? `那件事办完了，它是这么说的：\n\n${short}` : `那件事没办成，它是这么说的：\n\n${short}`;
   try {
-    const said = await speakAsHer(
-      `你让 super agent 干的那件事（${job.task.slice(0, 40)}）回来了，结果原文是：\n${short}`,
-      ok ? "那件事办完了，结果如上。" : "那件事没办成，原因如上。",
-    );
-    postAssistant(said);
+    const said = await speakAsHer(`你让 super agent 干的那件事（${job.task.slice(0, 40)}）回来了，结果原文是：\n${short}`, fallback, {
+      fresh: true,
+    });
+    postAssistant(said && said.trim() ? said : fallback);
   } catch (e) {
     log(`${job.id} 结果没能说进对话：${e instanceof Error ? e.message : e}`);
+    // 兜嘴说不了话，也得把结果原样贴进对话，不能凭空消失
+    try {
+      postAssistant(fallback);
+    } catch (e2) {
+      log(`${job.id} 兜底也没贴进去：${e2 instanceof Error ? e2.message : e2}`);
+    }
   }
 }
