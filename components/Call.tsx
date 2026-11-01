@@ -217,6 +217,12 @@ export default function Call({ onClose, mini, onMini }: { onClose: () => void; m
               setVpHint(m.message);
             }
             else if (m.type === "clear") stopHer();
+            else if (m.type === "hangup") {
+              // 道过别了：她先说完，服务端隔一会儿自己挂断，这里跟着收线
+              stopHer();
+              cleanup.current();
+              onClose();
+            }
             else if (m.type === "you") setLine(m.text);
             else if (m.type === "her") setLine(m.text);
             else if (m.type === "error") {

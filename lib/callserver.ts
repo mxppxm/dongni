@@ -109,6 +109,26 @@ ${todayMe()}
 ${recent || "（刚开始）"}`.slice(0, 6000);
 }
 
+/**
+ * 他是不是在道别：拜拜、再见、先这样、我挂了这类。
+ * 问句不算——「拜拜是什么意思」「挂了怎么说」是在问话，不是要挂电话。
+ * 宁可漏判也别误挂：带问法、问号、或者话还长着（还在说事）的，都不算。
+ */
+const BYE =
+  /(拜拜|掰掰|再见|再聊|回头聊|改天聊|下次聊|先这样|先这么着|不聊了|先不聊了|我挂了|挂了啊|挂了|我去睡了|先睡了|我睡了|晚安|我走了|先走了|就这样吧)/g;
+const ASK = /(什么|啥|怎么|为什么|为啥|意思|咋|哪|谁|多少|多久|能不能|是不是|可不可以|要不要|有没有)/;
+function isGoodbye(raw: string) {
+  const t = raw.replace(/\s+/g, "");
+  if (t.length < 2 || t.length > 30) return false;
+  if (/[?？]/.test(t) || ASK.test(t)) return false;
+  // 道别语得在话的末尾（后面只剩语气词）：说事说了一半不像要走
+  for (const m of t.matchAll(BYE)) {
+    const rest = t.slice(m.index! + m[0].length).replace(/[了啊啦哦呀哈嘛呗呢吧诶欸~～。，、,.!！…]/g, "");
+    if (rest.length <= 4) return true;
+  }
+  return false;
+}
+
 
 function bridge(page: WebSocket) {
   const cfg = voiceConfig();
@@ -227,6 +247,38 @@ function bridge(page: WebSocket) {
       say.end();
     }
   };
+  /**
+   * 他说了道别的话：先让她正常回一句（该说的都说完），那句真念完了再等一会儿，
+   * 这头自己挂断，不用等他先挂。他要是又接着说别的，就把这次挂断撤掉。
+   */
+  let byePending = false;
+  let byeLimit: NodeJS.Timeout | undefined; // 兜底：她那句一直没念完，也别把电话晾着
+  let byeTimer: NodeJS.Timeout | undefined; // 她念完了，隔一会儿挂
+  const cancelBye = () => {
+    byePending = false;
+    clearTimeout(byeLimit);
+    clearTimeout(byeTimer);
+    byeLimit = byeTimer = undefined;
+  };
+  const endBye = () => {
+    if (!byePending) return;
+    cancelBye();
+    console.log(`[dongni][call] +${Date.now() - T0}ms 道过别了，挂断`);
+    tell({ type: "hangup" });
+    close();
+  };
+  const armBye = () => {
+    cancelBye();
+    byePending = true;
+    byeLimit = setTimeout(endBye, 25000);
+  };
+  /** 她那句道别念完了：再留一点余量，然后挂 */
+  const byeWhenSaid = () => {
+    if (!byePending) return;
+    clearTimeout(byeLimit);
+    byeLimit = undefined;
+    byeTimer = setTimeout(endBye, 1500);
+  };
   const onReply = (e: ReplyEvent) => {
     if (e.type === "start") {
       generated.add(e.assistantId);
@@ -279,10 +331,14 @@ function bridge(page: WebSocket) {
     const c = current;
     if (!c || !c.genDone) return;
     const played = !c.spoken || (c.via ? c.ttsDone : !hello.busy && !hello.queue.length);
-    if (played) finishSpeaking(c);
+    if (played) {
+      finishSpeaking(c);
+      if (!current) byeWhenSaid();
+    }
   };
   /** 他插话（认过是他）：她停嘴，正在想的那句也停，只留说出口的 */
   const interrupt = () => {
+    cancelBye(); // 他又开口了，那就不急着挂
     tell({ type: "clear" });
     turn++;
     if (current) {
@@ -336,6 +392,7 @@ function bridge(page: WebSocket) {
     unsubscribe = () => {};
     clearInterval(watcher);
     clearTimeout(hello.timer);
+    cancelBye();
     if (counted) {
       counted = false;
       callEnded();
@@ -432,7 +489,11 @@ function bridge(page: WebSocket) {
         }
         verdict = null;
         console.log(`[dongni][call] 459 说完`);
-        if (text) answer(text);
+        if (text) {
+          if (isGoodbye(text)) armBye();
+          else cancelBye();
+          answer(text);
+        }
         break;
       }
       case 350: // 新的一句开始念：记下是谁的
