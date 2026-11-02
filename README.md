@@ -75,8 +75,8 @@ pnpm start          # 打开 http://localhost:3939，电话服务在 3940（网�
 | `DONGNI_DATA_DIR` | 数据目录，默认 `./data` |
 | `DONGNI_CALL_PORT` | 电话中转端口，默认 3940（页面按「网页端口 + 1」去连） |
 | `DONGNI_MODEL` / `DONGNI_CHAT_MODEL` | 换模型 / 只换聊天用的模型 |
-| `DONGNI_HUMANIZE_MODEL` | 去 AI 味改写用的模型，默认 `deepseek-flash`；名字不被接口认会自动换主线模型，并在日志里说一声 |
-| `DONGNI_VOICEPRINT_MIN` | 声纹及格线，默认 0.55；日志里有每句的分数 |
+| `DONGNI_HUMANIZE_MODEL` | 去 AI 味改写用的模型，默认跟主线同一个；名字不被接口认会自动换主线模型，并在日志里说一声 |
+| `DONGNI_VOICEPRINT_MIN` | 声纹及格线，默认 0.45；0.30～0.45 算「听着像你」，下限用 `DONGNI_VOICEPRINT_MAYBE` 调；日志里有每句的分数 |
 | `GPTIMG_MODEL` | 生图模型 |
 
 ## 维护（用 launchd 常驻时）

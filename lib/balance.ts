@@ -8,9 +8,20 @@ import { LLM_CONFIG } from "./portable";
  * DS（DeepSeek）账户还剩多少钱。key 不写死：先看环境变量，再看项目配置 config/llm.json，
  * 最后看 pi 配置里的 ds 供应商。都没有就当取不到，不报错。
  */
-export type Balance = { amount: number | null; currency: string; at: number; stale: boolean };
+export type Balance = { amount: number | null; currency: string; at: number; stale: boolean; off?: boolean };
 
 type Route = { baseUrl: string; apiKey: string };
+
+/** 主线走的不是 DS 官方（比如公司网关）时，没有余额可看，别拿别处的 DS key 去查，免得显示一个不相干的数 */
+function offDeepseek(): boolean {
+  try {
+    if (!fs.existsSync(LLM_CONFIG)) return false;
+    const c = JSON.parse(fs.readFileSync(LLM_CONFIG, "utf8")) as { baseUrl?: string };
+    return !/deepseek/i.test(String(c.baseUrl ?? ""));
+  } catch {
+    return false;
+  }
+}
 
 function route(): Route | null {
   const env = process.env.DEEPSEEK_API_KEY?.trim();
@@ -39,6 +50,7 @@ let cached: { value: Balance; at: number } | null = null;
 export async function deepseekBalance(): Promise<Balance> {
   const now = Date.now();
   if (cached && now - cached.at < 45_000) return cached.value;
+  if (offDeepseek()) return { amount: null, currency: "CNY", at: now, stale: false, off: true };
   const keep = (): Balance => (last ? { ...last, stale: true } : { amount: null, currency: "CNY", at: 0, stale: true });
 
   const r = route();

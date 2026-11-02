@@ -16,12 +16,12 @@ let skillText: string | null = null;
 const skill = () => (skillText ??= fs.readFileSync(SKILL, "utf8"));
 
 /**
- * 改这一段用哪个模型。默认 deepseek-flash——接口明确支持的模型名。
+ * 改这一段用哪个模型。默认跟主线同一台（config/llm.json 里的 model），换接口不用跟着改名字。
  * 之前这里写死 kimi/kimi-k3，接口不认这个名字，每篇都是 400，改写一直在空转。
  * 想换就设 DONGNI_HUMANIZE_MODEL，但必须是接口真的支持的模型名；
  * 名字不对也不会白改：先换默认模型再试一次，还不行才降级，并且记下来。
  */
-const MODEL = () => process.env.DONGNI_HUMANIZE_MODEL?.trim() || "deepseek-flash";
+const MODEL = () => process.env.DONGNI_HUMANIZE_MODEL?.trim() || undefined;
 
 /** 「配置的模型用不了、退到主线模型」这件事一个进程只喊一次，别每篇都刷一屏 */
 let warnedFallback = false;
@@ -70,7 +70,7 @@ function noteOk() {
 function noteFail(genre: string, why: string) {
   const prev = readState();
   const count = prev && !prev.ok ? prev.count + 1 : 1;
-  const model = MODEL();
+  const model = MODEL() ?? "主线模型";
   try {
     setKv(STATE_KEY, JSON.stringify({ ok: false, at: Date.now(), count, why, genre, model } satisfies HumanizeState));
   } catch {
@@ -111,7 +111,7 @@ export async function humanize(text: string, genre = "随笔"): Promise<{ text: 
   const maxTokens = Math.min(8000, src.length * 3 + 500);
   let why = "";
   // 先用配置的模型；它不被接口认（或者挂了）就用主线那台默认模型再来一次
-  for (const model of [MODEL(), undefined]) {
+  for (const model of MODEL() ? [MODEL(), undefined] : [undefined]) {
     try {
       const r = await completeJson<{ text: string }>(messages, maxTokens, "low", model);
       const out = r.text?.trim() ?? "";
