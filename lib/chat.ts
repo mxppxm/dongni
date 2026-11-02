@@ -10,7 +10,6 @@ import { recentDiary } from "./diary";
 import { HONESTY, selfState } from "./selfstate";
 import { addUploadedImage, getImage, imageDataUrl, imageIdsIn, imageMarkdown, stripImageMarkdown } from "./images";
 import { checkClaims, correction, maybeClaims } from "./claims";
-import { planTurn } from "./intent";
 import { BACKGROUND_PREFIX, runToolSoon, toolsFor } from "./tools";
 import { formatMemories, getProfile, nowText, relevantMemories, scheduleExtraction } from "./memory";
 import { INTRO, PERSONA, SPEAKING } from "./persona";
@@ -576,32 +575,16 @@ async function oneReply(
   const did: string[] = []; // 这一轮真实调过的工具和结果开头，给「说了没做」的核对用
   let checked = false; // 核对只做一次：改口之后不再翻来覆去
   let said = ""; // 这一句里已经说出口（留在对话里）的话：后面每一轮都接着它往下说
-  // 开口前先看一眼：他这句是要她做事吗？要做事就先把工具调了再开口，只开口一次
-  const asked = stripImageMarkdown(userRow.content);
-  const plan =
-    allowTools && toolList.length
-      ? await planTurn({
-          said: asked,
-          recent: history(userRow.id)
-            .slice(-7, -1)
-            .map((m) => `${m.role === "user" ? "他" : "你"}：${typeof m.content === "string" ? m.content.slice(0, 120) : "[图片]"}`)
-            .join("\n"),
-          tools: toolList.map((t) => ({ name: t.function.name, description: t.function.description })),
-        })
-      : { act: false as const };
-  if (plan.act) console.log(`[dongni] #${assistantId} 要做事：先调 ${plan.tool} 再开口`);
   for (let round = 0; round < ROUNDS; round++) {
     if (stopped()) return flush();
     let roundText = "";
     let calls = null;
     const t0 = Date.now();
-    const forced = round === 0 && plan.act ? { type: "function", function: { name: plan.tool } } : undefined;
-    for await (const ev of streamChat(msgs, allowTools && round < ROUNDS - 1 && toolList.length ? toolList : undefined, forced)) {
+    for await (const ev of streamChat(msgs, allowTools && round < ROUNDS - 1 && toolList.length ? toolList : undefined)) {
       if (ev.type === "tools") {
         calls = ev.calls;
         continue;
       }
-      if (forced) continue; // 先干活的这一轮不出声
       // 先看一眼要不要停（被打断、或者让给新来的话），再把这个字放出去
       if (stopped()) return flush();
       roundText += ev.text;
