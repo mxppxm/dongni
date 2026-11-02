@@ -138,6 +138,11 @@ export default function Call({ onClose, mini, onMini }: { onClose: () => void; m
       }
     };
 
+    // 有的通道（通义）一口气把整句声音发完，之后就没有新片段来推 pump 了：存货得靠这个定时往下排，不然只放开头一小截
+    const drain = window.setInterval(() => {
+      if (queued > 0) pump();
+    }, 40);
+
     const pushPcm = (pcm: Int16Array) => {
       if (!ctx) return;
       const f = new Float32Array(pcm.length);
@@ -251,6 +256,7 @@ export default function Call({ onClose, mini, onMini }: { onClose: () => void; m
 
     cleanup.current = () => {
       alive = false;
+      window.clearInterval(drain);
       stopHer();
       try {
         ws?.close();

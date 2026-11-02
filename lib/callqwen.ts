@@ -84,6 +84,7 @@ export function qwenBridge(page: WebSocket, cfg: QwenConfig, systemRole: () => P
   let herAudioBytes = 0; // 这一轮下发的声音，挂断时按它估「念完」
   let stopAt = 0; // 他说完的时刻，算接话快慢
   let firstAudio = false;
+  let odd: Buffer | null = null;
   let byePending = false;
   const tokens = { audioIn: 0, audioOut: 0, textIn: 0, textOut: 0 };
   const pendingNews: string[] = []; // 后台刚发生、要找空当告诉他的事
@@ -219,9 +220,15 @@ export function qwenBridge(page: WebSocket, cfg: QwenConfig, systemRole: () => P
         herText = "";
         herAudioBytes = 0;
         firstAudio = false;
+        odd = null;
         break;
       case "response.audio.delta": {
-        const buf = Buffer.from(String(e.delta), "base64");
+        // 16 位采样两个字节一个：片段切在奇数字节上时把多出来那一个留到下一片，页面才能整片按 Int16 读
+        let buf = Buffer.from(String(e.delta), "base64");
+        if (odd) buf = Buffer.concat([odd, buf]);
+        odd = buf.length % 2 ? buf.subarray(buf.length - 1) : null;
+        if (odd) buf = buf.subarray(0, buf.length - 1);
+        if (!buf.length) break;
         if (!firstAudio) {
           firstAudio = true;
           if (stopAt) log(`她开口（距他说完 ${Date.now() - stopAt}ms）`);
