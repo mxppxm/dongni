@@ -10,6 +10,7 @@ import { recentDiary } from "./diary";
 import { HONESTY, selfState } from "./selfstate";
 import { addUploadedImage, getImage, imageDataUrl, imageIdsIn, imageMarkdown, stripImageMarkdown } from "./images";
 import { checkClaims, correction, maybeClaims } from "./claims";
+import { planTurn } from "./intent";
 import { BACKGROUND_PREFIX, runToolSoon, toolsFor } from "./tools";
 import { formatMemories, getProfile, nowText, relevantMemories, scheduleExtraction } from "./memory";
 import { INTRO, PERSONA, SPEAKING } from "./persona";
@@ -292,7 +293,12 @@ export function cutReply(assistantId: number, spoken: string) {
   const row = db().prepare("SELECT content, status FROM messages WHERE id = ?").get(assistantId) as { content: string; status: string } | undefined;
   if (!row || row.status !== "done") return;
   const keep = (row.content.match(/!\[[^\]]*\]\([^)]*\)|```card\n[\s\S]*?\n```/g) ?? []).join("\n\n");
-  const text = (spoken.trim() ? `${spoken.trim()}……` : "……") + (keep ? `\n\n${keep}` : "");
+  if (!spoken.trim() && !keep) {
+    db().prepare("DELETE FROM messages WHERE id = ? AND role = 'assistant'").run(assistantId);
+    console.log(`[dongni] #${assistantId} 被打断（已写完），一个字没念出去，不留记录`);
+    return;
+  }
+  const text = (spoken.trim() ? `${spoken.trim()}……` : "") + (keep ? `${spoken.trim() ? "\n\n" : ""}${keep}` : "");
   db().prepare("UPDATE messages SET content = ? WHERE id = ?").run(text, assistantId);
   console.log(`[dongni] #${assistantId} 被打断（已写完），只记说出口的：${spoken.slice(0, 30)}`);
 }
@@ -457,7 +463,15 @@ async function generateNow(assistantId: number, userRow: MessageRow, onEvent: (e
         // 电话里被他打断了：只留已经说出口的，后面没说的不算她说过（工具挂上的图、文件照样留着）
         const cut = stoppedReply(assistantId);
         if (cut !== undefined) {
-          text = cleanReply((cut.trim() ? `${cut.trim()}……` : "……") + attached) || STUCK_LINE;
+          // 一个字都没说出口、也没挂上图和文件：这条就当没有，不在记录里留一个空的「……」
+          if (!cut.trim() && !attached.trim()) {
+            finished = true;
+            db().prepare("DELETE FROM messages WHERE id = ? AND role = 'assistant'").run(assistantId);
+            emit({ type: "done" });
+            console.log(`[dongni] #${assistantId} 被打断，还没开口，不留记录`);
+            return;
+          }
+          text = cleanReply((cut.trim() ? `${cut.trim()}……` : "") + attached) || `${cut.trim()}……`;
           save("done");
           finished = true;
           emit({ type: "done" });
@@ -517,6 +531,10 @@ async function generateNow(assistantId: number, userRow: MessageRow, onEvent: (e
   }
 }
 
+/** 后面每一轮都提醒她：前面已经说出口了什么，接着往下说，别重复、别重新开头 */
+const goOn = (said: string) =>
+  `（你这一句已经说出口的是：「${said.trim().slice(-400)}」。接下来接着这句往下说：语气和措辞连上，不重复已经说过的意思，不换个说法再说一遍，不重新开头；没有新的要说就什么都别输出。）`;
+
 /** 调了就丢到后台做的活：工具只回一句「开始了」，没有结果可说 */
 const BACKGROUND_TOOLS = new Set(["generate_image", "take_photo", "create_mood", "dispatch_task", "repair_self"]);
 
@@ -557,16 +575,33 @@ async function oneReply(
   let usedTool = false; // 这次真动过手：只有动过手，最后那句「别动手了，直接说」才有意义
   const did: string[] = []; // 这一轮真实调过的工具和结果开头，给「说了没做」的核对用
   let checked = false; // 核对只做一次：改口之后不再翻来覆去
+  let said = ""; // 这一句里已经说出口（留在对话里）的话：后面每一轮都接着它往下说
+  // 开口前先看一眼：他这句是要她做事吗？要做事就先把工具调了再开口，只开口一次
+  const asked = stripImageMarkdown(userRow.content);
+  const plan =
+    allowTools && toolList.length
+      ? await planTurn({
+          said: asked,
+          recent: history(userRow.id)
+            .slice(-7, -1)
+            .map((m) => `${m.role === "user" ? "他" : "你"}：${typeof m.content === "string" ? m.content.slice(0, 120) : "[图片]"}`)
+            .join("\n"),
+          tools: toolList.map((t) => ({ name: t.function.name, description: t.function.description })),
+        })
+      : { act: false as const };
+  if (plan.act) console.log(`[dongni] #${assistantId} 要做事：先调 ${plan.tool} 再开口`);
   for (let round = 0; round < ROUNDS; round++) {
     if (stopped()) return flush();
     let roundText = "";
     let calls = null;
     const t0 = Date.now();
-    for await (const ev of streamChat(msgs, allowTools && round < ROUNDS - 1 && toolList.length ? toolList : undefined)) {
+    const forced = round === 0 && plan.act ? { type: "function", function: { name: plan.tool } } : undefined;
+    for await (const ev of streamChat(msgs, allowTools && round < ROUNDS - 1 && toolList.length ? toolList : undefined, forced)) {
       if (ev.type === "tools") {
         calls = ev.calls;
         continue;
       }
+      if (forced) continue; // 先干活的这一轮不出声
       // 先看一眼要不要停（被打断、或者让给新来的话），再把这个字放出去
       if (stopped()) return flush();
       roundText += ev.text;
@@ -582,8 +617,9 @@ async function oneReply(
         const v = await checkClaims({ reply: roundText, asked: stripImageMarkdown(userRow.content), tools: did, state: selfState() });
         if (v?.unbacked && !stopped()) {
           console.warn(`[dongni] #${assistantId} 说了没做：「${v.claim}」→ 让她补做或改口（${v.fix}）`);
+          said += roundText;
           msgs.push({ role: "assistant", content: roundText });
-          msgs.push({ role: "user", content: correction(v) });
+          msgs.push({ role: "user", content: `${correction(v)}\n${goOn(said)}` });
           onText("\n\n");
           continue;
         }
@@ -595,8 +631,13 @@ async function oneReply(
     // 画图、拍照要等一分钟：调用前说的那句「我给你画…」留着，算是先跟他说一声；其他工具前的铺垫话照旧丢掉
     const slow = calls.some((c) => ["generate_image", "take_photo", "create_mood"].includes(c.function.name));
     // 打电话时铺垫话已经念出去了：留在记录里，念的和屏幕上的才对得上
-    if (roundText.trim() && !slow && !onCall()) onDiscard();
-    else if (roundText.trim()) onText("\n\n");
+    if (roundText.trim() && !slow && !onCall()) {
+      onDiscard();
+      said = "";
+    } else if (roundText.trim()) {
+      onText("\n\n");
+      said += roundText;
+    }
     msgs.push({ role: "assistant", content: roundText, tool_calls: calls });
     // 去干活了：画图就「画画」，其他都是「跑腿」
     onMood(calls.some((c) => c.function.name === "generate_image") ? "draw" : "run");
@@ -612,6 +653,7 @@ async function oneReply(
       console.log(`[dongni] #${assistantId} 后台的活交出去了，前面已经说过，不再补一轮`);
       return flush();
     }
+    if (said.trim()) msgs.push({ role: "user", content: goOn(said) });
     // 工具打开的图片：作为一条附图消息让模型看到
     if (seen.length) {
       const parts = imageParts(seen);

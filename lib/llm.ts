@@ -177,13 +177,14 @@ function timeoutError(message: string, phase: TimeoutPhase) {
 /** 打电话时要快：这一轮回复不深想（首字从两秒多降到一秒内）。在 callserver 里用 replyMode.run({ fast: true }, …) 包住 */
 export const replyMode = new AsyncLocalStorage<{ fast: boolean }>();
 
-export async function* streamChat(messages: ChatMessage[], tools?: unknown[]): AsyncGenerator<StreamEvent> {
+/** toolChoice：强制这一轮先调某个工具（不先说话），见 chat.ts 的「先干活再开口」 */
+export async function* streamChat(messages: ChatMessage[], tools?: unknown[], toolChoice?: unknown): AsyncGenerator<StreamEvent> {
   // 首包慢多半是网关排队、也可能是这一轮带的东西太多：一个字都还没出的时候超时了，
   // 就把上下文再砍一刀重发一次。已经出过字的不重来（重来会把同一段话说两遍）。
   let spoken = false;
   for (let attempt = 0; ; attempt++) {
     try {
-      for await (const ev of streamOnce(messages, tools, attempt ? "tight" : "normal")) {
+      for await (const ev of streamOnce(messages, tools, attempt ? "tight" : "normal", toolChoice)) {
         spoken = true;
         yield ev;
       }
@@ -201,6 +202,7 @@ async function* streamOnce(
   messages: ChatMessage[],
   tools?: unknown[],
   level: "normal" | "tight" = "normal",
+  toolChoice?: unknown,
 ): AsyncGenerator<StreamEvent> {
   const ac = new AbortController();
   const started = Date.now();
@@ -231,7 +233,7 @@ async function* streamOnce(
   try {
     arm();
     const res = await post(
-      { ...(CHAT_MODEL ? { model: CHAT_MODEL } : {}), messages: slimMessages(messages, level), stream: true, reasoning_effort: replyMode.getStore()?.fast || onCall() ? "none" : process.env.DONGNI_CHAT_REASONING || "high", max_tokens: 16000, temperature: 0.85, ...(tools ? { tools } : {}) },
+      { ...(CHAT_MODEL ? { model: CHAT_MODEL } : {}), messages: slimMessages(messages, level), stream: true, reasoning_effort: replyMode.getStore()?.fast || onCall() ? "none" : process.env.DONGNI_CHAT_REASONING || "high", max_tokens: 16000, temperature: 0.85, ...(tools ? { tools } : {}), ...(tools && toolChoice ? { tool_choice: toolChoice } : {}) },
       ac.signal,
     );
     const reader = res.body!.getReader();
