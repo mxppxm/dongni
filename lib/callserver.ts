@@ -21,6 +21,7 @@ import {
   warmVoiceprint,
 } from "./voiceprint";
 import { wardrobeNote } from "./wardrobe";
+import { qwenBridge, qwenCallConfig } from "./callqwen";
 
 /**
  * 打电话：页面 ⇄ 这里（本机 3940 端口）⇄ 豆包端到端实时语音。
@@ -681,7 +682,12 @@ function bridge(page: WebSocket) {
 export function startCallServer() {
   if (g.__dongniCall) return;
   const wss = new WebSocketServer({ port: PORT, host: "127.0.0.1" });
-  wss.on("connection", (ws) => bridge(ws));
+  // 配了百炼的 key 就走通义实时语音（便宜得多）；bailian.json 里 callEngine 写 "doubao" 切回豆包
+  wss.on("connection", (ws) => {
+    const qwen = qwenCallConfig();
+    if (qwen) qwenBridge(ws, qwen, systemRole, isGoodbye);
+    else bridge(ws);
+  });
   wss.on("error", (e) => console.warn("[dongni] 电话服务没起来：", e.message));
   g.__dongniCall = wss;
   console.log(`[dongni] 电话服务在 127.0.0.1:${PORT}`);
