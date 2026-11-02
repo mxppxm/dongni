@@ -2,14 +2,15 @@
 
 import dynamic from "next/dynamic";
 import { AnimatePresence, motion } from "motion/react";
-import { ArrowUp, BookHeart, Moon, Phone, Sparkles, Sun } from "lucide-react";
+import { ArrowUp } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import Dock from "./Dock";
 import Markdown from "./Markdown";
 import Mood from "./Mood";
 import Starfield, { type Theme } from "./Starfield";
 import { AttachmentStrip, useAttachments } from "./useAttachments";
 import MicButton, { type VoiceSendResult } from "./VoiceRecorder";
-import { hasSpeakable, useVoice, VoiceButton, VoiceProvider, VoiceToggle } from "./Voice";
+import { hasSpeakable, useVoice, VoiceButton, VoiceProvider } from "./Voice";
 
 /** 通话期间让页面别自己出声：这个要放在 VoiceProvider 里面才拿得到 */
 function QuietWhile({ on }: { on: boolean }) {
@@ -530,55 +531,16 @@ export default function Chat() {
       <Tasks />
       <QuietWhile on={calling} />
 
-      <div className="fixed top-4 right-4 z-20 flex gap-1">
-      <button
-        onClick={toggleTheme}
-        className="flex h-10 w-10 items-center justify-center rounded-full text-[var(--icon)] transition-colors hover:bg-[var(--hover)] hover:text-[var(--icon-hover)]"
-        aria-label="切换主题"
-      >
-        <AnimatePresence mode="wait" initial={false}>
-          <motion.span
-            key={theme}
-            initial={{ rotate: -90, scale: 0.5, opacity: 0 }}
-            animate={{ rotate: 0, scale: 1, opacity: 1 }}
-            exit={{ rotate: 90, scale: 0.5, opacity: 0 }}
-            transition={{ duration: 0.25 }}
-            className="flex"
-          >
-            {theme === "dark" ? <Sun size={18} strokeWidth={1.6} /> : <Moon size={18} strokeWidth={1.6} />}
-          </motion.span>
-        </AnimatePresence>
-      </button>
-      <button
-        onClick={() => (calling ? setCallMini(false) : (setCallMini(false), setCalling(true)))}
-        className="flex h-10 w-10 items-center justify-center rounded-full text-[var(--icon)] transition-colors hover:bg-[var(--hover)] hover:text-[var(--icon-hover)]"
-        aria-label="打电话"
-        title="打电话给她"
-      >
-        <Phone size={18} strokeWidth={1.6} />
-      </button>
-      <VoiceToggle />
-      <button
-        onClick={() => setShowAlbum(true)}
-        className="flex h-10 w-10 items-center justify-center rounded-full text-[var(--icon)] transition-colors hover:bg-[var(--hover)] hover:text-[var(--icon-hover)]"
-        aria-label="相册"
-        title="相册和衣橱"
-      >
-        <BookHeart size={18} strokeWidth={1.6} />
-      </button>
-      <motion.button
-        key={pulse}
-        onClick={() => setShowMap(true)}
-        initial={pulse ? { scale: 1.35, boxShadow: "0 0 28px 6px rgba(58,215,255,.55)" } : false}
-        animate={{ scale: 1, boxShadow: "0 0 0px 0px rgba(58,215,255,0)" }}
-        transition={{ duration: 1.4, ease: "easeOut" }}
-        className="flex h-10 w-10 items-center justify-center rounded-full text-[var(--icon)] transition-colors hover:bg-[var(--hover)] hover:text-[var(--icon-hover)]"
-        aria-label="记忆"
-        title={memCount !== null ? `${memCount} 条记忆` : "记忆"}
-      >
-        <Sparkles size={18} strokeWidth={1.6} />
-      </motion.button>
-      </div>
+      <Dock
+        theme={theme}
+        onToggleTheme={toggleTheme}
+        calling={calling}
+        onCall={() => (calling ? setCallMini(false) : (setCallMini(false), setCalling(true)))}
+        onMap={() => setShowMap(true)}
+        onAlbum={() => setShowAlbum(true)}
+        memCount={memCount}
+        pulse={pulse}
+      />
 
       <div ref={scroller} onScroll={onScroll} className="scroll-thin relative z-10 flex-1 overflow-y-auto">
         <div className="mx-auto w-full max-w-[680px] px-5 pt-16 pb-44">

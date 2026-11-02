@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { piModelArgs } from "./llmconfig";
 import { db, getKv, setKv } from "./db";
 import { speakAsHer } from "./speak";
 import { onCall, whenOffCall } from "./presence";
@@ -123,7 +124,7 @@ async function runPiOnce(request: string): Promise<string> {
   const trace = path.join(dir, `${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`);
   const t0 = Date.now();
   return new Promise((resolve, reject) => {
-    const child = spawn(PI, ["-p", "--no-session", "--no-mcp", "--no-skills", "--mode", "json", "--thinking", "high", piPrompt(request)], {
+    const child = spawn(PI, ["-p", "--no-session", "--no-mcp", "--no-skills", ...piModelArgs(), "--mode", "json", "--thinking", "high", piPrompt(request)], {
       cwd: ROOT,
       env: utf8Env(),
       stdio: ["ignore", "pipe", "pipe"],

@@ -1,6 +1,6 @@
 "use client";
 
-import { Loader2, Pause, Play, Volume2, VolumeX } from "lucide-react";
+import { Loader2, Pause, Play, Volume2 } from "lucide-react";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 
 /**
@@ -363,18 +363,3 @@ export function VoiceClip({ src, auto }: { src: string; auto?: boolean }) {
   );
 }
 
-/** 顶栏的小开关：她的回复要不要自动念出来（默认开） */
-export function VoiceToggle() {
-  const { autoplay, setAutoplay } = useVoice();
-  return (
-    <button
-      type="button"
-      onClick={() => setAutoplay(!autoplay)}
-      className="flex h-10 w-10 items-center justify-center rounded-full text-[var(--icon)] transition-colors hover:bg-[var(--hover)] hover:text-[var(--icon-hover)]"
-      aria-label={autoplay ? "关掉自动念" : "打开自动念"}
-      title={autoplay ? "回复会自动念出来（点一下关掉）" : "回复不自动念（点一下打开）"}
-    >
-      {autoplay ? <Volume2 size={18} strokeWidth={1.6} /> : <VolumeX size={18} strokeWidth={1.6} />}
-    </button>
-  );
-}

@@ -31,6 +31,20 @@ pnpm install
 { "baseUrl": "https://你的接口地址/v1", "apiKey": "sk-...", "model": "模型名" }
 ```
 
+想在页面上切换几条线路（比如公司的和自己的），写成多条，右上角菜单里的「模型」就能切，切完立刻生效、不用重启：
+
+```json
+{
+  "active": "company",
+  "profiles": {
+    "company": { "label": "公司", "baseUrl": "…", "apiKey": "…", "model": "…", "piModel": "provider/模型" },
+    "mine":    { "label": "我的", "baseUrl": "https://api.deepseek.com", "apiKey": "sk-...", "model": "deepseek-flash" }
+  }
+}
+```
+
+`piModel` 可省，写了的话自我修复叫 pi 时也跟着这条线路走。
+
 装了 pi 的话可以不写这个文件，会直接读 `~/.pi/agent/models.json` 和 `settings.json` 里的默认模型。
 
 **2. 启动。**

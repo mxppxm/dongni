@@ -3,7 +3,6 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { getKv, setKv } from "./db";
-import { LLM_CONFIG } from "./portable";
 import { postAssistant } from "./selfrepair";
 import { speakAsHer } from "./speak";
 import { runWorker } from "./worker";

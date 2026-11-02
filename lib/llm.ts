@@ -1,5 +1,5 @@
 import "server-only";
-import { LLM_CONFIG } from "./portable";
+import { activeProfile, hasLlmConfig, llmConfigMtime } from "./llmconfig";
 import { AsyncLocalStorage } from "node:async_hooks";
 import fs from "node:fs";
 import os from "node:os";
@@ -18,10 +18,11 @@ let cache: { mtime: number; route: Route } | null = null;
 
 function route(): Route {
   // 随包带来的线路（换电脑时用，没有 pi 也能跑）
-  if (fs.existsSync(LLM_CONFIG)) {
-    const mt = fs.statSync(LLM_CONFIG).mtimeMs;
+  // 可以有好几条（公司 / 我的），页面上切的是 active，见 llmconfig.ts
+  if (hasLlmConfig()) {
+    const mt = llmConfigMtime();
     if (cache && cache.mtime === mt) return cache.route;
-    const c = JSON.parse(fs.readFileSync(LLM_CONFIG, "utf8")) as Route;
+    const c = activeProfile();
     const r = { baseUrl: String(c.baseUrl).replace(/\/$/, ""), apiKey: c.apiKey, model: process.env.DONGNI_MODEL || c.model };
     cache = { mtime: mt, route: r };
     return r;
