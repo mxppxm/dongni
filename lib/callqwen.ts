@@ -35,6 +35,8 @@ const ASR_MODEL = "qwen3-asr-flash-realtime";
 const TTS_MODEL = "qwen3-tts-flash-realtime";
 const AUTO_ENROLL_SECONDS = 12;
 const FRAME = 640; // 页面一包 20ms 的 16k PCM
+/** 整句声纹低于这个才当成别人（真人真麦克风分数普遍偏低，0.3 上下的多半还是他） */
+const VOICEPRINT_REJECT = 0.2;
 
 export type QwenConfig = { apiKey: string; voice: string };
 
@@ -478,12 +480,14 @@ export function qwenBridge(page: WebSocket, cfg: QwenConfig, isGoodbye: (t: stri
           if (text.length >= 2) void autoEnroll(heard);
           tell({ type: "you", text });
         } else if (heard && voiceprint()) {
-          // 整句再认一遍（比开头那一秒准）；真杂音才当没听见
+          // 整句再认一遍。开头那一秒已经认出是他，就不再推翻；只有分数明显低（真是别人/电视声）才不理。
+          // 以前卡在及格线上一点点就整句丢掉，页面上什么都不显示，他以为她卡死了。
           const score = await voiceprintScore(Buffer.concat(heard)).catch(() => null);
           const ok = score === null || score >= VOICEPRINT_MIN;
-          const maybe = !ok && (score ?? 0) >= VOICEPRINT_MAYBE;
+          const maybe = !ok && (verdict === true || (score ?? 0) >= VOICEPRINT_REJECT);
           log(`声纹 整句 ${score?.toFixed(2)} ${ok ? "是他" : maybe ? "大概是他，先接着" : "不是他，不理"}：${text.slice(0, 20)}`);
           if (!ok && !maybe) {
+            tell({ type: "you", text: `${text}（没认出是你的声音，没接）`, unsure: true });
             verdict = null;
             break;
           }
