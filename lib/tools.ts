@@ -718,7 +718,7 @@ export async function runToolSoon(name: string, rawArgs: string, ctx: ToolCtx): 
   return `${BACKGROUND_PREFIX}（${what}）比较慢，已经转到后台接着做，做完会自动告诉他。现在别说做好了、也别编结果，就跟他说一句在弄，然后接着聊。`;
 }
 
-/** register=false：她自己后台顺手调的（比如主动消息每 15 分钟看一眼最近文件），不进任务栏，免得刷屏 */
+/** register=false：她自己后台顺手调的（不进任务栏，免得刷屏） */
 export async function runTool(name: string, rawArgs: string, ctx?: ToolCtx, opts: { register?: boolean } = {}): Promise<string> {
   const fn = IMPL[name];
   if (!fn) return `没有这个工具：${name}`;
