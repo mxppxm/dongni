@@ -277,7 +277,20 @@ export function qwenBridge(page: WebSocket, cfg: QwenConfig, isGoodbye: (t: stri
     }
   };
 
-  /** 他插话（认过是他）：她停嘴，正在想的那句也停，只留说出口的 */
+  /**
+   * 他一开口：她正在出声就先停嘴（页面清掉没放完的声音、这一句不再往下念）。
+   * 只停声音，不取消回复——是不是他、是不是一句话还没定；她还没开口（还在想、在交活）就什么都不动。
+   * 2026-11-02：一段「嘟嘟嘟」的杂音把她还没开口的回复整条取消了，她就一直不吭声。
+   */
+  const hush = () => {
+    const talking = (current && current.spoken) || extraBusy;
+    if (!talking) return;
+    tell({ type: "clear" });
+    turn++;
+    current?.say.stop();
+  };
+
+  /** 他插话（认过是他、说了一句完整的话）：她停嘴，正在想的那句也停，只留说出口的 */
   const interrupt = () => {
     cancelBye();
     tell({ type: "clear" });
@@ -414,7 +427,7 @@ export function qwenBridge(page: WebSocket, cfg: QwenConfig, isGoodbye: (t: stri
       if (verdict) {
         if (!cutThisTurn) {
           cutThisTurn = true;
-          interrupt();
+          hush();
         }
         if (partial) tell({ type: "you", text: partial });
       }
@@ -473,7 +486,7 @@ export function qwenBridge(page: WebSocket, cfg: QwenConfig, isGoodbye: (t: stri
         // 声纹只决定这句要不要回，不决定她要不要先闭嘴。开头已经认出不是他的除外。
         if (!cutThisTurn && verdict !== false && !NOISE.test(partial)) {
           cutThisTurn = true;
-          interrupt();
+          hush();
         }
         if (partial && (verdict === true || !voiceprint())) tell({ type: "you", text: partial });
         break;
@@ -489,7 +502,7 @@ export function qwenBridge(page: WebSocket, cfg: QwenConfig, isGoodbye: (t: stri
           break;
         }
         if (heard && !voiceprint()) {
-          if (!cutThisTurn) interrupt();
+          interrupt();
           if (text.length >= 2) void autoEnroll(heard);
           tell({ type: "you", text });
         } else if (heard && voiceprint()) {
@@ -505,10 +518,10 @@ export function qwenBridge(page: WebSocket, cfg: QwenConfig, isGoodbye: (t: stri
             verdict = null;
             break;
           }
-          if (verdict !== true && !cutThisTurn) interrupt();
+          interrupt();
           tell({ type: "you", text, unsure: maybe });
         } else {
-          if (!cutThisTurn) interrupt();
+          interrupt();
           tell({ type: "you", text });
         }
         verdict = null;
