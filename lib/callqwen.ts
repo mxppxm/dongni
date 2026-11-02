@@ -200,10 +200,7 @@ export function qwenBridge(page: WebSocket, cfg: QwenConfig, isGoodbye: (t: stri
     say: ReturnType<typeof speaker>;
     spoken: string;
     text: string;
-    lastDelta: number;
-    fillers: number;
     genDone: boolean;
-    stall?: NodeJS.Timeout;
     playEnd?: NodeJS.Timeout;
   };
   let current: Speaking | null = null;
@@ -244,7 +241,6 @@ export function qwenBridge(page: WebSocket, cfg: QwenConfig, isGoodbye: (t: stri
 
   const finishSpeaking = (me: Speaking) => {
     if (current !== me) return;
-    clearInterval(me.stall);
     current = null;
     if (byePending) setTimeout(endBye, 1200);
     speakExtras();
@@ -264,28 +260,14 @@ export function qwenBridge(page: WebSocket, cfg: QwenConfig, isGoodbye: (t: stri
         ),
         spoken: "",
         text: "",
-        lastDelta: Date.now(),
-        fillers: 0,
         genDone: false,
       };
-      // 想得久（模型/工具半天不回字）：隔一会儿垫一句，别让电话那头干等
-      me.stall = setInterval(() => {
-        if (current !== me || me.genDone) return clearInterval(me.stall);
-        if (Date.now() - me.lastDelta < 20_000 || me.fillers >= 6) return;
-        const lines = ["嗯……这个我得想一下，", "稍等啊，我这边还在弄，", "别急，我还没弄完，", "马上，再给我一会儿，"];
-        const line = lines[me.fillers % lines.length];
-        me.fillers++;
-        me.lastDelta = Date.now();
-        me.say.push(line + "\n");
-        tell({ type: "her", text: `${me.text}${line}` });
-      }, 5000);
       current = me;
       return;
     }
     if (!current || e.assistantId !== current.id) return; // 接通前开始的、被打断的，都不念
     if (e.type === "delta") {
       if (!current.text) log("第一个字");
-      current.lastDelta = Date.now();
       current.say.push(e.text);
       current.text += e.text;
       tell({ type: "her", text: current.text });
@@ -303,7 +285,6 @@ export function qwenBridge(page: WebSocket, cfg: QwenConfig, isGoodbye: (t: stri
     if (current) {
       cutReply(current.id, current.spoken);
       current.say.stop();
-      clearInterval(current.stall);
       clearTimeout(current.playEnd);
       current = null;
     }
