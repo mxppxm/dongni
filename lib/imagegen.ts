@@ -97,6 +97,10 @@ export function lastGenProof(): GenProof | null {
 
 /** 用一句话说清生图现在的真实状态（写进提示词，她照着说） */
 export function imagegenStatus(): string {
+  return `生图用的模型是 ${process.env.GPTIMG_MODEL || "gpt-image-2"}（他问起就照这个说，别猜别的）。${proofLine()}`;
+}
+
+function proofLine(): string {
   const p = lastGenProof();
   if (!p) return "生图：还没真画出来过一次（没验证过）。要说自己能画，先用 generate_image 真画一张；在那之前就说没试过。";
   const mins = Math.max(1, Math.round((Date.now() - p.at) / 60000));

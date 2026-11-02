@@ -685,7 +685,7 @@ export function startCallServer() {
   // 配了百炼的 key 就走通义实时语音（便宜得多）；bailian.json 里 callEngine 写 "doubao" 切回豆包
   wss.on("connection", (ws) => {
     const qwen = qwenCallConfig();
-    if (qwen) qwenBridge(ws, qwen, systemRole, isGoodbye);
+    if (qwen) qwenBridge(ws, qwen, isGoodbye);
     else bridge(ws);
   });
   wss.on("error", (e) => console.warn("[dongni] 电话服务没起来：", e.message));

@@ -1,127 +1,357 @@
 import "server-only";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import WebSocket from "ws";
+import { cutReply, startReply } from "./chat";
 import { db } from "./db";
-import { scheduleExtraction } from "./memory";
-import { callEnded, callStarted } from "./presence";
-import { HONESTY, selfState } from "./selfstate";
-import { runTool, TOOLS } from "./tools";
+import { replyMode } from "./llm";
+import { callEnded, callStarted, type ReplyEvent, subscribeReplies } from "./presence";
 import { speakableText } from "./tts";
+import {
+  ENROLL_SECONDS,
+  enrollVoiceprint,
+  VOICEPRINT_MAYBE,
+  VOICEPRINT_MIN,
+  voiceprint,
+  voiceprintScore,
+  warmVoiceprint,
+} from "./voiceprint";
 
 /**
- * 打电话（通义 Qwen 实时语音）：页面 ⇄ 这里（本机 3940）⇄ qwen3.8-omni-flash-realtime。
+ * 打电话（通义）：页面 ⇄ 这里（本机 3940）⇄ 通义实时识别 + 通义实时合成。
  *
- * 跟豆包那条（callserver.ts）的分工不同：这里 Qwen 自己就是通话里的「脑子」——全双工地听和说、
- * 判断要不要动手；但动手全部走我们自己的工具（runTool），派活、提醒、查进度都记在我们的账上。
- * 为什么换：豆包端到端按音频输出 300 元/百万 token 计，太贵；Qwen 这条实测每分钟一两分钱。
+ * 通义只当「耳朵和嘴」：耳朵听你说、判断你说完没、你开口时让她停；嘴用 Serena 把她的话念出来。
+ * 「脑子」还是她自己的——跟打字同一条路（startReply），同一份记忆、同样的工具、同样的「说了没做」核对。
+ * 之前试过让通义的端到端模型自己当脑子：便宜，但它想到就说，没工具也编「试了，模型请求失败」，管不住。
  *
- * 页面协议和豆包那条完全一样（16k PCM 上来、24k PCM 下去、you/her/clear/hangup 这些事件），页面不用改。
- * 配置在 ~/.config/dongni/bailian.json：{ apiKey, realtimeModel, voice, callEngine }；callEngine 写 "doubao" 就切回豆包。
+ * 页面协议跟豆包那条一样（16k PCM 上来、24k PCM 下去、ready/you/her/clear/hangup 这些事件），页面不用改。
+ * 配置在 ~/.config/dongni/bailian.json：{ apiKey, voice, callEngine }；callEngine 写 "doubao" 就切回豆包。
  */
 const CFG = path.join(os.homedir(), ".config", "dongni", "bailian.json");
 const URL = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime";
+const ASR_MODEL = "qwen3-asr-flash-realtime";
+const TTS_MODEL = "qwen3-tts-flash-realtime";
+const AUTO_ENROLL_SECONDS = 12;
+const FRAME = 640; // 页面一包 20ms 的 16k PCM
 
-type QwenConfig = { apiKey: string; realtimeModel: string; voice: string };
+export type QwenConfig = { apiKey: string; voice: string };
 
 export function qwenCallConfig(): QwenConfig | null {
   try {
     const c = JSON.parse(fs.readFileSync(CFG, "utf8")) as Partial<QwenConfig> & { callEngine?: string };
     if (!c.apiKey || c.callEngine === "doubao") return null;
-    return { apiKey: c.apiKey, realtimeModel: c.realtimeModel || "qwen3.8-omni-flash-realtime", voice: c.voice || "Serena" };
+    return { apiKey: c.apiKey, voice: c.voice || "Serena" };
   } catch {
     return null;
   }
 }
 
-/** 电话里能用的工具：费时又出不了声的（画图、拍照、改写长文）不给，免得电话那头干等 */
-const CALL_TOOLS = new Set([
-  "list_dir",
-  "read_file",
-  "search_files",
-  "recent_files",
-  "system_info",
-  "set_reminder",
-  "list_reminders",
-  "cancel_reminder",
-  "dispatch_task",
-  "dispatch_status",
-  "cancel_task",
-  "set_city",
-  "repair_self",
-  "write_file",
-]);
+/** 不成句的声音（笑、嗯、啊、咳）：识别出来也不当一句话回，免得她对着笑声说「笑啥呀」 */
+const NOISE = /^[\s嗯啊哦噢呃额唔哈呵嘿诶欸哎呀嘛吧呢~～。，、,.!！?？…]*$/;
 
-const realtimeTools = () =>
-  TOOLS.filter((t) => CALL_TOOLS.has(t.function.name)).map((t) => ({
-    type: "function",
-    name: t.function.name,
-    description: t.function.description,
-    parameters: t.function.parameters,
-  }));
-
-const CALL_RULES = `现在你们在打电话。句子短、口语，像真打电话那样自然接话；别长篇大论，别列条目，别念路径和编号。
-他插话你就停下来听。
-涉及做事的（派活、查进度、设提醒、查电脑、叫停），必须先调用对应的工具，拿到工具的结果再说；工具没调成功就照实说没成，绝不先说「好了」「派出去了」。
-转述工具结果只说它原本的意思，不加工：它说「现在没有在跑的活」，就别说成「都跑完了」；不知道的就说不知道。
-标着「系统消息」的不是他说的话：那是后台刚发生的事（派出去的活办完了、提醒到点了、他在对话框里打了字）。找个自然的空当用一两句告诉他，接得上刚才的话头，不要说「系统消息」这几个字。`;
-
-const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}……（后面省略）` : s);
-
-export function qwenBridge(page: WebSocket, cfg: QwenConfig, systemRole: () => Promise<string>, isGoodbye: (t: string) => boolean) {
+export function qwenBridge(page: WebSocket, cfg: QwenConfig, isGoodbye: (t: string) => boolean) {
   const tell = (o: unknown) => page.readyState === WebSocket.OPEN && page.send(JSON.stringify(o));
-  const up = new WebSocket(`${URL}?model=${encodeURIComponent(cfg.realtimeModel)}`, { headers: { Authorization: `Bearer ${cfg.apiKey}` } });
-  const send = (o: unknown) => up.readyState === WebSocket.OPEN && up.send(JSON.stringify(o));
-  const T0 = Date.now();
-  const log = (s: string) => console.log(`[dongni][qwen] +${((Date.now() - T0) / 1000).toFixed(1)}s ${s}`);
+  const open = (model: string) => new WebSocket(`${URL}?model=${model}`, { headers: { Authorization: `Bearer ${cfg.apiKey}` } });
+  let T0 = Date.now();
+  const log = (s: string) => console.log(`[dongni][qwen] +${Date.now() - T0}ms ${s}`);
+  warmVoiceprint();
 
-  let ready = false;
-  let counted = false;
-  let responding = false; // 她这一轮在生成/在说
-  let userSpeaking = false;
-  let herText = ""; // 这一轮她说出口的字（字幕 + 记进对话）
-  let herAudioBytes = 0; // 这一轮下发的声音，挂断时按它估「念完」
-  let stopAt = 0; // 他说完的时刻，算接话快慢
-  let firstAudio = false;
-  let odd: Buffer | null = null;
-  let byePending = false;
-  const tokens = { audioIn: 0, audioOut: 0, textIn: 0, textOut: 0 };
-  const pendingNews: string[] = []; // 后台刚发生、要找空当告诉他的事
-  let lastSeen = (db().prepare("SELECT MAX(id) m FROM messages").get() as { m: number | null }).m ?? 0;
-  const mine = new Set<number>();
-
-  const save = (role: "user" | "assistant", content: string) => {
-    const r = db()
-      .prepare("INSERT INTO messages(role, content, status, created_at, kind) VALUES(?, ?, 'done', ?, 'call')")
-      .run(role, content, Date.now());
-    mine.add(Number(r.lastInsertRowid));
-    if (role === "user") scheduleExtraction();
-  };
-
-  /** 后台的事（派活回来、提醒、他在对话框打的字引出的回复）：塞给她，等空当说 */
-  const flushNews = () => {
-    if (!pendingNews.length || responding || userSpeaking || !ready) return;
-    const news = pendingNews.splice(0).join("\n");
-    send({
-      type: "conversation.item.create",
-      item: { type: "message", role: "user", content: [{ type: "input_text", text: `（系统消息，不是他说的）刚发生的事：\n${news}` }] },
+  // ─────────── 嘴：每段话一条合成连接；提前备好一条，开口不用等建连 ───────────
+  let chars = 0; // 合成计费字符（汉字算 2 个）
+  const ttsReady = () =>
+    new Promise<WebSocket | null>((resolve) => {
+      const ws = open(TTS_MODEL);
+      const fail = () => resolve(null);
+      ws.once("error", fail);
+      ws.once("unexpected-response", fail);
+      ws.on("open", () =>
+        ws.send(
+          JSON.stringify({
+            type: "session.update",
+            session: { voice: cfg.voice, mode: "server_commit", language_type: "Chinese", response_format: "pcm", sample_rate: 24000 },
+          }),
+        ),
+      );
+      const onFirst = (raw: Buffer) => {
+        const e = JSON.parse(raw.toString());
+        if (e.type === "session.updated") {
+          ws.off("message", onFirst);
+          resolve(ws);
+        } else if (e.type === "error") resolve(null);
+      };
+      ws.on("message", onFirst);
     });
-    send({ type: "response.create" });
+  let spare: Promise<WebSocket | null> = ttsReady();
+  const takeTts = () => {
+    const got = spare;
+    spare = ttsReady();
+    return got;
   };
-  const watcher = setInterval(() => {
+
+  let turn = 0; // 他插话一次就 +1：上一轮还没念的不再念
+  /** 把她的话一句句送去念；声音都送完后回调 onDone（给出总时长，好估页面什么时候放完） */
+  const speaker = (myTurn: number, onSaid: (t: string) => void, onDone: (secs: number) => void) => {
+    let started = false;
+    let pending = "";
+    let finished = false;
+    const lines: string[] = [];
+    let ws: WebSocket | null = null;
+    let wsP: Promise<WebSocket | null> | null = null;
+    let bytes = 0;
+    let odd: Buffer | null = null;
+    let reported = false;
+    const done = () => {
+      if (reported) return;
+      reported = true;
+      onDone(bytes / 48000);
+    };
+    const flush = () => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      while (lines.length) ws.send(JSON.stringify({ type: "input_text_buffer.append", text: lines.shift() }));
+      if (finished) {
+        ws.send(JSON.stringify({ type: "input_text_buffer.commit" }));
+        ws.send(JSON.stringify({ type: "session.finish" }));
+      }
+    };
+    const connect = () => {
+      wsP = takeTts();
+      void wsP.then((got) => {
+        if (!got || myTurn !== turn) {
+          got?.close();
+          return done();
+        }
+        ws = got;
+        got.on("message", (raw: Buffer) => {
+          const e = JSON.parse(raw.toString());
+          if (e.type === "response.audio.delta") {
+            if (myTurn !== turn) return;
+            // 两个字节一个采样：切在奇数字节上的那一个留给下一片
+            let buf = Buffer.from(String(e.delta), "base64");
+            if (odd) buf = Buffer.concat([odd, buf]);
+            odd = buf.length % 2 ? buf.subarray(buf.length - 1) : null;
+            if (odd) buf = buf.subarray(0, buf.length - 1);
+            if (!buf.length) return;
+            if (!bytes) log("开始出声");
+            bytes += buf.length;
+            if (page.readyState === WebSocket.OPEN) page.send(buf);
+          } else if (e.type === "response.done") {
+            chars += Number(e.response?.usage?.characters ?? 0);
+          } else if (e.type === "session.finished") {
+            got.close();
+            done();
+          } else if (e.type === "error") {
+            console.warn("[dongni][qwen] 合成报错：", JSON.stringify(e.error).slice(0, 200));
+          }
+        });
+        got.on("close", done);
+        flush();
+      });
+    };
+    const send = (content: string) => {
+      if (myTurn !== turn) return;
+      if (!started) {
+        started = true;
+        log(`送去念第一句：${content.slice(0, 20)}`);
+        connect();
+      }
+      lines.push(content);
+      onSaid(content);
+      flush();
+    };
+    return {
+      push(delta: string) {
+        if (finished) return;
+        pending += delta;
+        // 说完一句就送；第一句凑够几个字碰到逗号就先送，早点出声
+        const m = pending.match(/^[\s\S]*[。！？!?～\n]/) ?? (!started && pending.length >= 8 ? pending.match(/^[\s\S]*[，,、]/) : null);
+        if (m) {
+          const said = speakableText(m[0]);
+          pending = pending.slice(m[0].length);
+          if (said) send(said);
+        }
+      },
+      end() {
+        if (finished) return;
+        const said = speakableText(pending);
+        pending = "";
+        if (said) send(said);
+        finished = true;
+        if (!started) return done();
+        flush();
+      },
+      stop() {
+        finished = true;
+        lines.length = 0;
+        try {
+          ws?.close();
+        } catch {}
+        void wsP?.then((w) => w?.close());
+      },
+    };
+  };
+
+  // ─────────── 她这一句：想完 + 念完才算完 ───────────
+  type Speaking = {
+    id: number;
+    say: ReturnType<typeof speaker>;
+    spoken: string;
+    text: string;
+    filler: boolean;
+    lastDelta: number;
+    fillers: number;
+    genDone: boolean;
+    stall?: NodeJS.Timeout;
+    playEnd?: NodeJS.Timeout;
+  };
+  let current: Speaking | null = null;
+  const extras: string[] = [];
+  let extraBusy = false;
+  const generated = new Set<number>();
+
+  /** 声音送完了：按时长估页面什么时候放完（页面会先垫 0.1 秒） */
+  const afterPlay = (secs: number, then: () => void) => setTimeout(then, secs * 1000 + 300);
+
+  const speakExtras = () => {
+    if (current || extraBusy || !extras.length) return;
+    extraBusy = true;
+    const say = speaker(turn, () => {}, (secs) =>
+      afterPlay(secs, () => {
+        extraBusy = false;
+        speakExtras();
+      }),
+    );
+    say.push(extras.splice(0).join("\n") + "\n");
+    say.end();
+  };
+
+  // 他说了道别的话：她那句回完、放完，再等一会儿挂
+  let byePending = false;
+  let byeLimit: NodeJS.Timeout | undefined;
+  const cancelBye = () => {
+    byePending = false;
+    clearTimeout(byeLimit);
+  };
+  const endBye = () => {
+    if (!byePending) return;
+    cancelBye();
+    log("道过别了，挂断");
+    tell({ type: "hangup" });
+    close();
+  };
+
+  const finishSpeaking = (me: Speaking) => {
+    if (current !== me) return;
+    clearInterval(me.stall);
+    current = null;
+    if (byePending) setTimeout(endBye, 1200);
+    speakExtras();
+  };
+
+  const onReply = (e: ReplyEvent) => {
+    if (e.type === "start") {
+      generated.add(e.assistantId);
+      const me: Speaking = {
+        id: e.assistantId,
+        say: speaker(
+          turn,
+          (t) => (me.spoken += t),
+          (secs) => {
+            me.playEnd = afterPlay(secs, () => finishSpeaking(me));
+          },
+        ),
+        spoken: "",
+        text: "",
+        filler: false,
+        lastDelta: Date.now(),
+        fillers: 0,
+        genDone: false,
+      };
+      // 想得久（模型/工具半天不回字）：隔一会儿垫一句，别让电话那头干等
+      me.stall = setInterval(() => {
+        if (current !== me || me.genDone) return clearInterval(me.stall);
+        if (Date.now() - me.lastDelta < 20_000 || me.fillers >= 6) return;
+        const lines = ["嗯……这个我得想一下，", "稍等啊，我这边还在弄，", "别急，我还没弄完，", "马上，再给我一会儿，"];
+        const line = lines[me.fillers % lines.length];
+        me.fillers++;
+        me.lastDelta = Date.now();
+        me.say.push(line + "\n");
+        tell({ type: "her", text: `${me.text}${line}` });
+      }, 5000);
+      current = me;
+      return;
+    }
+    if (!current || e.assistantId !== current.id) return; // 接通前开始的、被打断的，都不念
+    if (e.type === "delta") {
+      if (!current.text) log("第一个字");
+      current.lastDelta = Date.now();
+      current.say.push(e.text);
+      current.text += e.text;
+      tell({ type: "her", text: current.text });
+    } else if (e.type === "mood" && (e.mood === "run" || e.mood === "draw") && !current.text && !current.filler) {
+      // 要去干活了（查电脑、画画）还一个字没说：先应一声
+      current.filler = true;
+      const lines = e.mood === "draw" ? ["好，我画一下，等我会儿～", "行，我这就画，稍等哦"] : ["好，我弄一下，等我一会儿～", "行，我去看看，马上", "嗯嗯，我来弄，稍等哈"];
+      current.say.push(lines[Math.floor(Math.random() * lines.length)] + "\n");
+    } else if (e.type === "done") {
+      current.genDone = true;
+      current.say.end();
+    }
+  };
+
+  /** 他插话（认过是他）：她停嘴，正在想的那句也停，只留说出口的 */
+  const interrupt = () => {
+    cancelBye();
+    tell({ type: "clear" });
+    turn++;
+    if (current) {
+      cutReply(current.id, current.spoken);
+      current.say.stop();
+      clearInterval(current.stall);
+      clearTimeout(current.playEnd);
+      current = null;
+    }
+    extras.length = 0;
+  };
+
+  /** 不经过脑子、直接写进对话的话（提醒到点、派活回来、照片拍好）：电话里也说一声 */
+  let lastSeen = (db().prepare("SELECT MAX(id) m FROM messages").get() as { m: number | null }).m ?? 0;
+  const watchDirect = () => {
     const rows = db()
-      .prepare("SELECT id, role, content, kind FROM messages WHERE id > ? AND status = 'done' ORDER BY id")
-      .all(lastSeen) as { id: number; role: string; content: string; kind: string }[];
+      .prepare("SELECT id, content, kind FROM messages WHERE id > ? AND role = 'assistant' AND status = 'done' ORDER BY id")
+      .all(lastSeen) as { id: number; content: string; kind: string }[];
     for (const r of rows) {
       lastSeen = r.id;
-      if (mine.has(r.id) || r.kind === "system" || r.kind === "call") continue;
-      const t = clip(speakableText(r.content), 400);
-      if (!t) continue;
-      pendingNews.push(r.role === "user" ? `他在对话框里打字：${t}` : `你在对话框里说了（或后台替你发了）：${t}`);
+      if (generated.has(r.id) || r.kind === "system" || r.kind === "call") continue;
+      const t = speakableText(r.content);
+      if (t) extras.push(t);
     }
-    flushNews();
-  }, 1500);
+    speakExtras();
+  };
+
+  /** 他这句说完了：交给她自己的脑子回（和打字是同一条路） */
+  const answer = (text: string) => {
+    replyMode.run({ fast: true }, () =>
+      startReply(`call-${crypto.randomUUID()}`, text, (e) => {
+        if (e.type !== "meta") return;
+        db().prepare("UPDATE messages SET kind = 'call' WHERE id IN (?, ?)").run(e.userId, e.assistantId);
+      }),
+    );
+  };
+
+  // ─────────── 耳朵：一整通电话一条识别连接 ───────────
+  const asr = open(ASR_MODEL);
+  let ready = false;
+  let counted = false;
+  let unsubscribe = () => {};
+  let watcher: NodeJS.Timeout | undefined;
+  const pre: Buffer[] = []; // 最近半秒的声音：识别报「开口」总晚一点，往前补
+  let utter: Buffer[] | null = null; // 这一句攒下的声音（认声纹）
+  let verdict: boolean | null = null;
+  let checking = false;
+  let enrolling: Buffer[] | null = null;
+  let partial = "";
 
   // 心跳：页面半开（合盖、切网）时 close 不来，别让「在通话」一直挂着
   let ponged = true;
@@ -137,177 +367,197 @@ export function qwenBridge(page: WebSocket, cfg: QwenConfig, systemRole: () => P
   const close = () => {
     if (closed) return;
     closed = true;
-    clearInterval(watcher);
     clearInterval(beat);
+    clearInterval(watcher);
+    unsubscribe();
+    cancelBye();
+    current?.say.stop();
     if (counted) callEnded();
-    // 单价（北京，元/百万 token）：音频入 6、音频出 12、文本入 1.5、文本出 4.5
-    const cost = (tokens.audioIn * 6 + tokens.audioOut * 12 + tokens.textIn * 1.5 + tokens.textOut * 4.5) / 1e6;
-    log(`挂断｜用量 音频入 ${tokens.audioIn} 出 ${tokens.audioOut}，文本入 ${tokens.textIn} 出 ${tokens.textOut}｜约 ${cost.toFixed(4)} 元`);
+    // 识别 0.00033 元/秒，合成 1 元/万字符（北京）
+    const secs = (Date.now() - startedAt) / 1000;
+    log(`挂断｜通话 ${Math.round(secs)} 秒，合成 ${chars} 字符｜约 ${(secs * 0.00033 + chars / 10000).toFixed(4)} 元`);
+    void spare.then((w) => w?.close());
     try {
-      up.close();
+      asr.close();
     } catch {}
     try {
       page.close();
     } catch {}
   };
+  const startedAt = Date.now();
 
-  const hangupAfterSaid = () => {
-    // 她那句道别还在页面上放着：按下发的声音估个时长，放完再挂
-    const secs = herAudioBytes / 48000;
-    setTimeout(() => {
-      tell({ type: "hangup" });
-      close();
-    }, secs * 1000 + 1500);
+  asr.on("open", () =>
+    asr.send(
+      JSON.stringify({
+        type: "session.update",
+        session: {
+          input_audio_format: "pcm",
+          sample_rate: 16000,
+          input_audio_transcription: { language: "zh" },
+          turn_detection: { type: "server_vad", threshold: 0.2, silence_duration_ms: 600 },
+        },
+      }),
+    ),
+  );
+
+  /** 他开口一秒多了：认一认是不是他，是他才打断她 */
+  const checkEarly = async (buf: Buffer[]) => {
+    checking = true;
+    try {
+      const score = await voiceprintScore(Buffer.concat(buf));
+      if (utter !== buf || score === null) return;
+      verdict = score >= VOICEPRINT_MAYBE;
+      log(`声纹 开头 ${score.toFixed(2)} ${score >= VOICEPRINT_MIN ? "是他" : verdict ? "大概是他" : "不像他"}`);
+      if (verdict) {
+        interrupt();
+        if (partial) tell({ type: "you", text: partial });
+      }
+    } catch {
+      verdict = true; // 认不了就别把他拦在外面
+    } finally {
+      checking = false;
+    }
   };
 
-  up.on("open", async () => {
-    const instructions = `${await systemRole()}\n\n${CALL_RULES}\n\n【你后台的事·实时状态】\n${selfState()}\n${HONESTY}`;
-    send({
-      type: "session.update",
-      session: {
-        modalities: ["text", "audio"],
-        instructions,
-        voice: cfg.voice,
-        input_audio_format: "pcm16",
-        output_audio_format: "pcm24",
-        input_audio_transcription: { model: "qwen3-asr-flash-realtime" },
-        turn_detection: { type: "server_vad", silence_duration_ms: 600 },
-        tools: realtimeTools(),
-      },
-    });
-  });
+  const autoBuf: Buffer[] = [];
+  let autoBusy = false;
+  const autoEnroll = async (heard: Buffer[]) => {
+    if (autoBusy) return;
+    autoBuf.push(Buffer.concat(heard));
+    const all = Buffer.concat(autoBuf);
+    if (all.length < AUTO_ENROLL_SECONDS * 32000) return;
+    autoBusy = true;
+    const r = await enrollVoiceprint(all).catch((e) => ({ ok: false as const, message: e instanceof Error ? e.message : String(e) }));
+    log(`声纹自动录入 ${r.ok ? "好了" : `没成：${r.message}`}`);
+    autoBuf.length = 0;
+    if (r.ok) tell({ type: "enrolled" });
+    autoBusy = false;
+  };
 
-  up.on("message", async (raw: Buffer) => {
-    let e: Record<string, any>;
-    try {
-      e = JSON.parse(raw.toString());
-    } catch {
-      return;
-    }
+  asr.on("message", async (raw: Buffer) => {
+    const e = JSON.parse(raw.toString());
     switch (e.type) {
       case "session.updated":
         if (ready) break;
         ready = true;
         counted = true;
         callStarted();
-        log(`接通（${cfg.realtimeModel}，音色 ${cfg.voice}，工具 ${realtimeTools().length} 个）`);
-        tell({ type: "ready", voiceprint: false });
+        unsubscribe = subscribeReplies(onReply);
+        watcher = setInterval(watchDirect, 1500);
+        log(`接通（识别 ${ASR_MODEL}，合成 ${TTS_MODEL}，音色 ${cfg.voice}）`);
+        tell({ type: "ready", voiceprint: !!voiceprint() });
         break;
       case "input_audio_buffer.speech_started":
-        userSpeaking = true;
-        // 他开口了：她要是正在说，马上停（页面清掉没放完的声音），没说出口的不算说过
-        if (responding) {
-          send({ type: "response.cancel" });
-          tell({ type: "clear" });
-          log("他插话，停嘴");
+        partial = "";
+        if (!voiceprint()) {
+          utter = []; // 还没声纹：这句攒下来拿去自动录；等识别出成句的话再打断，笑一声、咳一下不算
+          break;
         }
+        utter = [...pre]; // 录过声纹：先认一认是不是他，是他才打断（见下面收音频的地方）
+        verdict = null;
         break;
       case "input_audio_buffer.speech_stopped":
-        userSpeaking = false;
-        stopAt = Date.now();
+        T0 = Date.now();
+        break;
+      case "conversation.item.input_audio_transcription.text":
+        partial = `${e.text ?? ""}${e.stash ?? ""}`;
+        if (partial && (verdict === true || !voiceprint())) tell({ type: "you", text: partial });
         break;
       case "conversation.item.input_audio_transcription.completed": {
         const text = String(e.transcript ?? "").trim();
-        if (!text) break;
-        log(`他：${text}`);
-        tell({ type: "you", text });
-        save("user", text);
-        byePending = isGoodbye(text);
-        break;
-      }
-      case "response.created":
-        responding = true;
-        herText = "";
-        herAudioBytes = 0;
-        firstAudio = false;
-        odd = null;
-        break;
-      case "response.audio.delta": {
-        // 16 位采样两个字节一个：片段切在奇数字节上时把多出来那一个留到下一片，页面才能整片按 Int16 读
-        let buf = Buffer.from(String(e.delta), "base64");
-        if (odd) buf = Buffer.concat([odd, buf]);
-        odd = buf.length % 2 ? buf.subarray(buf.length - 1) : null;
-        if (odd) buf = buf.subarray(0, buf.length - 1);
-        if (!buf.length) break;
-        if (!firstAudio) {
-          firstAudio = true;
-          if (stopAt) log(`她开口（距他说完 ${Date.now() - stopAt}ms）`);
+        const heard = utter;
+        utter = null;
+        partial = "";
+        if (!text || NOISE.test(text)) {
+          verdict = null;
+          if (text) log(`不成句，不接：${text}`);
+          break;
         }
-        herAudioBytes += buf.length;
-        if (page.readyState === WebSocket.OPEN) page.send(buf);
-        break;
-      }
-      case "response.audio_transcript.delta":
-        herText += String(e.delta ?? "");
-        tell({ type: "her", text: herText });
-        break;
-      case "response.function_call_arguments.done": {
-        const name = String(e.name);
-        log(`动手：${name} ${String(e.arguments).slice(0, 80)}`);
-        const attached: string[] = [];
-        const out = await runTool(name, String(e.arguments || "{}"), {
-          turnId: `call-${Date.now()}`,
-          attach: (md) => attached.push(md),
-          see: () => {},
-        });
-        log(`工具回来：${out.replace(/\s+/g, " ").slice(0, 80)}`);
-        send({ type: "conversation.item.create", item: { type: "function_call_output", call_id: e.call_id, output: clip(out, 4000) } });
-        // 挂上的文件卡片、图片：电话里念不出来，记进对话让他在页面上看
-        if (attached.length) save("assistant", attached.join("\n\n"));
-        send({ type: "response.create" });
-        break;
-      }
-      case "response.done": {
-        responding = false;
-        const r = e.response ?? {};
-        const u = r.usage ?? {};
-        tokens.audioIn += u.input_tokens_details?.audio_tokens ?? 0;
-        tokens.textIn += u.input_tokens_details?.text_tokens ?? 0;
-        tokens.audioOut += u.output_tokens_details?.audio_tokens ?? 0;
-        tokens.textOut += u.output_tokens_details?.text_tokens ?? 0;
-        const said = herText.trim();
-        if (said) {
-          // 被他打断的：只记说出口的那截
-          save("assistant", r.status === "cancelled" ? `${said}……` : said);
-          log(`她：${said.slice(0, 60)}${r.status === "cancelled" ? "（被打断）" : ""}`);
-          if (byePending && r.status !== "cancelled") {
-            byePending = false;
-            hangupAfterSaid();
+        if (heard && !voiceprint()) {
+          interrupt();
+          if (text.length >= 2) void autoEnroll(heard);
+          tell({ type: "you", text });
+        } else if (heard && voiceprint()) {
+          // 整句再认一遍（比开头那一秒准）；真杂音才当没听见
+          const score = await voiceprintScore(Buffer.concat(heard)).catch(() => null);
+          const ok = score === null || score >= VOICEPRINT_MIN;
+          const maybe = !ok && (score ?? 0) >= VOICEPRINT_MAYBE;
+          log(`声纹 整句 ${score?.toFixed(2)} ${ok ? "是他" : maybe ? "大概是他，先接着" : "不是他，不理"}：${text.slice(0, 20)}`);
+          if (!ok && !maybe) {
+            verdict = null;
+            break;
           }
+          if (verdict !== true) interrupt();
+          tell({ type: "you", text, unsure: maybe });
+        } else {
+          interrupt();
+          tell({ type: "you", text });
         }
-        herText = "";
-        flushNews();
+        verdict = null;
+        log(`他：${text}`);
+        if (isGoodbye(text)) {
+          byePending = true;
+          clearTimeout(byeLimit);
+          byeLimit = setTimeout(endBye, 25_000);
+        } else cancelBye();
+        answer(text);
         break;
       }
-      case "error": {
-        const msg = JSON.stringify(e.error ?? e).slice(0, 300);
-        // 取消一个已经结束的回复之类的小错，不影响通话
-        if (/cancel|no active response/i.test(msg)) break;
-        console.warn("[dongni][qwen] 报错：", msg);
-        tell({ type: "error", message: msg });
+      case "error":
+        console.warn("[dongni][qwen] 识别报错：", JSON.stringify(e.error).slice(0, 200));
         break;
-      }
     }
   });
-  up.on("unexpected-response", (_q, res) => {
-    tell({ type: "error", message: `连不上通义实时语音（HTTP ${res.statusCode}）` });
+  asr.on("unexpected-response", (_q, res) => {
+    tell({ type: "error", message: `连不上通义语音识别（HTTP ${res.statusCode}）` });
     close();
   });
-  up.on("error", (err) => {
+  asr.on("error", (err) => {
     tell({ type: "error", message: err.message });
     close();
   });
-  up.on("close", () => close());
+  asr.on("close", () => close());
 
-  // 页面送来的是 16k 单声道 16 位 PCM（20ms 一包）：攒到 100ms 再转发，少发点小包
+  // 页面传来的 16k PCM：攒 100ms 转给识别；文字消息是控制（手动录声纹）
   let chunk: Buffer[] = [];
   let size = 0;
-  page.on("message", (data: Buffer, isBinary: boolean) => {
-    if (!isBinary || !ready) return; // 文字控制消息（录声纹）这条路暂时不支持
-    chunk.push(Buffer.from(data));
-    size += data.length;
+  const ENROLL_BYTES = ENROLL_SECONDS * 32000;
+  page.on("message", async (data: Buffer, isBinary: boolean) => {
+    if (!isBinary) {
+      try {
+        if (JSON.parse(Buffer.from(data).toString()).type === "enroll") {
+          enrolling = [];
+          utter = null;
+          verdict = null;
+        }
+      } catch {}
+      return;
+    }
+    if (!ready || asr.readyState !== WebSocket.OPEN) return;
+    let pcm = Buffer.from(data);
+    if (enrolling) {
+      enrolling.push(pcm);
+      const got = enrolling.length * FRAME;
+      if (enrolling.length % 25 === 0) tell({ type: "enroll", progress: Math.min(1, got / ENROLL_BYTES) });
+      if (got >= ENROLL_BYTES) {
+        const all = Buffer.concat(enrolling);
+        enrolling = null;
+        const r = await enrollVoiceprint(all).catch((e) => ({ ok: false as const, message: e instanceof Error ? e.message : String(e) }));
+        tell(r.ok ? { type: "enrolled" } : { type: "enroll-failed", message: r.message });
+      }
+      pcm = Buffer.alloc(pcm.length); // 录的时候别让她听见
+    } else {
+      pre.push(pcm);
+      if (pre.length > 25) pre.shift();
+      if (utter) {
+        utter.push(pcm);
+        if (verdict === null && !checking && utter.length >= 60 && voiceprint()) void checkEarly(utter);
+      }
+    }
+    chunk.push(pcm);
+    size += pcm.length;
     if (size >= 3200) {
-      send({ type: "input_audio_buffer.append", audio: Buffer.concat(chunk).toString("base64") });
+      asr.send(JSON.stringify({ type: "input_audio_buffer.append", audio: Buffer.concat(chunk).toString("base64") }));
       chunk = [];
       size = 0;
     }
