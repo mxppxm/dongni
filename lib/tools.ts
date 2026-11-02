@@ -691,6 +691,8 @@ const TASK_TITLE: Record<string, (a: Record<string, unknown>) => string> = {
  * 后台做完：结果（连同挂上的图片、文件卡片）用她的口吻单独发一条进对话，电话里也会念。
  */
 const SOON_MS = 8_000;
+/** runToolSoon 转后台时返回的开头：对话那边认这个前缀，知道活已经交出去了 */
+export const BACKGROUND_PREFIX = "这件事";
 export async function runToolSoon(name: string, rawArgs: string, ctx: ToolCtx): Promise<string> {
   let late = false;
   const lateAttach: string[] = [];
@@ -713,7 +715,7 @@ export async function runToolSoon(name: string, rawArgs: string, ctx: ToolCtx): 
     ).catch(() => `「${what}」做完了：${out.slice(0, 300)}`);
     postAssistant(cards ? `${said}\n\n${cards}` : said);
   });
-  return `这件事（${what}）比较慢，已经转到后台接着做，做完会自动告诉他。现在别说做好了、也别编结果，就跟他说一句在弄，然后接着聊。`;
+  return `${BACKGROUND_PREFIX}（${what}）比较慢，已经转到后台接着做，做完会自动告诉他。现在别说做好了、也别编结果，就跟他说一句在弄，然后接着聊。`;
 }
 
 /** register=false：她自己后台顺手调的（比如主动消息每 15 分钟看一眼最近文件），不进任务栏，免得刷屏 */
