@@ -1,5 +1,6 @@
 import "server-only";
 import { db } from "./db";
+import { nowText } from "./memory";
 import { diaryOf } from "./diary";
 import { imagegenStatus } from "./imagegen";
 import { moodGenerating } from "./moods";
@@ -15,7 +16,8 @@ import { voiceReady } from "./voiceconfig";
  * 她自己看不到后台，不给她这份，她就只能顺着自己说过的话往下编。
  */
 export function selfState(): string {
-  const lines: string[] = [];
+  // 准确时间放在最前面、离回复最近：以前只写在长长的系统提示中间，电话里不思考直接答，就顺口编了个「十点二十五」
+  const lines: string[] = [`现在的准确时间：${nowText()}（他问时间、日期就照这个说——这就是你看到的钟，不用再「去看」）。`];
   lines.push(taskStateLines());
   lines.push(repairStatus());
   const jobs = listDispatches();

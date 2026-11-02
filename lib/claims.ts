@@ -40,6 +40,7 @@ export async function checkClaims(input: { reply: string; asked: string; tools: 
 需要真实操作才算数的事（括号里是对应的工具）：设/取消提醒（set_reminder / cancel_reminder）、改自己的代码（repair_self）、派活给后台执行器（dispatch_task）、停掉派出去的活（cancel_task）、写文件（write_file）、画图（generate_image）、拍照（take_photo）、查电脑上的文件或状态（list_dir / read_file / search_files / system_info）、换城市（set_city）。
 能证明「真做了」的只有两样：这一轮真实调用过的工具（下面列出），或者后台实时状态里写着的事（比如状态里有个派出去在跑的活，说「还在跑」就是真的）。
 不算问题的：
+- 跟后台实时状态对得上的：报的时间、日期和状态里的准确时间一致；说某件事「在做 / 做完了 / 没做成」，状态里正好写着；
 - 纯聊天、表达情绪、回忆聊过的事、给建议、讲知识、承认没做/做不了；
 - 「记住了」「我记下了」（聊过的话会自动整理进记忆，这句是真的）；
 - 假设、计划问句（「要不要我帮你设个提醒？」）、在说对方做的事；
@@ -56,7 +57,8 @@ ${input.reply.slice(0, 1500)}
 只输出 JSON：{"unbacked":true/false,"claim":"没被证实的那句原话（没有就空）","fix":"她该调用的工具名，或者「改口」"}`;
   try {
     return await Promise.race([
-      completeJson<Verdict>([{ role: "user", content: prompt }], 400, "none"),
+      // 稍微想一下再判：不思考时误判多，误判会逼她认一个不存在的错，反而说出新的错话
+      completeJson<Verdict>([{ role: "user", content: prompt }], 600, "low"),
       new Promise<null>((ok) => setTimeout(() => ok(null), 12_000)),
     ]);
   } catch (e) {
@@ -67,5 +69,5 @@ ${input.reply.slice(0, 1500)}
 
 /** 核对不过时塞给她的那句话：只给事实，让她自己选补做还是改口 */
 export function correction(v: Verdict) {
-  return `（系统核对：你刚才说「${v.claim.slice(0, 80)}」，但这一轮你没有真的调用工具去做，后台状态里也没有这件事——它实际上没有发生。现在二选一：能做就立刻调用对应的工具（${v.fix || "对应的工具"}）真的去做，做完再说；做不了或不该做，就用一句话自然地改口（比如「刚才说快了，其实还没弄」），并说清楚现在的真实情况。别重复刚才那句，别长篇道歉。）`;
+  return `（系统核对：你刚才说「${v.claim.slice(0, 80)}」，但这一轮你没有真的调用工具去做，后台状态里也没有这件事——它实际上没有发生。现在二选一：能做就立刻调用对应的工具（${v.fix || "对应的工具"}）真的去做，做完再说；做不了或不该做，就用一句话自然地改口（比如「刚才说快了，其实还没弄」），并说清楚现在的真实情况。别重复刚才那句，别长篇道歉。如果后台实时状态里其实写着这件事（比如确实在做、确实做完了、时间就是这个），那刚才的话是对的——照状态如实说一句就行，不要认错、不要说自己没做。）`;
 }
