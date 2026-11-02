@@ -1,9 +1,10 @@
 #!/bin/bash
 # 自我修复后重新编译、重启、体检（内核文件，自我修复不能改）。
 # 编译失败或重启后体检不过，就退回修改前的版本再编译重启，保证服务一定能起来。
-# 用法：scripts/rebuild.sh <修改前的 commit>
+# 用法：scripts/rebuild.sh <修改前的 commit> [这次修复的 commit]
 cd "$(dirname "$0")/.." || exit 1
 GOOD="$1"
+FIX="${2:-}"
 LOG=logs/self-repair.log
 STATUS=data/rebuild-result.json
 SVC="gui/$(id -u)/com.mico.dongni"
@@ -51,7 +52,15 @@ restart() {
 
 rollback() {
   log "退回 $GOOD（原因：$1）"
-  git reset --hard "$GOOD" >> "$LOG" 2>&1
+  # 只撤这次修复自己的提交；别人没提交的改动先 stash 留底，别人后来的提交不动
+  if [ -n "$(git status --porcelain)" ]; then
+    git stash push --include-untracked -m "重启退回前留底" >> "$LOG" 2>&1
+  fi
+  if [ -n "$FIX" ] && [ "$(git rev-parse HEAD)" != "$FIX" ]; then
+    git revert --no-edit "$FIX" >> "$LOG" 2>&1 || { git revert --abort >> "$LOG" 2>&1; log "撤销 $FIX 冲突了，需要人工看一眼"; }
+  else
+    git reset --hard "$GOOD" >> "$LOG" 2>&1
+  fi
   pnpm build >> "$LOG" 2>&1
   echo "{\"ok\":false,\"reason\":\"$1\"}" > "$STATUS"
   restart || log "退回后重启也没换成功，需要人工看一眼"

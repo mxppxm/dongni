@@ -12,7 +12,7 @@ import { completeJson } from "./llm";
 import { activeMemories, formatMemories, getProfile, nowText } from "./memory";
 import { INTRO, PERSONA, SPEAKING } from "./persona";
 import { pendingReminders } from "./reminders";
-import { postAssistant, startRepair } from "./selfrepair";
+import { EXTERNAL_FAULT, postAssistant, startRepair } from "./selfrepair";
 import { HONESTY, selfState } from "./selfstate";
 import { todayMe } from "./todayme";
 import { runTool } from "./tools";
@@ -37,6 +37,8 @@ const state = ((globalThis as unknown as { __dongniProactive?: { running: boolea
  * 于是每 15 分钟就重新「发现」同一个毛病、再改一遍，永远停不下来。
  */
 const ERR_CAP = 64 * 1024;
+/** 自己回看后提的改进，一天最多交一次（以前只记不查，一天能交十几次同样的事） */
+const IMPROVE_GAP_MS = 24 * 3600_000;
 /** 工具参数正文里也会出现「失败」「Error」，那是请求内容而不是出错，别当由头 */
 const ERR_NOISE = /repair_self\{|工具 [a-z_]+\{/;
 
@@ -53,7 +55,7 @@ function recentErrors() {
       .subarray(Math.max(from, size - ERR_CAP))
       .toString("utf8")
       .split("\n")
-      .filter((l) => /失败|Error|error/.test(l) && !ERR_NOISE.test(l))
+      .filter((l) => /失败|Error|error/.test(l) && !ERR_NOISE.test(l) && !EXTERNAL_FAULT.test(l))
       .slice(-15)
       .join("\n");
   } catch {
@@ -214,7 +216,7 @@ export async function proactiveTick() {
   try {
     const recent = (d.prepare("SELECT * FROM messages WHERE status = 'done' AND kind != 'system' ORDER BY id DESC LIMIT 24").all() as MessageRow[]).reverse();
     const chat = recent.map((m) => `${m.role === "user" ? "对方" : "你"}（${nowText(m.created_at)}）：${m.content}`).join("\n");
-    const files = await runTool("recent_files", JSON.stringify({ days: 0 }));
+    const files = await runTool("recent_files", JSON.stringify({ days: 0 }), undefined, { register: false });
     // 他把「自己改自己」关了，就别回看日志找毛病了——不然她只会拿这些来跟他念叨
     const canImprove = getKv("repair_paused") !== "1";
     // 去重用的上下文：他上一条之后她说过什么、他沉默多久了
@@ -303,7 +305,10 @@ ${
         deliver(text, quiet, today, todayCount, gate.sig);
       }
     }
-    if (canImprove && r.improve?.trim()) {
+    const lastImprove = Number(getKv("improve_last_at") ?? 0);
+    if (canImprove && r.improve?.trim() && now - lastImprove < IMPROVE_GAP_MS) {
+      console.log(`[dongni] 想改自己，但离上次自己提的改进还不到一天，先不交：${r.improve.trim()}`);
+    } else if (canImprove && r.improve?.trim()) {
       // 第 5 步：把「要改什么」交给编码助手——失手也别连着上面那句一起算成「没想出发什么」
       try {
         setKv("improve_last_at", String(now));

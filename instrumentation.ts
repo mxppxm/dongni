@@ -25,10 +25,15 @@ export async function register() {
 
   // 衣橱：缺的定妆照补上；相册：白天他来过就拍今天这张
   const { ensureWardrobe, dailyTick } = await import("./lib/wardrobe");
-  void ensureWardrobe()
-    .then(() => dailyTick())
-    .then(async () => (await import("./lib/diary")).diaryTick());
   // 她自己的日记：每天一篇
   const { diaryTick } = await import("./lib/diary");
-  setInterval(() => void dailyTick().then(() => diaryTick()), 15 * 60_000);
+  // 拍照和写日记各管各的：拍照那边模型超时，不能把这一轮的日记也带没了
+  const photoAndDiary = () => {
+    dailyTick().catch((e) => console.error("[dongni] 今天的照片没弄成：", e));
+    diaryTick().catch((e) => console.error("[dongni] 日记没写成：", e));
+  };
+  void ensureWardrobe()
+    .catch((e) => console.error("[dongni] 衣橱准备失败：", e))
+    .then(photoAndDiary);
+  setInterval(photoAndDiary, 15 * 60_000);
 }

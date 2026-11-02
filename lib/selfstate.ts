@@ -5,6 +5,7 @@ import { imagegenStatus } from "./imagegen";
 import { moodGenerating } from "./moods";
 import { pendingReminders } from "./reminders";
 import { repairStatus } from "./selfrepair";
+import { listDispatches } from "./superagent";
 import { photoState } from "./wardrobe";
 import { voiceReady } from "./voiceconfig";
 
@@ -15,6 +16,12 @@ import { voiceReady } from "./voiceconfig";
 export function selfState(): string {
   const lines: string[] = [];
   lines.push(repairStatus());
+  const jobs = listDispatches();
+  lines.push(
+    jobs.length
+      ? `派出去的活：${jobs.map((j) => `${j.id}「${j.title.slice(0, 24)}」${j.running ? `在跑（${Math.max(1, Math.round((Date.now() - j.startedAt) / 60000))} 分钟了）` : "正在停下"}`).join("；")}。`
+      : "现在没有派出去在跑的活。",
+  );
   lines.push(imagegenStatus());
   const mood = moodGenerating();
   lines.push(mood ? `正在给自己画新样子「${mood}」。` : "没有在画新样子。");

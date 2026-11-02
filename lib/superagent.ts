@@ -5,7 +5,7 @@ import path from "node:path";
 import { getKv, setKv } from "./db";
 import { postAssistant } from "./selfrepair";
 import { speakAsHer } from "./speak";
-import { runWorker } from "./worker";
+import { NO_ACTION_PREFIX, runWorker } from "./worker";
 import { finishTask, startTask } from "./tasks";
 
 /**
@@ -97,7 +97,8 @@ export function judge(task: string, opts: { force?: boolean } = {}): Judgement {
 
 // ─────────────────────────── 派出去 ───────────────────────────
 
-type Job = { id: string; task: string; dir: string; since: number };
+/** ac：叫停这件活的开关（超期、他喊停都走它）；taskId：任务面板里那一行 */
+type Job = { id: string; task: string; dir: string; since: number; taskId: number; ac: AbortController };
 const state = ((globalThis as unknown as { __dongniSuper?: { jobs: Map<string, Job> } }).__dongniSuper ??= {
   jobs: new Map<string, Job>(),
 });
@@ -107,16 +108,61 @@ function log(line: string) {
   fs.appendFileSync(path.join(LOGDIR, "dispatch.log"), `[${new Date().toLocaleString("zh-CN", { hour12: false })}] ${line}\n`);
 }
 
+function saveJobs() {
+  setKv(
+    "super_jobs",
+    JSON.stringify([...state.jobs.values()].map((j) => ({ id: j.id, task: j.task.slice(0, 60), dir: j.dir, since: j.since }))),
+  );
+}
+
 export function runningJobs(): Job[] {
-  // 进程被重启、runJob 半路炸掉，都可能留下永远「在跑」的僵尸条目；超时的直接清掉，
+  // 进程被重启、runJob 半路炸掉，都可能留下永远「在跑」的僵尸条目；超时的清掉，
   // 不然 MAX_RUNNING 被它们占满，后面每件都只能回「先排队」，他那边看到的就是「说了派人但啥也没动」。
+  // 清之前先真叫停：只删名单不停执行器，名额空出来了，真正在跑的却比 MAX_RUNNING 多。
   for (const [id, j] of state.jobs) {
     if (Date.now() - j.since > TIMEOUT_MS + 5 * 60_000) {
+      try {
+        j.ac?.abort(new Error("超期没收尾，强制停下"));
+      } catch {}
       state.jobs.delete(id);
-      log(`${id} 超期没动静，从在跑名单里清掉`);
+      if (j.taskId) finishTask(j.taskId, false, "超期没收尾，强制停下");
+      log(`${id} 超期没动静，叫停并从在跑名单里清掉`);
     }
   }
   return [...state.jobs.values()];
+}
+
+/** 给聊天工具看：现在后台有哪些活。running=false 表示已经喊停、正在收尾 */
+export function listDispatches(): { id: string; title: string; startedAt: number; running: boolean }[] {
+  return runningJobs().map((j) => ({
+    id: j.id,
+    title: j.task.replace(/\s+/g, " ").slice(0, 60),
+    startedAt: j.since,
+    running: !j.ac?.signal.aborted,
+  }));
+}
+
+/** 叫停一件后台活：真停执行器（等模型的那步立刻退出、命令连进程组掐掉），不是只删名单 */
+export function cancelDispatch(id?: string): { ok: boolean; cancelled: string[]; why?: string } {
+  const live = runningJobs().filter((j) => !j.ac?.signal.aborted);
+  if (!live.length) return { ok: false, cancelled: [], why: "后台现在没有在跑的活。" };
+  let job: Job | undefined;
+  if (id?.trim()) {
+    const want = id.trim().toUpperCase();
+    job = live.find((j) => j.id.toUpperCase() === want);
+    if (!job) return { ok: false, cancelled: [], why: `没找到在跑的 ${id.trim()}，现在在跑的是：${live.map((j) => j.id).join("、")}。` };
+  } else if (live.length > 1) {
+    return {
+      ok: false,
+      cancelled: [],
+      why: `现在有 ${live.length} 件在跑，得说停哪件：${live.map((j) => `${j.id}（${j.task.slice(0, 20)}）`).join("、")}。`,
+    };
+  } else job = live[0];
+
+  job.ac?.abort(new Error("他叫停了"));
+  finishTask(job.taskId, false, "他叫停了，没做完");
+  log(`${job.id} 被叫停`);
+  return { ok: true, cancelled: [job.id] };
 }
 
 /** 工作目录：默认主目录；给了就以给了的为准，但不许出主目录，也不许进凭证目录 */
@@ -138,23 +184,18 @@ export function dispatch(task: string, dir?: string): string {
 
   const cwd = safeDir(dir);
   const id = `S${Date.now().toString().slice(-6)}`;
-  const job: Job = { id, task: t, dir: cwd, since: Date.now() };
+  const taskId = startTask("super", `后台执行：${t.replace(/\s+/g, " ").slice(0, 26)}`);
+  const job: Job = { id, task: t, dir: cwd, since: Date.now(), taskId, ac: new AbortController() };
   state.jobs.set(id, job);
-  setKv(
-    "super_jobs",
-    JSON.stringify([...state.jobs.values()].map((j) => ({ id: j.id, task: j.task.slice(0, 60), dir: j.dir, since: j.since }))),
-  );
+  saveJobs();
   log(`==== ${id} 开始｜目录 ${cwd}｜${t}`);
 
-  const taskId = startTask("super", `后台执行：${t.replace(/\s+/g, " ").slice(0, 26)}`);
   void runJob(job, taskId).catch((e) => {
-    // runJob 自己不该抛；真抛了也不能让这件活从名单里消失（名额被占满，后面全变「先排队」）
+    // runJob 自己不该抛；真抛了也得把名额还出来、把执行器停掉
     const msg = e instanceof Error ? e.message : String(e);
+    job.ac.abort(new Error("半路炸了"));
     state.jobs.delete(job.id);
-    setKv(
-      "super_jobs",
-      JSON.stringify([...state.jobs.values()].map((j) => ({ id: j.id, task: j.task.slice(0, 60), dir: j.dir, since: j.since }))),
-    );
+    saveJobs();
     log(`${id} 半路炸了：${msg}`);
     finishTask(taskId, false, msg.slice(0, 400));
     try {
@@ -173,34 +214,51 @@ async function runJob(job: Job, taskId: number) {
   const t0 = Date.now();
   let failed = false;
   let text = "";
+  // 硬截止：budgetMs 只是让它自己收尾，到 TIMEOUT_MS 还没收就真停
+  const hard = setTimeout(() => job.ac.abort(new Error(`超过 ${TIMEOUT_MS / 60_000} 分钟没收尾，强制停下`)), TIMEOUT_MS);
   try {
     text = await runWorker({
       task: job.task,
       dir: job.dir,
       budgetMs: TIMEOUT_MS - 60_000,
+      signal: job.ac.signal,
       log: (entry) => {
         try {
           fs.appendFileSync(trace, JSON.stringify(entry) + "\n");
         } catch {}
       },
     });
-    if (/^(没做成|步数用完了|那件事没跑起来)/.test(text)) failed = true;
+    if (/^(没做成|步数用完了|那件事没跑起来)/.test(text) || text.startsWith(NO_ACTION_PREFIX)) failed = true;
   } catch (e) {
     failed = true;
     const msg = e instanceof Error ? e.message : String(e);
-    text = `执行器半路出错：${msg}`;
+    text = job.ac.signal.aborted ? `中途停下了：${msg}` : `执行器半路出错：${msg}`;
     log(`${job.id} 抛错：${msg}`);
+  } finally {
+    clearTimeout(hard);
+    state.jobs.delete(job.id); // 跑完就把名额还出来，别等超期清理
+    saveJobs();
   }
+  // 叫停/超期强停：哪怕执行器刚好在这时交了卷，也按「停下了」报，不说办完了
+  const stopped = job.ac.signal.aborted;
+  if (stopped) failed = true;
   const ok = !failed;
-  setKv("super_last", JSON.stringify({ id: job.id, at: Date.now(), ok, text: text.slice(0, 2000) }));
-  log(`${job.id} 结束｜${ok ? "ok" : "失败"}｜用时 ${Math.round((Date.now() - t0) / 1000)} 秒｜${text.slice(0, 300)}`);
+  setKv("super_last", JSON.stringify({ id: job.id, at: Date.now(), ok, stopped, text: text.slice(0, 2000) }));
+  log(`${job.id} 结束｜${stopped ? "被停下" : ok ? "ok" : "失败"}｜用时 ${Math.round((Date.now() - t0) / 1000)} 秒｜${text.slice(0, 300)}`);
   finishTask(taskId, ok, text.slice(0, 400));
 
   const short = text.length > 700 ? text.slice(0, 700) + "\n……（后面还有，日志里有）" : text;
   // 兜底句必须自带正文：说不上话的时候，用户至少能看到到底做成了什么
-  const fallback = ok ? `那件事办完了，它是这么说的：\n\n${short}` : `那件事没办成，它是这么说的：\n\n${short}`;
+  const fallback = stopped
+    ? `那件事（${job.id}）停下了，没做完：\n\n${short}`
+    : ok
+      ? `那件事办完了，它是这么说的：\n\n${short}`
+      : `那件事没办成，它是这么说的：\n\n${short}`;
+  const brief = stopped
+    ? `你让后台执行器干的那件事（${job.task.slice(0, 40)}）被停下了，没做完，别说成办完了。停下的原因和进度：\n${short}`
+    : `你让后台执行器干的那件事（${job.task.slice(0, 40)}）回来了，结果原文是：\n${short}`;
   try {
-    const said = await speakAsHer(`你让后台执行器干的那件事（${job.task.slice(0, 40)}）回来了，结果原文是：\n${short}`, fallback, {
+    const said = await speakAsHer(brief, fallback, {
       fresh: true,
     });
     postAssistant(said && said.trim() ? said : fallback);

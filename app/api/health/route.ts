@@ -14,14 +14,13 @@ export async function GET() {
   } catch (e) {
     return Response.json({ ok: false, error: String(e) }, { status: 500 });
   }
-  let model = "ok";
-  try {
+  // 模型只探一下、最多等 8 秒：重启后的体检每次最多等 60 秒，模型慢了不能拖成「不健康」把好好的修改退回去
+  const probe = (async () => {
     let text = "";
     for await (const ev of streamChat([{ role: "user", content: "只回复：ok" }])) if (ev.type === "text") text += ev.text;
-    if (!text.trim()) model = "empty";
-  } catch (e) {
-    model = `fail: ${e instanceof Error ? e.message : e}`;
-  }
+    return text.trim() ? "ok" : "empty";
+  })().catch((e) => `fail: ${e instanceof Error ? e.message : e}`);
+  const model = await Promise.race([probe, new Promise<string>((ok) => setTimeout(() => ok("slow（8 秒没回，不影响体检）"), 8000))]);
   return Response.json({ ok: true, base, model });
 }
 

@@ -1,5 +1,5 @@
 import "server-only";
-import { execFile, spawn } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -9,11 +9,17 @@ import { db, getKv, setKv } from "./db";
 import { speakAsHer } from "./speak";
 import { onCall, whenOffCall } from "./presence";
 import { stallWatchdog } from "./stall";
+import { listDispatches } from "./superagent";
 import { finishTask, startTask } from "./tasks";
 
 /**
  * 自我修复：把用户的要求交给 pi（编码 agent）去改本项目的代码，
  * 改完做类型检查 → 提交 → 后台重新编译并重启。任何一步失败都退回修改前的版本。
+ *
+ * 跟别人共用一个代码目录，所以：
+ * - 只在工作区干净时开工；有别人没提交的改动就先排队，不把别人的东西吞进自己的提交。
+ * - 退回用 git stash 留底，不用 reset --hard / clean，谁的改动都不会被删掉。
+ * - 同一件事连着两次没改成就不再改，改不动的（外部接口没授权、网络不通）也不该反复交给编码助手。
  */
 const run = promisify(execFile);
 const ROOT = process.cwd();
@@ -118,6 +124,11 @@ const utf8Env = (): NodeJS.ProcessEnv => ({
   RUBYOPT: [process.env.RUBYOPT, "-Eutf-8"].filter(Boolean).join(" "),
 });
 
+/** 明细落盘：长字段（工具结果、提示词）截短，但整行还是合法 JSON，事后能解析 */
+function slimJson(v: unknown) {
+  return JSON.stringify(v, (_k, x) => (typeof x === "string" && x.length > 1500 ? `${x.slice(0, 1500)}…（共 ${x.length} 字）` : x));
+}
+
 async function runPiOnce(request: string): Promise<string> {
   const dir = path.join(ROOT, "logs", "pi");
   fs.mkdirSync(dir, { recursive: true });
@@ -134,6 +145,8 @@ async function runPiOnce(request: string): Promise<string> {
     let finalText = "";
     let lastAt = Date.now();
     let stalled = false;
+    /** pi 最后一条回话是怎么结束的：error / aborted 说明它其实没干完，只是进程正常退出了 */
+    let stopReason = "";
     let steps = 0;
     let toolMs = 0;
     const toolStart = new Map<string, { at: number; what: string }>();
@@ -154,8 +167,9 @@ async function runPiOnce(request: string): Promise<string> {
         }
       }
       if (type === "message_end") {
-        const m = e.message as { role?: string; content?: unknown };
+        const m = e.message as { role?: string; content?: unknown; stopReason?: string };
         if (m?.role === "assistant") {
+          stopReason = String(m.stopReason ?? "");
           const c = m.content;
           const text = typeof c === "string" ? c : Array.isArray(c) ? c.filter((x) => x?.type === "text").map((x) => x.text).join("") : "";
           if (text.trim()) finalText = text.trim();
@@ -168,7 +182,7 @@ async function runPiOnce(request: string): Promise<string> {
       touch: () => lastAt,
       onStall: () => {
         stalled = true;
-        log(`pi 卡住了：${Math.round(STALL_MS / 1000)} 秒没有任何输出，杀掉重来`);
+        log(`pi 卡住了：${Math.round((Date.now() - lastAt) / 1000)} 秒没有任何输出（已跑 ${Math.round((Date.now() - t0) / 1000)} 秒），杀掉重来`);
         child.kill("SIGTERM");
         setTimeout(() => child.kill("SIGKILL"), 5000);
       },
@@ -186,7 +200,7 @@ async function runPiOnce(request: string): Promise<string> {
         try {
           const e = JSON.parse(line);
           // message_update 是逐字增量，太多了，不落盘
-          if (e.type !== "message_update") fs.appendFileSync(trace, JSON.stringify({ t: at - t0, ...e }).slice(0, 4000) + "\n");
+          if (e.type !== "message_update") fs.appendFileSync(trace, slimJson({ t: at - t0, ...e }) + "\n");
           onEvent(e, at);
         } catch {
           // 不是 json 的行忽略
@@ -200,13 +214,18 @@ async function runPiOnce(request: string): Promise<string> {
     child.on("error", reject);
     child.on("close", (code) => {
       stopWatchdog();
-      if (stalled) return reject(new Error(`STALLED：${Math.round((Date.now() - t0) / 1000)} 秒没动静，已杀掉`));
+      if (stalled) return reject(new Error(`STALLED：连着 ${Math.round(STALL_MS / 1000)} 秒没动静（一共跑了 ${Math.round((Date.now() - t0) / 1000)} 秒），已杀掉`));
       const total = Date.now() - t0;
       const sec = (ms: number) => `${Math.round(ms / 1000)} 秒`;
       log(
         `pi 退出 code=${code}｜用时 ${sec(total)}，${steps} 步，模型思考约 ${sec(total - toolMs)}，跑命令 ${sec(toolMs)}；最慢一步 ${sec(slowest.ms)}：${slowest.what}｜明细 ${path.relative(ROOT, trace)}\n--- 结果 ---\n${finalText}\n--- stderr ---\n${err.slice(-4000)}`,
       );
-      if (code === 0) resolve(finalText);
+      // 进程正常退出不等于干完了：最后一句是连接出错 / 被中止，或者压根没给结论，都按没改成算，
+      // 不能记成「看过了，不用改」——不然下一轮又会把同一件事提一遍
+      if (code === 0 && (stopReason === "error" || stopReason === "aborted"))
+        reject(new Error(`pi 半路出错了（${stopReason}），没干完：${finalText.slice(-300) || "没有结论"}`));
+      else if (code === 0 && !finalText) reject(new Error("pi 退出了，但没给任何结论"));
+      else if (code === 0) resolve(finalText);
       else reject(new Error(`pi 退出码 ${code}：${(err || finalText).slice(-500)}`));
     });
   });
@@ -247,6 +266,84 @@ function queue(): string[] {
   }
 }
 
+/** 改过的记录：同一件事改不成就别一遍遍再交出去（日志里同一个天气兜底交了 5 次、抓 GitHub 那件 6 次） */
+type Attempt = { req: string; at: number; ok: boolean };
+const HISTORY_KEY = "repair_history";
+const HISTORY_DAYS = 3;
+
+function attempts(): Attempt[] {
+  try {
+    const all = JSON.parse(getKv(HISTORY_KEY) || "[]") as Attempt[];
+    return all.filter((a) => Date.now() - a.at < HISTORY_DAYS * 86400_000);
+  } catch {
+    return [];
+  }
+}
+
+function noteAttempt(req: string, ok: boolean) {
+  setKv(HISTORY_KEY, JSON.stringify([...attempts(), { req: req.slice(0, 300), at: Date.now(), ok }].slice(-60)));
+}
+
+/** 去掉套话后的字二元组；措辞每次不一样，但讲的是同一件事时重合度很高 */
+function grams(t: string) {
+  const s = t.replace(/（这是你自己回看后决定的改进）|[\s\p{P}\p{S}]/gu, "");
+  const g = new Set<string>();
+  for (let i = 0; i < s.length - 1; i++) g.add(s.slice(i, i + 2));
+  return g;
+}
+
+function similar(a: string, b: string) {
+  const x = grams(a);
+  const y = grams(b);
+  if (!x.size || !y.size) return 0;
+  let both = 0;
+  for (const k of x) if (y.has(k)) both++;
+  return both / Math.min(x.size, y.size);
+}
+
+/** 这件事最近是不是已经改不成好几次了，或者刚刚改好过 */
+function repeatOf(request: string): string | null {
+  const near = attempts().filter((a) => similar(a.req, request) >= 0.6);
+  const failed = near.filter((a) => !a.ok).length;
+  if (failed >= 2) return `同一件事这三天已经改了 ${failed} 次都没改成`;
+  if (near.some((a) => a.ok && Date.now() - a.at < 86400_000)) return "同一件事今天刚改好过";
+  return null;
+}
+
+/**
+ * 日志里这类错是外面的事（接口没授权、额度、限流、域名解析不了），改代码改不好，不拿去当改自己的由头。
+ * 超时不在里面：执行器 60 秒就判死那种超时是代码的问题，得能改。
+ */
+export const EXTERNAL_FAULT =
+  /\b(401|403|429)\b|not granted|unauthori[sz]ed|forbidden|quota|额度|欠费|余额不足|ENOTFOUND|EAI_AGAIN|ECONNREFUSED/i;
+
+/** 代码目录里有没有别人没提交的改动（data/、logs/ 都在忽略规则里，不算） */
+async function dirtyFiles() {
+  return (await git("status", "--porcelain")).stdout.split("\n").filter(Boolean);
+}
+
+function dirtyNow() {
+  try {
+    return execFileSync("git", ["status", "--porcelain"], { cwd: ROOT, encoding: "utf8" }).split("\n").filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+let dirtyRetry: NodeJS.Timeout | null = null;
+
+/** 改到一半退回：用 stash 留底，不删任何东西；万一是别人的改动混进来了，也能从 stash 里找回 */
+async function shelve(why: string) {
+  if (!(await dirtyFiles()).length) return;
+  await git("stash", "push", "--include-untracked", "-m", `自我修复退回留底：${why.slice(0, 60)}`).catch((e) =>
+    log(`stash 留底失败：${e instanceof Error ? e.message : e}`),
+  );
+}
+
+/** 正在进行中的那次改动，记在库里：pi 跑到一半服务被重启了，回来能收拾干净 */
+const INFLIGHT_KEY = "repair_inflight";
+type Inflight = { request: string; good: string; taskId: number; at: number };
+
 export function drainRepairQueue() {
   if (state.running) return;
   const q = queue();
@@ -258,9 +355,24 @@ export function drainRepairQueue() {
 export function startRepair(request: string): string {
   if (getKv("repair_paused") === "1")
     return "改自己的功能现在被对方暂停了（对方让别人来改）。这次没有交出去，别说你在改；如实告诉对方，你把想法记下了。";
+  const again = repeatOf(request);
+  if (again) {
+    log(`不再交出去（${again}）：${request}`);
+    return `这件没有交出去：${again}，再改也是白改。别说你在改；如实告诉对方，这事可能要他来看（比如外面的接口、账号、网络的问题）。`;
+  }
   if (state.running) {
+    if (queue().some((q) => similar(q, request) >= 0.6))
+      return "同样的事已经在排队了，这次没有重复交。如实告诉对方前面排着呢。";
     setKv("repair_queue", JSON.stringify([...queue(), request]));
     return "前面还有一处正在改，这个已经排上队了：前一个改完（可能会重启一下）就接着改这个。如实告诉对方要排一会儿。";
+  }
+  // 有人（他、或者别的助手）正在改代码：不碰，排回队首，过一阵再看。要在答话之前查——不然嘴上说「开始改了」其实没动
+  const dirty = dirtyNow();
+  if (dirty.length) {
+    log(`代码目录里有没提交的改动，先不动，10 分钟后再看：${dirty.slice(0, 5).join(" ")}`);
+    setKv("repair_queue", JSON.stringify([request, ...queue().filter((q) => q !== request)]));
+    if (!dirtyRetry) dirtyRetry = setTimeout(() => ((dirtyRetry = null), drainRepairQueue()), 10 * 60_000);
+    return "现在代码目录里有别人正在改的东西，这件先排着没开始改，等那边弄完（十分钟后再看一次）。如实告诉对方还没开始。";
   }
   state.running = request.slice(0, 40);
   setKv("repair_started_at", String(Date.now()));
@@ -273,9 +385,8 @@ export function startRepair(request: string): string {
     let good = "";
     try {
       log(`==== 开始：${request}`);
-      await git("add", "-A");
-      await git("commit", "-q", "--allow-empty", "-m", `自我修复前：${request.slice(0, 60)}`);
       good = await head();
+      setKv(INFLIGHT_KEY, JSON.stringify({ request, good, taskId, at: Date.now() } satisfies Inflight));
 
       let summary = await runPi(request);
       await guard(good);
@@ -283,6 +394,7 @@ export function startRepair(request: string): string {
       if (!changed) {
         await say(`你看了一圈，这次没有改代码。编码助手的说明：${summary}`, "看了一圈，这次没动代码。");
         taskOk = true;
+        noteAttempt(request, false); // 没动代码也不算解决了：同一件事别再一遍遍交出去
         return;
       }
       try {
@@ -297,9 +409,13 @@ export function startRepair(request: string): string {
       }
       await git("add", "-A");
       await git("commit", "-q", "-m", `自我修复：${request.slice(0, 60)}`);
+      const fix = await head();
+      setKv(INFLIGHT_KEY, "");
+      noteAttempt(request, true);
       setKv("repair_summary", summary);
       log("提交完成，后台重新编译并重启");
       // 正在打电话就先别重启（重启会把电话挂断），挂了再重启；但不能一直等——挂了电话这件事本身也可能正是这次改的内容
+      await waitIdle();
       if (onCall()) {
         await say(
           `你刚把自己改好了，但你正在打电话，我不挂你电话：等你挂了我就重启，半分钟回来。改了什么（编码助手的说明，挑他关心的说一句就够）：${summary}`,
@@ -316,7 +432,7 @@ export function startRepair(request: string): string {
       }
       // 新起一个进程组去编译重启，自己被重启也不影响它
       restarting = true;
-      const child = spawn("/bin/bash", [path.join(ROOT, "scripts", "rebuild.sh"), good], {
+      const child = spawn("/bin/bash", [path.join(ROOT, "scripts", "rebuild.sh"), good, fix], {
         cwd: ROOT,
         env: utf8Env(),
         detached: true,
@@ -327,25 +443,67 @@ export function startRepair(request: string): string {
       const msg = e instanceof Error ? e.message : String(e);
       log(`失败：${msg}`);
       if (good) {
-        await git("reset", "--hard", good).catch(() => {});
-        // 改到一半新建的文件也清掉，不然会混进下一次的「修改前」版本
-        await git("clean", "-fd", "-e", "data", "-e", "logs").catch(() => {});
+        await shelve(request);
+        setKv(INFLIGHT_KEY, "");
+        noteAttempt(request, false);
       }
       await say(`这次改自己没改成，已经退回原样，什么都没坏。原因（技术细节别说）：${msg.slice(0, 200)}`, "这次没改成，已经退回原样了，啥也没坏。");
     } finally {
+      state.running = null;
       setKv("repair_last_at", String(Date.now()));
       setKv("repair_last_result", `${restarting ? "改好了" : "没改成或没改动"}（${request.slice(0, 30)}…）`);
-      state.running = null;
       if (!restarting) finishTask(taskId, taskOk, taskOk ? "看过了，没动代码" : "没改成，已退回原样");
       // 要重启的话交给重启后的新进程接着改，否则这里直接接着改下一个
       if (!restarting) setTimeout(drainRepairQueue, 1000);
     }
   })();
-  return "已经开始改了。改代码要几分钟，改好会在对话里告诉对方，然后自动重启。";
+  return "已经交给编码助手开始改了。改代码要几分钟，改好会在对话里告诉对方，然后自动重启。";
+}
+
+/**
+ * 重启前等手上的事做完：电话（单独处理）、派出去的活、正在生成的回复。
+ * 不然派活被拦腰杀掉，回复被重启后重新生成还会把工具再调一遍。最多等 15 分钟。
+ */
+async function waitIdle() {
+  const busy = () => {
+    const why: string[] = [];
+    if (listDispatches().some((d) => d.running)) why.push("派出去的活");
+    const cur = (globalThis as unknown as { __dongniRunning?: { cur: unknown } }).__dongniRunning?.cur;
+    if (cur) why.push("正在说的回复");
+    return why;
+  };
+  const until = Date.now() + 15 * 60_000;
+  let told = false;
+  for (let why = busy(); why.length && Date.now() < until; why = busy()) {
+    if (!told) log(`等${why.join("、")}结束再重启（最多 15 分钟）`);
+    told = true;
+    await new Promise((ok) => setTimeout(ok, 5000));
+  }
+}
+
+/**
+ * 启动时收拾：上一次 pi 跑到一半服务被重启了（pi 跟着服务一起没了），
+ * 改了一半的文件 stash 留底，任务栏那件收尾，免得下一次把半成品当成「好的版本」。
+ */
+export function recoverInterruptedRepair() {
+  let r: Inflight | null = null;
+  try {
+    r = JSON.parse(getKv(INFLIGHT_KEY) || "null") as Inflight | null;
+  } catch {}
+  if (!r || state.running) return;
+  setKv(INFLIGHT_KEY, "");
+  log(`上次改到一半服务被重启了，收拾掉：${r.request}`);
+  void shelve(r.request).then(() => {
+    noteAttempt(r.request, false);
+    finishTask(r.taskId, false, "改到一半服务重启了，没改成，已退回");
+    setKv("repair_last_at", String(Date.now()));
+    setKv("repair_last_result", `没改成：改到一半被重启打断（${r.request.slice(0, 30)}…）`);
+  });
 }
 
 /** 启动时：如果是自我修复后的重启，把结果告诉用户 */
 export function reportRebuild() {
+  recoverInterruptedRepair();
   if (!fs.existsSync(RESULT)) return;
   try {
     const r = JSON.parse(fs.readFileSync(RESULT, "utf8")) as { ok: boolean; reason?: string };

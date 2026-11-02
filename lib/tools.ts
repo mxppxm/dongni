@@ -11,7 +11,7 @@ import { createMood } from "./moods";
 import { setCity, takeDailyPhoto, today, wardrobeFile } from "./wardrobe";
 import { addLocalImage, IMAGE_EXT, imageMarkdown } from "./images";
 import { startRepair } from "./selfrepair";
-import { dispatch, judge, runningJobs } from "./superagent";
+import { cancelDispatch, dispatch, judge, runningJobs } from "./superagent";
 import { finishTask, startTask } from "./tasks";
 import { saveVoiceConfig, voiceReady } from "./voiceconfig";
 
@@ -287,7 +287,13 @@ async function writeFile({ name, content, dir }: { name: string; content: string
 
   // 写给他的文档（不是代码）：按 Humanizer-zh 去一遍 AI 味再存
   const prose = /\.(md|txt|markdown)$/i.test(file) && !/```/.test(content);
-  const humanized = prose ? await humanize(content, "写给对方看的文档") : null;
+  // 去 AI 味最慢能拖好几分钟，回复队列一直被它占着（电话里也只能干等）：最多等 40 秒，来不及就存原文
+  const humanized = prose
+    ? await Promise.race([
+        humanize(content, "写给对方看的文档"),
+        new Promise<{ text: string; degraded: boolean }>((ok) => setTimeout(() => ok({ text: content, degraded: true }), 40_000)),
+      ])
+    : null;
   const body = humanized?.text ?? content;
   try {
     await fs.writeFile(file, body, "utf8");
@@ -426,6 +432,17 @@ export const TOOLS = [
   {
     type: "function",
     function: {
+      name: "cancel_task",
+      description: "把派出去、还在跑的活真的停掉（他说「别弄了」「停下」「先不用了」时用）。不调用这个，活就还在跑，不能说「停了」。只有一件在跑时 id 可以不写。",
+      parameters: {
+        type: "object",
+        properties: { id: { type: "string", description: "要停的那件的编号（dispatch_status 里看得到），只有一件在跑时可省" } },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "humanize_text",
       description: "帮他把一段文字去 AI 味（他说「帮我改得像人写的」「去去 AI 味」「润色一下」时用）。只改表达，不加事实。genre 写文体，如 公众号文章、邮件、周报、朋友圈。",
       parameters: { type: "object", properties: { text: { type: "string" }, genre: { type: "string" } }, required: ["text"] },
@@ -547,6 +564,10 @@ const IMPL: Record<string, (a: never, ctx?: ToolCtx) => Promise<string>> = {
         .join("\n")
     );
   }) as (a: never, ctx?: ToolCtx) => Promise<string>,
+  cancel_task: (async ({ id }: { id?: string }) => {
+    const r = cancelDispatch(id?.trim() || undefined);
+    return r.ok ? `已经停掉了：${r.cancelled.join("、")}。可以跟他说停了。` : `出错了：没停成——${r.why}。别说停了，照实告诉他。`;
+  }) as (a: never, ctx?: ToolCtx) => Promise<string>,
   humanize_text: (async ({ text, genre }: { text: string; genre?: string }) => {
     if (!text?.trim()) return "没给要改的文字。";
     const out = await humanize(text, genre || "随笔");
@@ -643,10 +664,12 @@ const TASK_TITLE: Record<string, (a: Record<string, unknown>) => string> = {
   set_voice_key: () => "配语音 key",
   dispatch_task: (a) => `派活：${short(a.task)}`,
   dispatch_status: () => "看派出去的活",
+  cancel_task: (a) => `叫停派出去的活${a.id ? ` ${short(a.id)}` : ""}`,
   write_file: (a) => `写文件 ${short(a.name)}`,
 };
 
-export async function runTool(name: string, rawArgs: string, ctx?: ToolCtx): Promise<string> {
+/** register=false：她自己后台顺手调的（比如主动消息每 15 分钟看一眼最近文件），不进任务栏，免得刷屏 */
+export async function runTool(name: string, rawArgs: string, ctx?: ToolCtx, opts: { register?: boolean } = {}): Promise<string> {
   const fn = IMPL[name];
   if (!fn) return `没有这个工具：${name}`;
   let taskId = 0;
@@ -656,7 +679,7 @@ export async function runTool(name: string, rawArgs: string, ctx?: ToolCtx): Pro
     // 挂到回复里的东西（图片、文件卡片）也记到任务上，任务栏点开能直接看到
     const attached: string[] = [];
     const tctx = ctx && { ...ctx, attach: (md: string) => (attached.push(md), ctx.attach(md)) };
-    if (title) taskId = startTask(name, title(args));
+    if (title && opts.register !== false) taskId = startTask(name, title(args));
     const out = await fn(args as never, tctx);
     // 画图、开图、写文件：真挂上东西才算成；其他看返回的话是不是报错
     const ok = ["generate_image", "show_image", "write_file"].includes(name) ? attached.length > 0 : !/^(出错了|没有这个|这不是)/.test(out);

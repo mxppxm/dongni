@@ -9,13 +9,13 @@ function outsideFences(text: string, fn: (s: string) => string) {
   return text.split(FENCE).map((part, i) => (i % 2 ? part : fn(part))).join("");
 }
 
-/** 模型漏出来的工具调用块（整段丢掉，比按行删干净） */
-const TOOL_BLOCK = /<(?:tool_calls?|tool_call|function_calls?|function_call)>[\s\S]*<\/(?:tool_calls?|tool_call|function_calls?|function_call)>/gi;
+/** 模型漏出来的工具调用块（整段丢掉，比按行删干净；非贪婪，两个块中间她说的话不能一起吞掉） */
+const TOOL_BLOCK = /<(?:tool_calls?|tool_call|function_calls?|function_call)>[\s\S]*?<\/(?:tool_calls?|tool_call|function_calls?|function_call)>/gi;
 /** DeepSeek 那套全角竖线的调用标记：<｜｜DSML｜｜ invoke …>…</｜｜DSML｜｜ invoke> */
-const PIPE_BLOCK = /<[\uFF5C|]{2,}[^>]*>[\s\S]*<\/[\uFF5C|]{2,}[^>]*>/g;
-/** 单行没配对的标记、残片 */
+const PIPE_BLOCK = /<[\uFF5C|]{2,}[^>]*>[\s\S]*?<\/[\uFF5C|]{2,}[^>]*>/g;
+/** 单行没配对的标记、残片。全角竖线只认 <｜…｜> 这种尖括号包着的标记，她自己写的「A｜B」不能删 */
 const LEAK_LINE =
-  /[\uFF5C]|<\|[^>]*\|>|<\/?(?:tool_calls?|tool_call|function_calls?|function_call|invoke|parameter)\b[^>]*>|\[TOOL_CALLS?\]/i;
+  /<\/?\uFF5C[^<>\n]*\uFF5C[^<>\n]*>|<\|[^>]*\|>|<\/?(?:tool_calls?|tool_call|function_calls?|function_call|invoke|parameter)\b[^>]*>|\[TOOL_CALLS?\]/i;
 const LEAK_INLINE = /<\/?(?:tool_calls?|tool_call|function_calls?|function_call|invoke|parameter)\b[^>]*>/gi;
 
 /** 去掉调用残片、乱码符号（含 U+FFFD 替换字符） */

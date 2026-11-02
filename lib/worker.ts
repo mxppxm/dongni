@@ -46,25 +46,44 @@ function inHome(dir: string, p: string): string {
   return abs;
 }
 
-function runShell(dir: string, cmd: string, timeoutMs = SHELL_MS): Promise<string> {
+/** 掐整个进程组：bash 底下的 npm run dev、sleep、curl 这些孙子进程也一起走，不然它们会一直挂着 */
+function killTree(pid: number | undefined) {
+  if (!pid) return;
+  const hit = (sig: NodeJS.Signals) => {
+    try {
+      process.kill(-pid, sig);
+    } catch {}
+  };
+  hit("SIGTERM");
+  setTimeout(() => hit("SIGKILL"), 3_000).unref?.();
+}
+
+function runShell(dir: string, cmd: string, timeoutMs = SHELL_MS, signal?: AbortSignal): Promise<string> {
   const banned = /(^|\s)(sudo|mkfs|shutdown|reboot|halt)\b|\brm\s+-rf\s+\/(\s|$)|\bdd\s+if=|:\(\)\s*\{|>\s*\/dev\/(sd|disk)/;
   if (banned.test(cmd)) return Promise.resolve("[拒绝] 这条命令会动系统或删根目录，不执行。换个做法。");
+  if (signal?.aborted) return Promise.resolve("[已叫停] 没执行。");
 
   return new Promise((resolve) => {
-    const child = spawn("/bin/bash", ["-lc", cmd], { cwd: dir, env: shellEnv(), stdio: ["ignore", "pipe", "pipe"] });
+    // detached：自成一个进程组，超时/叫停时才能连孙子进程一起掐掉
+    const child = spawn("/bin/bash", ["-lc", cmd], { cwd: dir, env: shellEnv(), stdio: ["ignore", "pipe", "pipe"], detached: true });
     let out = "";
     let done = false;
+    const onAbort = () => {
+      killTree(child.pid);
+      finish("\n[已叫停] 这件活被停下了，命令已经掐掉。");
+    };
     const finish = (tail: string) => {
       if (done) return;
       done = true;
       clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
       resolve(clip(out + tail) || "（没有输出）");
     };
     const timer = setTimeout(() => {
-      child.kill("SIGTERM");
-      setTimeout(() => child.kill("SIGKILL"), 3_000);
+      killTree(child.pid);
       finish(`\n[超时] 超过 ${Math.round(timeoutMs / 1000)} 秒，已经掐掉了。`);
     }, timeoutMs);
+    signal?.addEventListener("abort", onAbort, { once: true });
     child.stdout.on("data", (c: Buffer) => (out += c.toString("utf8")));
     child.stderr.on("data", (c: Buffer) => (out += c.toString("utf8")));
     child.on("error", (e) => finish(`\n[起不来] ${e.message}`));
@@ -182,7 +201,7 @@ const TOOLS = [
   },
 ];
 
-async function execTool(dir: string, call: ToolCall): Promise<string> {
+async function execTool(dir: string, call: ToolCall, signal?: AbortSignal): Promise<string> {
   const name = call.function.name;
   let a: Args = {};
   try {
@@ -195,7 +214,7 @@ async function execTool(dir: string, call: ToolCall): Promise<string> {
       case "run_shell": {
         const cmd = str(a.cmd).trim();
         if (!cmd) return "[cmd 是空的]";
-        return await runShell(dir, cmd, Math.min(num(a.timeout_ms, SHELL_MS), 600_000));
+        return await runShell(dir, cmd, Math.min(num(a.timeout_ms, SHELL_MS), 600_000), signal);
       }
       case "read_file": {
         const abs = inHome(dir, str(a.path));
@@ -300,9 +319,67 @@ ${task}
 
 export type WorkerLog = (entry: { type: string; [k: string]: unknown }) => void;
 
+/** 会真改东西的工具：一次都没调过就说「做完了」，那只是嘴上做完 */
+const SIDE_EFFECT_TOOLS = new Set(["run_shell", "write_file", "edit_file"]);
+export const NO_ACTION_PREFIX = "执行器这次没真动手，只给了文字结论";
+
+const STEP_TRIES = 3;
+
+function abortError(signal?: AbortSignal) {
+  const why = signal?.reason instanceof Error ? signal.reason.message : "被叫停了";
+  return Object.assign(new Error(why), { name: "AbortError" });
+}
+
+/** 叫停时立刻从等模型里出来：streamChat 不收 signal，只能跟叫停赛跑，输了的那条流自己会超时收掉 */
+async function oneStep(messages: ChatMessage[], signal?: AbortSignal): Promise<{ text: string; calls: ToolCall[] }> {
+  if (signal?.aborted) throw abortError(signal);
+  const it = streamChat(messages, TOOLS)[Symbol.asyncIterator]();
+  let off = () => {};
+  const stopped = new Promise<never>((_, reject) => {
+    const h = () => reject(abortError(signal));
+    signal?.addEventListener("abort", h, { once: true });
+    off = () => signal?.removeEventListener("abort", h);
+  });
+  stopped.catch(() => {});
+  let text = "";
+  let calls: ToolCall[] = [];
+  try {
+    for (;;) {
+      const r = await Promise.race([it.next(), stopped]);
+      if (r.done) break;
+      if (r.value.type === "text") text += r.value.text;
+      else if (r.value.type === "tools") calls = r.value.calls;
+    }
+  } catch (e) {
+    if (signal?.aborted) void it.return?.(undefined)?.catch(() => {});
+    throw e;
+  } finally {
+    off();
+  }
+  return { text, calls };
+}
+
+/** 模型一次超时/断网/5xx 不该把整件活判死：同一步、同一份上下文重来，最多 3 次；4xx 和叫停不重试 */
+async function stepWithRetry(messages: ChatMessage[], step: number, say: WorkerLog, signal?: AbortSignal) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await oneStep(messages, signal); // 失败那次吐了一半的字直接丢掉，不进上下文
+    } catch (e) {
+      if (signal?.aborted || (e as { fatal?: boolean }).fatal || attempt >= STEP_TRIES) throw e;
+      const msg = e instanceof Error ? e.message : String(e);
+      say({ type: "retry", step, attempt, error: msg.slice(0, 300) });
+      await new Promise<void>((ok) => {
+        const t = setTimeout(ok, 2_000 * attempt);
+        signal?.addEventListener("abort", () => (clearTimeout(t), ok()), { once: true });
+      });
+    }
+  }
+}
+
 /**
  * 跑一件活，返回给他看的最终结果。
  * 不用 clacky、不留子进程：整个循环在服务进程里，日志逐步写进 jsonl。
+ * signal 一叫停：等模型的那一步立刻退出、正在跑的命令连进程组一起掐掉，然后抛 AbortError。
  */
 export async function runWorker(opts: {
   task: string;
@@ -310,8 +387,10 @@ export async function runWorker(opts: {
   log?: WorkerLog;
   /** 打算多久收手（毫秒），到点就让它总结收尾 */
   budgetMs?: number;
+  /** 硬停：超期或他叫停 */
+  signal?: AbortSignal;
 }): Promise<string> {
-  const { task, dir, log } = opts;
+  const { task, dir, log, signal } = opts;
   const deadline = Date.now() + (opts.budgetMs ?? 20 * 60_000);
   const messages: ChatMessage[] = [
     { role: "system", content: systemPrompt(dir, task) },
@@ -325,25 +404,27 @@ export async function runWorker(opts: {
 
   let lastText = "";
   let finished = "";
+  let acted = 0; // 真动过手的工具调用次数
+  // 说做完了却一下都没动过：不能当成功报上去
+  const settle = (text: string) => (acted ? text : `${NO_ACTION_PREFIX}：\n${text}`);
 
   for (let step = 1; step <= MAX_STEPS; step++) {
+    if (signal?.aborted) throw abortError(signal);
     if (Date.now() > deadline) {
       // 快到期了：别再让它开新坑，要一句总结
       messages.push({ role: "user", content: "时间到了，别再开新活，立刻调 finish 说清现在做到哪、产物在哪、还剩什么。" });
     }
 
-    let text = "";
-    let calls: ToolCall[] = [];
-    for await (const ev of streamChat(messages, TOOLS)) {
-      if (ev.type === "text") text += ev.text;
-      else if (ev.type === "tools") calls = ev.calls;
-    }
+    const { text, calls } = await stepWithRetry(messages, step, say, signal);
     if (text.trim()) lastText = text.trim();
     say({ type: "assistant", step, text: text.slice(0, 2_000) });
 
     if (!calls.length) {
       // 没叫工具：要么它觉得说完了，要么就是懒。再说一次要 finish，第二次还这样就收。
-      if (step > 1 && lastText) return lastText;
+      if (step > 1 && lastText) {
+        say({ type: "done", ok: acted > 0, steps: step, acted });
+        return settle(lastText);
+      }
       messages.push({ role: "assistant", content: text || "（空）" });
       messages.push({ role: "user", content: "别只说话。要么继续用工具干，要么调 finish 收尾。" });
       continue;
@@ -352,7 +433,9 @@ export async function runWorker(opts: {
     messages.push({ role: "assistant", content: text, tool_calls: calls });
 
     for (const call of calls) {
-      const result = await execTool(dir, call);
+      if (signal?.aborted) throw abortError(signal);
+      const result = await execTool(dir, call, signal);
+      if (SIDE_EFFECT_TOOLS.has(call.function.name)) acted++;
       say({ type: "tool", step, name: call.function.name, args: call.function.arguments.slice(0, 800), result: result.slice(0, 1_500) });
       if (call.function.name === "finish") {
         let summary = "";
@@ -364,8 +447,8 @@ export async function runWorker(opts: {
         } catch {}
         finished = summary || lastText || "（它没说清结果）";
         messages.push({ role: "tool", tool_call_id: call.id, content: "已记录。" });
-        say({ type: "done", ok, steps: step });
-        return ok ? finished : `没做成：${finished}`;
+        say({ type: "done", ok: ok && acted > 0, steps: step, acted });
+        return ok ? settle(finished) : `没做成：${finished}`;
       }
       messages.push({ role: "tool", tool_call_id: call.id, content: result });
     }

@@ -1,6 +1,6 @@
 import "server-only";
 import { CHAT_TELLS } from "./humanizer";
-import { db, getKv, type MessageRow } from "./db";
+import { db, getKv, setKv, type MessageRow } from "./db";
 import { streamChat, type ChatMessage, type ContentPart } from "./llm";
 import { CAPABILITIES } from "./capabilities";
 import { pickMood } from "./moods";
@@ -10,6 +10,7 @@ import { recentDiary } from "./diary";
 import { prepareVoice } from "./tts";
 import { HONESTY, selfState } from "./selfstate";
 import { addUploadedImage, getImage, imageDataUrl, imageIdsIn, imageMarkdown, stripImageMarkdown } from "./images";
+import { checkClaims, correction, maybeClaims } from "./claims";
 import { runTool, toolsFor } from "./tools";
 import { formatMemories, getProfile, nowText, relevantMemories, scheduleExtraction } from "./memory";
 import { INTRO, PERSONA, SPEAKING } from "./persona";
@@ -214,6 +215,11 @@ function yieldTo(newAssistantId: number) {
 
 /** 这条不单独回了：占位删掉，告诉发起的那个口子去等合并后的那条 */
 function mergeAway(assistantId: number, into: number, emit: (e: ChatEvent) => void) {
+  // 记下「这句话的回复在 #into」：页面断线后拿同一个 clientId 重发，要找回合并后的那条，不能单独再回一次
+  const asker = db().prepare("SELECT id FROM messages WHERE id < ? AND role = 'user' ORDER BY id DESC LIMIT 1").get(assistantId) as
+    | { id: number }
+    | undefined;
+  if (asker) setKv(`merged_into:${asker.id}`, String(into));
   db().prepare("DELETE FROM messages WHERE id = ? AND role = 'assistant'").run(assistantId);
   publishReply({ assistantId, type: "done" });
   emit({ type: "merged", into });
@@ -246,7 +252,8 @@ export function startReply(clientId: string, content: string, onEvent: (e: ChatE
   // 边界必须卡在「下一条用户消息」之前：assistant 行的 client_id 是空的，光按 id > 用户消息查，
   // 会把别人刚插进来的那轮回复认成自己的——两条消息并发进来时，第二条就这么被当成「已有回复」，
   // 只回一个 follow 然后永远没人处理它（2026-11-01 实测：三条并发只回了一条）。
-  const reply = d
+  const mergedInto = Number(getKv(`merged_into:${user.id}`) ?? 0);
+  const reply = (mergedInto ? (d.prepare("SELECT * FROM messages WHERE id = ? AND role = 'assistant'").get(mergedInto) as MessageRow | undefined) : undefined) ?? d
     .prepare(
       `SELECT * FROM messages
         WHERE role = 'assistant' AND id > ?
@@ -380,7 +387,10 @@ async function generateNow(assistantId: number, userRow: MessageRow, onEvent: (e
   };
   let attached = ""; // 工具挂到回复末尾的图片、卡片
   let working = false; // 已经去跑腿/画画了，挑出来的心情就别盖掉它
-  let worked = false; // 这轮真的跑过腿/画过图：重试时不再跑一通，免得重复发提醒、重复画画
+  // 这轮真的跑过腿/画过图：重试时不再跑一通，免得重复发提醒、重复画画。
+  // 记在库里：服务半路重启后重新生成这条，也不会把提醒、派活、改自己再来一遍
+  const WORKED_KEY = `reply_worked:${assistantId}`;
+  let worked = getKv(WORKED_KEY) === "1";
   try {
     save("streaming");
     // 一边想怎么回，一边看对方这句话挑一个等待的样子（很快，不耽误回复）
@@ -425,12 +435,13 @@ async function generateNow(assistantId: number, userRow: MessageRow, onEvent: (e
           },
           (mood) => {
             working = true;
+            if (!worked) setKv(WORKED_KEY, "1");
             worked = true;
             if (running.cur?.id === assistantId) running.cur.worked = true;
             emit({ type: "mood", mood });
           },
-          // 前面已经动过手了：重试只管把话说出来，不再重复跑腿
-          !attempt || !worked,
+          // 前面已经动过手了（这次的前一遍，或者重启前那一遍）：只管把话说出来，不再重复跑腿
+          !worked,
           () => stoppedReply(assistantId) !== undefined || yielding.has(assistantId),
           (md) => {
             attached += md;
@@ -544,6 +555,8 @@ async function oneReply(
   };
   const ROUNDS = 8;
   let usedTool = false; // 这次真动过手：只有动过手，最后那句「别动手了，直接说」才有意义
+  const did: string[] = []; // 这一轮真实调过的工具和结果开头，给「说了没做」的核对用
+  let checked = false; // 核对只做一次：改口之后不再翻来覆去
   for (let round = 0; round < ROUNDS; round++) {
     if (stopped()) return flush();
     let roundText = "";
@@ -562,7 +575,21 @@ async function oneReply(
     console.log(
       `[dongni] #${assistantId} 第 ${round + 1} 轮 ${Date.now() - t0}ms，文字 ${roundText.length}，工具 ${calls?.map((c) => c.function.name).join(" ") ?? "无"}`,
     );
-    if (!calls) return flush();
+    if (!calls) {
+      // 说了「做了 / 在弄 / 停了」却没真动手：当场补做或改口，不让空话落进对话
+      if (!checked && allowTools && toolList.length && round < ROUNDS - 1 && !stopped() && maybeClaims(roundText)) {
+        checked = true;
+        const v = await checkClaims({ reply: roundText, asked: stripImageMarkdown(userRow.content), tools: did, state: selfState() });
+        if (v?.unbacked && !stopped()) {
+          console.warn(`[dongni] #${assistantId} 说了没做：「${v.claim}」→ 让她补做或改口（${v.fix}）`);
+          msgs.push({ role: "assistant", content: roundText });
+          msgs.push({ role: "user", content: correction(v) });
+          onText("\n\n");
+          continue;
+        }
+      }
+      return flush();
+    }
     usedTool = true;
     // 工具照常执行，但界面上不出现任何调用痕迹：铺垫话丢掉，只留最终回答
     // 画图、拍照要等一分钟：调用前说的那句「我给你画…」留着，算是先跟他说一声；其他工具前的铺垫话照旧丢掉
@@ -573,7 +600,9 @@ async function oneReply(
     // 去干活了：画图就「画画」，其他都是「跑腿」
     onMood(calls.some((c) => c.function.name === "generate_image") ? "draw" : "run");
     for (const c of calls) {
-      msgs.push({ role: "tool", tool_call_id: c.id, content: await runTool(c.function.name, c.function.arguments, ctx) });
+      const out = await runTool(c.function.name, c.function.arguments, ctx);
+      did.push(`${c.function.name} → ${out.replace(/\s+/g, " ").slice(0, 80)}`);
+      msgs.push({ role: "tool", tool_call_id: c.id, content: out });
     }
     // 工具打开的图片：作为一条附图消息让模型看到
     if (seen.length) {

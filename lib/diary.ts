@@ -1,6 +1,6 @@
 import "server-only";
 import { humanize } from "./humanizer";
-import { db, type MessageRow } from "./db";
+import { db, getKv, setKv, type MessageRow } from "./db";
 import { completeJson } from "./llm";
 import { INTRO, PERSONA } from "./persona";
 import { stripImageMarkdown } from "./images";
@@ -30,6 +30,10 @@ async function write(date: string, start: number, end: number) {
     .prepare("SELECT * FROM messages WHERE created_at >= ? AND created_at < ? AND status = 'done' AND kind != 'system' ORDER BY id")
     .all(start, end) as MessageRow[];
   if (!rows.length) return;
+  // 当天草稿：上次写完之后没有新消息就不重写（每 15 分钟一轮，别每次都调模型重来一遍）
+  const lastId = rows[rows.length - 1].id;
+  const doneKey = `diary_last_msg:${date}`;
+  if (diaryOf(date) && Number(getKv(doneKey) ?? 0) >= lastId) return;
   const chat = rows.map((m) => `${m.role === "user" ? "他" : "我"}：${stripImageMarkdown(m.content).slice(0, 400)}`).join("\n").slice(-24000);
   const r = await completeJson<{ text: string }>([
     {
@@ -40,11 +44,28 @@ async function write(date: string, start: number, end: number) {
   ]);
   // 日记不赶时间：按 Humanizer-zh 再去一遍 AI 味
   const text = r.text?.trim() ? (await humanize(r.text.trim(), "私人日记（第一人称、口语）")).text : "";
-  if (text) db().prepare("INSERT OR REPLACE INTO diary(date, text, created_at) VALUES(?, ?, ?)").run(date, text, Date.now());
+  if (text) {
+    db().prepare("INSERT OR REPLACE INTO diary(date, text, created_at) VALUES(?, ?, ?)").run(date, text, Date.now());
+    setKv(doneKey, String(lastId));
+  }
 }
+
+// 模块可能有多个实例（instrumentation 和路由），标记挂在 globalThis 上
+const flag = globalThis as unknown as { __dongniDiaryBusy?: boolean };
 
 /** 过了零点就把前一天（以及之前漏写的几天）补上；晚上 23 点后先写当天的草稿 */
 export async function diaryTick() {
+  // 上一轮还在写（模型 + 去 AI 味要一会儿），这一轮就不再进来
+  if (flag.__dongniDiaryBusy) return;
+  flag.__dongniDiaryBusy = true;
+  try {
+    await diaryTickInner();
+  } finally {
+    flag.__dongniDiaryBusy = false;
+  }
+}
+
+async function diaryTickInner() {
   table();
   const now = new Date();
   for (let back = 3; back >= 0; back--) {

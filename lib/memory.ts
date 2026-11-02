@@ -137,8 +137,9 @@ export async function runExtraction() {
         await extractBatch(pending);
         state.failures = 0;
       } catch (e) {
-        // 连续失败 3 次就跳过这一批（原话仍完整保存在 messages 里，不丢），免得卡住后面的
-        if (++state.failures >= 3) {
+        // 超时、断网、接口 5xx/429 这类是模型那边的事，不算这一批的错：留着下轮再整理
+        // 只有内容/解析失败连续 3 次才跳过这一批（原话仍完整保存在 messages 里，不丢），免得卡住后面的
+        if (!isTransient(e) && ++state.failures >= 3) {
           const ids = pending.map((m) => m.id);
           db().prepare(`UPDATE messages SET extracted = 2 WHERE id IN (${ids.map(() => "?").join(",")})`).run(...ids);
           state.failures = 0;
@@ -152,6 +153,15 @@ export async function runExtraction() {
   } finally {
     state.running = false;
   }
+}
+
+/** 一时的失败：超时、中断、网络不通、接口 5xx/429、鉴权（配置问题，等修好就好） */
+function isTransient(e: unknown) {
+  const err = e as { name?: string; message?: string; cause?: { code?: string } };
+  if (err?.name === "TimeoutError" || err?.name === "AbortError") return true;
+  const msg = String(err?.message ?? "");
+  if (/模型接口 (5\d\d|429|401|403)\b/.test(msg)) return true;
+  return /fetch failed|network|ECONN|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket/i.test(msg + " " + String(err?.cause?.code ?? ""));
 }
 
 async function extractBatch(pending: MessageRow[]) {
@@ -177,13 +187,22 @@ async function extractBatch(pending: MessageRow[]) {
     },
   ]);
 
-  applyResult(result, lastId, new Set(batch.filter((m) => m.role === "user").map((m) => m.id)));
+  applyResult(
+    result,
+    lastId,
+    new Set(batch.filter((m) => m.role === "user").map((m) => m.id)),
+    new Set(existing.map((m) => m.id)),
+  );
   const ids = pending.map((m) => m.id);
   db().prepare(`UPDATE messages SET extracted = 1 WHERE id IN (${ids.map(() => "?").join(",")})`).run(...ids);
 }
 
-function applyResult(r: ExtractResult, sourceId: number, userIds: Set<number>) {
+/** shown：这一批给模型看过的已有记忆，改/删只认这些 id（模型编出来的 id 会误删别的记忆） */
+function applyResult(r: ExtractResult, sourceId: number, userIds: Set<number>, shown: Set<number>) {
   const d = db();
+  // 模型偶尔不给数组（比如给个数字），直接迭代会整批报错
+  const arr = <T,>(v: T[] | undefined): T[] => (Array.isArray(v) ? v : []);
+  const adds = arr(r.add);
   const now = Date.now();
   const exists = (id: number) => !!d.prepare("SELECT 1 FROM memories WHERE id = ? AND status = 'active'").get(id);
   const cat = (c?: string) => (CATEGORIES as readonly string[]).includes(c ?? "") ? c! : "想法";
@@ -196,11 +215,13 @@ function applyResult(r: ExtractResult, sourceId: number, userIds: Set<number>) {
   };
 
   d.transaction(() => {
-    for (const id of r.remove ?? []) {
+    for (const raw of arr(r.remove)) {
+      const id = Number(raw);
+      if (!shown.has(id)) continue;
       d.prepare("UPDATE memories SET status = 'deleted', updated_at = ? WHERE id = ?").run(now, id);
     }
-    for (const u of r.update ?? []) {
-      if (!exists(u.id) || !u.content?.trim()) continue;
+    for (const u of arr(r.update)) {
+      if (!u || !shown.has(Number(u.id)) || !exists(u.id) || typeof u.content !== "string" || !u.content.trim()) continue;
       d.prepare("UPDATE memories SET content = ?, category = COALESCE(?, category), updated_at = ? WHERE id = ?").run(
         u.content.trim(),
         u.category ? cat(u.category) : null,
@@ -212,8 +233,8 @@ function applyResult(r: ExtractResult, sourceId: number, userIds: Set<number>) {
     const ins = d.prepare(
       "INSERT INTO memories(content, category, source_message_id, created_at, updated_at) VALUES(?, ?, ?, ?, ?)",
     );
-    for (const a of r.add ?? []) {
-      if (!a.content?.trim()) {
+    for (const a of adds) {
+      if (!a || typeof a.content !== "string" || !a.content.trim()) {
         newIds.push(-1);
         continue;
       }
@@ -224,10 +245,10 @@ function applyResult(r: ExtractResult, sourceId: number, userIds: Set<number>) {
       if (typeof to === "string" && to.startsWith("new:")) return newIds[Number(to.slice(4))] ?? -1;
       return Number(to);
     };
-    (r.add ?? []).forEach((a, i) => {
-      for (const l of a.links ?? []) addLink(newIds[i], resolve(l.to), l.reason);
+    adds.forEach((a, i) => {
+      for (const l of arr(a?.links)) addLink(newIds[i], resolve(l.to), l.reason);
     });
-    for (const l of r.links ?? []) addLink(Number(l.a), Number(l.b), l.reason);
+    for (const l of arr(r.links)) addLink(Number(l.a), Number(l.b), l.reason);
   })();
 }
 
