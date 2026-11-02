@@ -10,7 +10,8 @@ import { generateImage } from "./imagegen";
 import { createMood } from "./moods";
 import { setCity, takeDailyPhoto, today, wardrobeFile } from "./wardrobe";
 import { addLocalImage, IMAGE_EXT, imageMarkdown } from "./images";
-import { startRepair } from "./selfrepair";
+import { postAssistant, startRepair } from "./selfrepair";
+import { speakAsHer } from "./speak";
 import { cancelDispatch, dispatch, judge, runningJobs } from "./superagent";
 import { finishTask, startTask } from "./tasks";
 import { saveVoiceConfig, voiceReady } from "./voiceconfig";
@@ -213,7 +214,26 @@ async function showImage({ path: p }: { path: string }, ctx?: ToolCtx) {
   return "图片已经放进你的回复里给对方看了，你也能看到它。回复里不要再写图片链接或路径，直接说你想说的。";
 }
 
-async function drawImage({ prompt, self }: { prompt: string; self?: boolean }, ctx?: ToolCtx) {
+/**
+ * 画图要等一分钟左右：以前在回复里同步等，整条回复队列被它占着——电话里他再说什么她都排在后面干等，像死机了。
+ * 现在跟拍照一样丢到后台画，画好（或没画成）自己发一条进对话；回复马上说完，他接着说话她能接。
+ */
+function drawImage(args: { prompt: string; self?: boolean }) {
+  const taskId = startTask("generate_image", `画图：${short(args.prompt)}`);
+  void drawNow(args)
+    .then((r) => {
+      finishTask(taskId, r.ok, r.ok ? r.markdown : r.message.slice(0, 200));
+      postAssistant(r.ok ? `画好了，你看～\n\n${r.markdown}` : `刚才那张没画出来：${r.message}`);
+    })
+    .catch((e) => {
+      const msg = e instanceof Error ? e.message : String(e);
+      finishTask(taskId, false, msg.slice(0, 200));
+      postAssistant(`刚才那张没画出来：${msg}`);
+    });
+  return Promise.resolve("开始画了（要一分钟左右），画好会自动发给他、电话里也会告诉他。现在只用一句话跟他说你去画了，别说已经画好，也别描述画出来什么样。");
+}
+
+async function drawNow({ prompt, self }: { prompt: string; self?: boolean }) {
   // 画她自己：照她今天那身的定妆照画，长相、马尾、橙色发圈、衣服都对得上，不再是随便一个女生
   let ref: string | undefined;
   let p = prompt;
@@ -223,11 +243,7 @@ async function drawImage({ prompt, self }: { prompt: string; self?: boolean }, c
     if (ref)
       p = `The girl in this picture is exactly the girl in the reference image: same face, brown high messy ponytail with an orange scrunchie, same outfit and the same stylized realistic 3D animated-film rendering style, full body with shoes visible. ${prompt}`;
   }
-  const r = await generateImage(p, { ref });
-  if (!r.ok) return r.message;
-  ctx?.attach(r.markdown);
-  ctx?.see(r.id); // 让她亲眼看到自己画出来的是什么，说的话才对得上
-  return "画好了，图已经放进你的回复里，你也能看到它。照你看到的样子自然地说一两句（像发照片时随口配的话），别写图片链接，别挑自己的刺、别主动说要重画。";
+  return generateImage(p, { ref });
 }
 
 const OUT_DIR = path.join(HOME, "Downloads", "敏");
@@ -660,13 +676,43 @@ const TASK_TITLE: Record<string, (a: Record<string, unknown>) => string> = {
   humanize_text: () => "润色文字",
   set_city: (a) => `换城市：${short(a.city)}`,
   show_image: (a) => `打开图片 ${short(path.basename(String(a.path ?? "")))}`,
-  generate_image: (a) => `画图：${short(a.prompt)}`,
   set_voice_key: () => "配语音 key",
   dispatch_task: (a) => `派活：${short(a.task)}`,
   dispatch_status: () => "看派出去的活",
   cancel_task: (a) => `叫停派出去的活${a.id ? ` ${short(a.id)}` : ""}`,
   write_file: (a) => `写文件 ${short(a.name)}`,
 };
+
+/**
+ * 对话里调工具用这个：几秒内做完就照常把结果交回去；做不完就转到后台接着做，先告诉她「在后台做着」，
+ * 回复马上能说完，对话（打字、电话）不被一件慢活卡住——他接着说话她立刻能接。
+ * 后台做完：结果（连同挂上的图片、文件卡片）用她的口吻单独发一条进对话，电话里也会念。
+ */
+const SOON_MS = 8_000;
+export async function runToolSoon(name: string, rawArgs: string, ctx: ToolCtx): Promise<string> {
+  let late = false;
+  const lateAttach: string[] = [];
+  const work = runTool(name, rawArgs, { ...ctx, attach: (md) => (late ? lateAttach.push(md) : ctx.attach(md)) });
+  const quick = await Promise.race([work, new Promise<null>((ok) => setTimeout(() => ok(null), SOON_MS))]);
+  if (quick !== null) return quick;
+  late = true;
+  let args: Record<string, unknown> = {};
+  try {
+    args = JSON.parse(rawArgs || "{}");
+  } catch {}
+  const what = TASK_TITLE[name]?.(args) ?? name;
+  console.log(`[dongni] 「${what}」超过 ${SOON_MS / 1000} 秒，转后台接着做`);
+  void work.then(async (out) => {
+    const cards = lateAttach.join("\n\n");
+    const said = await speakAsHer(
+      `你刚才放到后台做的「${what}」做完了，真实结果是：\n${out.slice(0, 1500)}\n照这个结果用一两句告诉他，接得上你们刚才的话头；没做成就照实说卡在哪。`,
+      `「${what}」做完了：${out.slice(0, 300)}`,
+      { fresh: true },
+    ).catch(() => `「${what}」做完了：${out.slice(0, 300)}`);
+    postAssistant(cards ? `${said}\n\n${cards}` : said);
+  });
+  return `这件事（${what}）比较慢，已经转到后台接着做，做完会自动告诉他。现在别说做好了、也别编结果，就跟他说一句在弄，然后接着聊。`;
+}
 
 /** register=false：她自己后台顺手调的（比如主动消息每 15 分钟看一眼最近文件），不进任务栏，免得刷屏 */
 export async function runTool(name: string, rawArgs: string, ctx?: ToolCtx, opts: { register?: boolean } = {}): Promise<string> {
@@ -682,7 +728,7 @@ export async function runTool(name: string, rawArgs: string, ctx?: ToolCtx, opts
     if (title && opts.register !== false) taskId = startTask(name, title(args));
     const out = await fn(args as never, tctx);
     // 画图、开图、写文件：真挂上东西才算成；其他看返回的话是不是报错
-    const ok = ["generate_image", "show_image", "write_file"].includes(name) ? attached.length > 0 : !/^(出错了|没有这个|这不是)/.test(out);
+    const ok = ["show_image", "write_file"].includes(name) ? attached.length > 0 : !/^(出错了|没有这个|这不是)/.test(out);
     finishTask(taskId, ok, ok ? attached.join("\n\n") : out.slice(0, 200));
     return out.length > 30_000 ? out.slice(0, 30_000) + "\n……（太长，已截断）" : out;
   } catch (e) {

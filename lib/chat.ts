@@ -10,7 +10,7 @@ import { recentDiary } from "./diary";
 import { HONESTY, selfState } from "./selfstate";
 import { addUploadedImage, getImage, imageDataUrl, imageIdsIn, imageMarkdown, stripImageMarkdown } from "./images";
 import { checkClaims, correction, maybeClaims } from "./claims";
-import { runTool, toolsFor } from "./tools";
+import { runToolSoon, toolsFor } from "./tools";
 import { formatMemories, getProfile, nowText, relevantMemories, scheduleExtraction } from "./memory";
 import { INTRO, PERSONA, SPEAKING } from "./persona";
 import { attachVoiceReply, voiceIdsIn } from "./voicemsg";
@@ -597,7 +597,7 @@ async function oneReply(
     // 去干活了：画图就「画画」，其他都是「跑腿」
     onMood(calls.some((c) => c.function.name === "generate_image") ? "draw" : "run");
     for (const c of calls) {
-      const out = await runTool(c.function.name, c.function.arguments, ctx);
+      const out = await runToolSoon(c.function.name, c.function.arguments, ctx);
       did.push(`${c.function.name} → ${out.replace(/\s+/g, " ").slice(0, 80)}`);
       msgs.push({ role: "tool", tool_call_id: c.id, content: out });
     }
