@@ -520,7 +520,19 @@ export function qwenBridge(page: WebSocket, cfg: QwenConfig, isGoodbye: (t: stri
     tell({ type: "error", message: err.message });
     close();
   });
-  asr.on("close", () => close());
+  // 被对面断开（欠费、key 失效之类）：把原因告诉页面，别一声不吭地挂掉
+  asr.on("close", (code, reason) => {
+    if (closed) return;
+    const why = reason.toString();
+    if (why) {
+      console.warn(`[dongni][qwen] 识别连接被断开（${code}）：${why}`);
+      tell({
+        type: "error",
+        message: /good standing|arrear|欠费|balance/i.test(why) ? "通义账户欠费了，阿里云把语音服务停了，充值后再打" : `通义语音断开了：${why.slice(0, 80)}`,
+      });
+    }
+    close();
+  });
 
   // 页面传来的 16k PCM：攒 100ms 转给识别；文字消息是控制（手动录声纹）
   let chunk: Buffer[] = [];
