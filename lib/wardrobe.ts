@@ -70,6 +70,8 @@ export type Weather = {
   nextTemp?: number;
   trend?: "up" | "down" | "flat";
   advice: string;
+  /** 接口没连上、退回最近一次成功的数据时，这里是那次抓到的时刻 */
+  staleAt?: number;
 };
 
 /** 风向角度 → 中文风向 */
@@ -181,16 +183,70 @@ function adviceFor(temp: number, kind: Weather["kind"], wind: number, opts: { fe
   return out.join("，");
 }
 
-/** 成功的结果留 10 分钟（跟 15 分钟一次的日常检查配合），失败只留 90 秒，别一直卡着不重试 */
+/** 成功的结果留 10 分钟（跟 15 分钟一次的日常检查配合）；旧数据只留 2 分钟，好尽快再试新的；失败留 90 秒，别一直卡着 */
 const OK_TTL = 10 * 60_000;
 const FAIL_TTL = 90_000;
-const FORECAST_TIMEOUT = 8_000;
-const GEO_TIMEOUT = 6_000;
+const STALE_TTL = 2 * 60_000;
+/** 宁可快点超时再试，也别一次挂在那儿等 8 秒 */
+const FORECAST_TIMEOUT = 3_500;
+const GEO_TIMEOUT = 3_000;
+/** 一次 + 重试两次 */
+const FORECAST_TRIES = 3;
+const RETRY_GAP = 300;
 
 let weatherCache: { at: number; city: string; w: Weather | null } | null = null;
 /** 同时有好几个人要天气（提示词、相册、拍照）只发一次请求，别各查各的 */
 let inFlight: { city: string; p: Promise<Weather | null> } | null = null;
+/** 最近一次真的抓到的天气：内存一份、kv 一份，重启后也能拿来兜底 */
+let lastGood: { at: number; city: string; w: Weather } | null = null;
 const geoCache = new Map<string, { name: string; lat: number; lon: number }>();
+
+const hhmm = (at: number) => new Date(at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
+
+function rememberGood(city: string, w: Weather) {
+  const at = Date.now();
+  lastGood = { at, city, w };
+  try {
+    setKv(`weather_last:${city}`, JSON.stringify({ at, w }));
+  } catch {
+    /* kv 写不进就只留内存这份 */
+  }
+}
+
+function lastGoodFor(city: string): { at: number; w: Weather } | null {
+  if (lastGood && lastGood.city === city) return { at: lastGood.at, w: lastGood.w };
+  try {
+    const saved = getKv(`weather_last:${city}`);
+    if (!saved) return null;
+    const j = JSON.parse(saved) as { at?: unknown; w?: Weather };
+    if (j.w && typeof j.w === "object" && Number.isFinite(j.at) && Number.isFinite(j.w.temp)) {
+      const hit = { at: j.at as number, w: j.w };
+      lastGood = { at: hit.at, city, w: hit.w };
+      return hit;
+    }
+  } catch {
+    /* 存坏了就当没有 */
+  }
+  return null;
+}
+
+/** 上次成功抓到的天气，标上抓取时刻，调用方一看就知道是几点的旧数据 */
+function staleCopy(city: string): Weather | null {
+  const old = lastGoodFor(city);
+  return old ? { ...old.w, staleAt: old.at } : null;
+}
+
+/** 失败原因说人话：是超时，还是接口回了别的东西 */
+function why(e: unknown) {
+  const err = e as { name?: string; message?: string; cause?: { code?: string } };
+  if (err?.name === "TimeoutError" || err?.name === "AbortError") return `超时（${FORECAST_TIMEOUT / 1000} 秒没回话）`;
+  const code = err?.cause?.code ?? "";
+  if (code === "ENOTFOUND" || code === "EAI_AGAIN") return "域名解析失败";
+  if (code === "ECONNREFUSED" || code === "ECONNRESET" || code === "ETIMEDOUT") return `连不上（${code}）`;
+  return err?.message || String(e);
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export function getCity() {
   return (getKv("weather_city") ?? "").trim() || HOME_CITY;
@@ -234,9 +290,20 @@ async function coordsFor(city: string) {
   }
 }
 
-async function fetchWeather(city: string): Promise<Weather | null> {
+async function fetchWeather(city: string): Promise<{ w?: Weather; reason?: string }> {
   const c = await coordsFor(city);
-  if (!c) return null;
+  if (!c) return { reason: "城市坐标没查到" };
+  let reason = "没发出请求";
+  for (let i = 0; i < FORECAST_TRIES; i++) {
+    if (i > 0) await sleep(RETRY_GAP * i);
+    const out = await forecastOnce(city, c);
+    if (out.w) return out;
+    reason = out.reason ?? "原因不明";
+  }
+  return { reason: `${reason}（试了 ${FORECAST_TRIES} 次）` };
+}
+
+async function forecastOnce(city: string, c: { lat: number; lon: number }): Promise<{ w?: Weather; reason?: string }> {
   try {
     const url =
       "https://api.open-meteo.com/v1/forecast?" +
@@ -245,7 +312,7 @@ async function fetchWeather(city: string): Promise<Weather | null> {
       "&daily=temperature_2m_max,temperature_2m_min" +
       "&hourly=temperature_2m&forecast_days=2&timezone=auto";
     const res = await fetch(url, { signal: AbortSignal.timeout(FORECAST_TIMEOUT), cache: "no-store" });
-    if (!res.ok) return null;
+    if (!res.ok) return { reason: `接口返回 ${res.status}` };
     const j = (await res.json()) as {
       current?: {
         time?: string;
@@ -265,7 +332,7 @@ async function fetchWeather(city: string): Promise<Weather | null> {
     };
     const temp = num(j.current?.temperature_2m);
     const code = num(j.current?.weather_code);
-    if (temp === undefined || code === undefined) return null;
+    if (temp === undefined || code === undefined) return { reason: "返回里没有温度或天气代码" };
     const feels = num(j.current?.apparent_temperature);
     const humidity = num(j.current?.relative_humidity_2m);
     const wind = num(j.current?.wind_speed_10m);
@@ -295,7 +362,7 @@ async function fetchWeather(city: string): Promise<Weather | null> {
     const trend: Weather["trend"] | undefined =
       nextTemp === undefined ? undefined : nextTemp - temp <= -1 ? "down" : nextTemp - temp >= 1 ? "up" : "flat";
     const windRounded = wind === undefined ? undefined : Math.round(wind);
-    return {
+    const w: Weather = {
       city,
       temp: Math.round(temp),
       feels: feels === undefined ? undefined : Math.round(feels),
@@ -316,26 +383,34 @@ async function fetchWeather(city: string): Promise<Weather | null> {
         nextTemp: nextTemp === undefined ? undefined : Math.round(nextTemp),
       }),
     };
-  } catch {
-    return null;
+    return { w };
+  } catch (e) {
+    return { reason: why(e) };
   }
 }
 
 export async function getWeather(): Promise<Weather | null> {
   const city = getCity();
   if (weatherCache && weatherCache.city === city) {
-    const ttl = weatherCache.w ? OK_TTL : FAIL_TTL;
+    const c = weatherCache.w;
+    const ttl = !c ? FAIL_TTL : c.staleAt ? STALE_TTL : OK_TTL;
     if (Date.now() - weatherCache.at < ttl) return weatherCache.w;
   }
   if (inFlight && inFlight.city === city) return inFlight.p;
   const entry: { city: string; p: Promise<Weather | null> } = { city, p: Promise.resolve(null) };
   entry.p = fetchWeather(city)
-    .catch(() => null)
-    .then((w) => {
-      weatherCache = { at: Date.now(), city, w };
-      if (!w) console.warn(`[dongni] ${city} 的实时天气没取到（接口失败或超时）`);
-      if (inFlight === entry) inFlight = null;
-      return w;
+    .catch((e) => ({ reason: why(e) }) as { w?: Weather; reason?: string })
+    .then((out) => {
+      if (out.w) {
+        rememberGood(city, out.w);
+        weatherCache = { at: Date.now(), city, w: out.w };
+        return out.w;
+      }
+      const old = staleCopy(city);
+      weatherCache = { at: Date.now(), city, w: old };
+      // 一行日志：是超时还是返回异常，一看就清楚
+      console.warn(`[dongni] ${city} 的实时天气没取到：${out.reason ?? "原因不明"}${old ? `；先用 ${hhmm(old.staleAt!)} 的旧数据顶上` : "；也没有能用的旧数据"}`);
+      return old;
     });
   inFlight = entry;
   return entry.p;
@@ -363,10 +438,10 @@ export async function today() {
   return { weather: w, outfit, season: season() };
 }
 
-/** 提示词里等不起太久：一点点没回来就先说没取到，请求本身还在后台跑，下次就有了 */
+/** 提示词里等不起太久：一点点没回来就先拿上次成功的数据顶上，请求本身还在后台跑，下次就有新的 */
 function weatherSoon(ms: number) {
   return new Promise<Weather | null>((ok) => {
-    const timer = setTimeout(() => ok(null), ms);
+    const timer = setTimeout(() => ok(staleCopy(getCity())), ms);
     getWeather().then(
       (w) => {
         clearTimeout(timer);
@@ -382,7 +457,7 @@ function weatherSoon(ms: number) {
 
 /** 把天气说成一句人话：体感、湿度、风、今天高低、晚上降多少都在里面 */
 export function weatherText(w: Weather) {
-  const bits = [`${w.city}现在${w.text}，${w.temp}°C`];
+  const bits = [w.staleAt ? `${w.city}${hhmm(w.staleAt)}那会儿${w.text}，${w.temp}°C` : `${w.city}现在${w.text}，${w.temp}°C`];
   if (w.feels !== undefined && w.feels !== w.temp) bits.push(`体感 ${w.feels}°C`);
   if (w.humidity !== undefined) bits.push(`湿度 ${w.humidity}%`);
   if (w.windDir !== undefined) bits.push(`${w.windDir}${w.windLevel !== undefined ? ` ${w.windLevel} 级` : ""}${w.wind !== undefined ? `（${w.wind}km/h）` : ""}`);
@@ -391,6 +466,7 @@ export function weatherText(w: Weather) {
   if (w.trend === "down" && w.nextTemp !== undefined) bits.push(`接下来几小时降到 ${w.nextTemp}°C`);
   else if (w.trend === "up" && w.nextTemp !== undefined) bits.push(`接下来几小时升到 ${w.nextTemp}°C`);
   else if (w.trend === "flat" && w.nextTemp !== undefined) bits.push(`接下来几小时 ${w.nextTemp}°C 左右`);
+  if (w.staleAt) bits.push(`这是 ${hhmm(w.staleAt)} 的旧数据（接口这会儿没连上）`);
   return bits.join("，");
 }
 
