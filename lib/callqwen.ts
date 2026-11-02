@@ -9,6 +9,8 @@ import { db } from "./db";
 import { replyMode } from "./llm";
 import { callEnded, callStarted, type ReplyEvent, subscribeReplies } from "./presence";
 import { speakableText } from "./tts";
+import { taskStateLines } from "./tasks";
+import { judgeTurn, type TurnIntent } from "./turnjudge";
 import {
   ENROLL_SECONDS,
   enrollVoiceprint,
@@ -241,6 +243,7 @@ export function qwenBridge(page: WebSocket, cfg: QwenConfig, isGoodbye: (t: stri
 
   const finishSpeaking = (me: Speaking) => {
     if (current !== me) return;
+    herLast = me.text;
     current = null;
     if (byePending) setTimeout(endBye, 1200);
     speakExtras();
@@ -320,29 +323,65 @@ export function qwenBridge(page: WebSocket, cfg: QwenConfig, isGoodbye: (t: stri
   };
 
   /**
-   * 他这句说完了：先等一小会儿，他要是接着补（「要真丝的」「要全身的」），几句合成一句再交给脑子，
-   * 别每句都让她刚开口就被下一句打断。他又开口时这个等待一直顺延。
+   * 他说完一句：先交给判断层（lib/turnjudge.ts）看一眼——说完了没、要什么——再照结论办。
+   * - 没说完：最多再等 2.5 秒，他接着说就跟前面合成一句再判断；
+   * - 说完了：马上交给她自己的脑子回，不再固定干等；
+   * - 要挂电话（语义判断，「你先挂吧」也算）：她回完这句、声音放完就真挂；
+   * - 让她别说了：停嘴，不回；不是在跟她说话：不理。
+   * 判断层出错/超时：当他说完了照常回，挂电话退回触发词判断。
    */
   let asking = "";
-  let askTimer: NodeJS.Timeout | undefined;
-  const ASK_WAIT_MS = 700;
-  const answer = (text: string) => {
+  let askSeq = 0;
+  let waitTimer: NodeJS.Timeout | undefined;
+  let herLast = "";
+  const WAIT_MORE_MS = 2500;
+  const recentLines = () =>
+    (db().prepare("SELECT role, content FROM messages WHERE status = 'done' AND kind != 'system' ORDER BY id DESC LIMIT 6").all() as {
+      role: string;
+      content: string;
+    }[])
+      .reverse()
+      .map((m) => `${m.role === "user" ? "他" : "她"}：${speakableText(m.content).slice(0, 100)}`)
+      .join("\n");
+  const answer = async (text: string) => {
+    clearTimeout(waitTimer);
     asking = asking ? `${asking} ${text}` : text;
-    clearTimeout(askTimer);
-    askTimer = setTimeout(sendAsk, ASK_WAIT_MS);
+    const mine = ++askSeq;
+    const heard = asking;
+    const t0 = Date.now();
+    const j = await judgeTurn({ heard, herLast: current?.text || herLast, recent: recentLines(), tasks: taskStateLines() });
+    if (mine !== askSeq) return; // 判断的时候他又说了一句：以新的那次为准
+    log(`判断（${Date.now() - t0}ms）：${j ? `${j.complete ? "说完了" : "没说完"}，${j.intent}` : "没判断出来，照常回"}｜${heard.slice(0, 30)}`);
+    const intent = j?.intent ?? (isGoodbye(heard) ? "end_call" : "chat");
+    if (intent === "noise") {
+      asking = "";
+      return;
+    }
+    if (intent === "stop_talking") {
+      asking = "";
+      interrupt();
+      return;
+    }
+    if (j && !j.complete) {
+      waitTimer = setTimeout(() => sendAsk(intent), WAIT_MORE_MS);
+      return;
+    }
+    sendAsk(intent);
   };
-  const holdAsk = () => clearTimeout(askTimer);
+  const holdAsk = () => clearTimeout(waitTimer);
   const resumeAsk = () => {
     if (!asking) return;
-    clearTimeout(askTimer);
-    askTimer = setTimeout(sendAsk, ASK_WAIT_MS);
+    clearTimeout(waitTimer);
+    waitTimer = setTimeout(() => sendAsk("chat"), WAIT_MORE_MS);
   };
-  const sendAsk = () => {
+  const sendAsk = (intent: TurnIntent) => {
+    clearTimeout(waitTimer);
     const text = asking;
     asking = "";
     if (!text) return;
-    if (isGoodbye(text)) {
-      byePending = true;
+    interrupt(); // 他确实说了一句要她接的话：她没说完的那句放下，回这句
+    if (intent === "end_call") {
+      byePending = true; // 她回完这句、声音放完就挂（见 finishSpeaking）
       clearTimeout(byeLimit);
       byeLimit = setTimeout(endBye, 25_000);
     } else cancelBye();
@@ -384,7 +423,7 @@ export function qwenBridge(page: WebSocket, cfg: QwenConfig, isGoodbye: (t: stri
     closed = true;
     clearInterval(beat);
     clearInterval(watcher);
-    clearTimeout(askTimer);
+    clearTimeout(waitTimer);
     unsubscribe();
     cancelBye();
     current?.say.stop();
@@ -502,7 +541,7 @@ export function qwenBridge(page: WebSocket, cfg: QwenConfig, isGoodbye: (t: stri
           break;
         }
         if (heard && !voiceprint()) {
-          interrupt();
+          hush();
           if (text.length >= 2) void autoEnroll(heard);
           tell({ type: "you", text });
         } else if (heard && voiceprint()) {
@@ -518,10 +557,10 @@ export function qwenBridge(page: WebSocket, cfg: QwenConfig, isGoodbye: (t: stri
             verdict = null;
             break;
           }
-          interrupt();
+          hush();
           tell({ type: "you", text, unsure: maybe });
         } else {
-          interrupt();
+          hush();
           tell({ type: "you", text });
         }
         verdict = null;

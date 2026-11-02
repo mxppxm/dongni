@@ -91,9 +91,10 @@ export function taskStateLines(now = Date.now()): string {
   const done = rows
     .filter((r) => r.status !== "running")
     .map((r) => `「${r.title}」${r.status === "done" ? "做完了" : `没做成（${r.result.slice(0, 40)}）`}（${ago(r.ended_at ?? now)}）`);
+  // 这些在交出去、做完的时候都已经单独跟他说过了：放在这里是让她心里有数、说话对得上，不是让她每句都汇报一遍
   return [
-    running.length ? `后台正在做：${running.join("；")}。` : "后台现在没有在做的事。",
-    done.length ? `最近做完的：${done.join("；")}。` : "",
+    running.length ? `后台正在做（交出去时已经跟他说过了，他不问就别再提）：${running.join("；")}。` : "后台现在没有在做的事。",
+    done.length ? `最近做完的（结果已经单独告诉过他了，他不问就别再提）：${done.join("；")}。` : "",
   ]
     .filter(Boolean)
     .join("\n");
