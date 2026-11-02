@@ -10,15 +10,14 @@ import Mood from "./Mood";
 import Starfield, { type Theme } from "./Starfield";
 import { AttachmentStrip, useAttachments } from "./useAttachments";
 import MicButton, { type VoiceSendResult } from "./VoiceRecorder";
-import { hasSpeakable, useVoice, VoiceButton, VoiceProvider } from "./Voice";
+import { setPageQuiet } from "./Voice";
 
-/** 通话期间让页面别自己出声：这个要放在 VoiceProvider 里面才拿得到 */
+/** 通话期间让页面别自己出声（语音消息条） */
 function QuietWhile({ on }: { on: boolean }) {
-  const { setQuiet } = useVoice();
   useEffect(() => {
-    setQuiet(on);
-    return () => setQuiet(false);
-  }, [on, setQuiet]);
+    setPageQuiet(on);
+    return () => setPageQuiet(false);
+  }, [on]);
   return null;
 }
 
@@ -518,7 +517,6 @@ export default function Chat() {
 
 
   return (
-    <VoiceProvider>
     <div
       className="relative flex h-dvh flex-col overflow-hidden"
       onDragEnter={att.onDragEnter}
@@ -585,11 +583,6 @@ export default function Chat() {
                       ) : (
                         <Markdown text={m.content} animate={m.status === "streaming" || !!m.fresh} voiceAuto={!!m.fresh} />
                       )}
-                      {m.status === "done" && !!m.id && hasSpeakable(m.content) && !m.content.includes("/api/voice/clip/") && (
-                        <div className="msg-actions">
-                          <VoiceButton id={m.id} fresh={!!m.fresh && m.kind !== "call"} />
-                        </div>
-                      )}
                     </div>
                   )}
                 </motion.div>
@@ -650,6 +643,5 @@ export default function Chat() {
       <AnimatePresence>{showAlbum && <Album onClose={() => setShowAlbum(false)} />}</AnimatePresence>
       <AnimatePresence>{calling && <Call mini={callMini} onMini={setCallMini} onClose={() => setCalling(false)} />}</AnimatePresence>
     </div>
-    </VoiceProvider>
   );
 }

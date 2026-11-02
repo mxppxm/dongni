@@ -5,15 +5,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { doubaoTts, doubaoTtsStream, ttsReady } from "./doubao";
-import { dialogEnabled, sayViaDialog } from "./dialogvoice";
-import { voiceConfig } from "./voiceconfig";
 import { stripLeaks, stripPaths } from "./textclean";
 
 /**
- * 把回复念出来：配了豆包（火山引擎）就用豆包的声音，没配或没合成出来就退回原来那套
- * （微软神经语音「晓晓」edge-tts）。第一次点按钮时才合成，之后走缓存；
- * 念不出来就返回 null，界面上只说一句「这条念不出来」。
+ * 语音的小工具：把 Markdown 整理成能念的话（电话、语音消息共用），以及 edge-tts 兜底合成。
+ * 「每条回复都念出来」那套已经拿掉了——它在每条回复写完后都合成一遍语音，打字聊天也在花语音的钱。
  */
 const run = promisify(execFile);
 const DATA_DIR = process.env.DONGNI_DATA_DIR || path.join(process.cwd(), "data");
@@ -67,55 +63,6 @@ export function speakableText(markdown: string): string {
   return t;
 }
 
-/** 合成一条回复的语音，返回 mp3 路径；失败返回 null */
-export async function synthesize(id: number, content: string): Promise<string | null> {
-  const text = speakableText(content);
-  if (!text) return null;
-  const useDoubao = ttsReady();
-  const voiceTag = useDoubao ? `doubao:${voiceConfig().speaker || "default"}:acted2` : VOICE;
-  const key = crypto.createHash("sha1").update(`${voiceTag}:${text}`).digest("hex").slice(0, 12);
-  const file = path.join(AUDIO_DIR, `${id}-${key}.mp3`);
-  try {
-    const st = fs.statSync(file);
-    if (st.size > 512) return file;
-  } catch {
-    // 还没合成过
-  }
-  const running = inflight.get(file);
-  if (running) return running;
-
-  // 豆包优先：配了就用它的声音，合成失败再往下走旧路子，别把这条回复变成没声
-  if (useDoubao) {
-    const task = (async () => {
-      const got = await doubaoTts(text);
-      if (got) {
-        try {
-          fs.mkdirSync(AUDIO_DIR, { recursive: true });
-          fs.writeFileSync(file, got.audio);
-          if (fs.statSync(file).size > 512) return file;
-        } catch (e) {
-          console.warn("[dongni] 豆包语音写盘失败：", e instanceof Error ? e.message : e);
-        }
-      } else {
-        console.warn("[dongni] 豆包没合成出来，退回 edge-tts");
-      }
-      return binary ? synthesizeFallback(text) : null;
-    })();
-    inflight.set(file, task);
-    task.finally(() => inflight.delete(file));
-    return task;
-  }
-
-  if (!binary) {
-    console.warn("[dongni] 没找到 edge-tts，念不了");
-    return null;
-  }
-  const task = speakWithEdge(file, text, key);
-  inflight.set(file, task);
-  task.finally(() => inflight.delete(file));
-  return task;
-}
-
 /** 只用旧的 edge-tts 合成（豆包没配 / 没合成成功时的兜底），同一个文件缓存 */
 export async function synthesizeFallback(source: string): Promise<string | null> {
   const text = speakableText(source);
@@ -151,94 +98,4 @@ async function speakWithEdge(file: string, text: string, key: string): Promise<s
   } finally {
     fs.rmSync(tmp, { force: true });
   }
-}
-
-/* ---------------- 边合成边播 ---------------- */
-
-type Live = { chunks: Buffer[]; done: boolean; ok: boolean; subs: Set<(b: Buffer | null) => void> };
-const lives = ((globalThis as unknown as { __dongniLive?: Map<string, Live> }).__dongniLive ??= new Map());
-
-function fileFor(id: number, content: string) {
-  const text = speakableText(content);
-  if (!text) return null;
-  const dialog = dialogEnabled();
-  const c = voiceConfig();
-  const voiceTag = dialog ? `dialog:${c.dialogSpeaker || "default"}` : `doubao:${c.speaker || "default"}:acted2`;
-  const key = crypto.createHash("sha1").update(`${voiceTag}:${text}`).digest("hex").slice(0, 12);
-  return { text, dialog, file: path.join(AUDIO_DIR, `${id}-${key}.${dialog ? "ogg" : "mp3"}`) };
-}
-
-export const audioMime = (file: string) => (file.endsWith(".ogg") ? "audio/ogg" : file.endsWith(".wav") ? "audio/wav" : "audio/mpeg");
-
-/** 回复一写完就开始合成（页面来要的时候，往往已经出声了） */
-export function prepareVoice(id: number, content: string) {
-  if (!ttsReady()) return;
-  const f = fileFor(id, content);
-  if (!f) return;
-  try {
-    if (fs.statSync(f.file).size > 512) return;
-  } catch {}
-  if (lives.has(f.file)) return;
-  const live: Live = { chunks: [], done: false, ok: false, subs: new Set() };
-  lives.set(f.file, live);
-  const push = (b: Buffer | null) => live.subs.forEach((s) => s(b));
-  void (async () => {
-    try {
-      const onChunk = (b: Buffer) => {
-        live.chunks.push(b);
-        push(b);
-      };
-      // 端到端那副嗓子说不成（接口抽风），就退回语音合成 2.0，别让这条没声
-      live.ok = f.dialog ? (await sayViaDialog(f.text, onChunk)) || (await doubaoTtsStream(f.text, onChunk)) : await doubaoTtsStream(f.text, onChunk);
-      if (live.ok) {
-        fs.mkdirSync(AUDIO_DIR, { recursive: true });
-        fs.writeFileSync(f.file, Buffer.concat(live.chunks));
-      }
-    } catch (e) {
-      console.warn("[dongni] 边合成边播失败：", e instanceof Error ? e.message : e);
-    } finally {
-      live.done = true;
-      push(null);
-      setTimeout(() => lives.delete(f.file), 60_000);
-    }
-  })();
-}
-
-/**
- * 给页面一条能边收边放的音频流：已经合成好就直接给文件；正在合成就接上（先补发已有的几段）；
- * 都没有就现在开始。合成失败返回 null，由调用方退回整段合成。
- */
-export function voiceStream(id: number, content: string): { stream: ReadableStream<Uint8Array>; mime: string } | string | null {
-  if (!ttsReady()) return null;
-  const f = fileFor(id, content);
-  if (!f) return null;
-  try {
-    if (fs.statSync(f.file).size > 512) return f.file;
-  } catch {}
-  prepareVoice(id, content);
-  const live = lives.get(f.file);
-  if (!live) return null;
-  const mime = audioMime(f.file);
-  const stream = new ReadableStream<Uint8Array>({
-    start(controller) {
-      for (const c of live.chunks) controller.enqueue(new Uint8Array(c));
-      if (live.done) {
-        controller.close();
-        return;
-      }
-      const sub = (b: Buffer | null) => {
-        try {
-          if (b) controller.enqueue(new Uint8Array(b));
-          else {
-            live.subs.delete(sub);
-            controller.close();
-          }
-        } catch {
-          live.subs.delete(sub);
-        }
-      };
-      live.subs.add(sub);
-    },
-  });
-  return { stream, mime };
 }

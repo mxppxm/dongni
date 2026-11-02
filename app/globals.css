@@ -676,54 +676,6 @@ a.card:hover,
   background: var(--paper-tile);
 }
 
-/* 每条回复下面的小操作：平时几乎看不见，鼠标移上去才亮 */
-.msg-actions {
-  display: flex;
-  height: 22px;
-  margin-top: 2px;
-  opacity: 0;
-  transition: opacity 0.2s;
-}
-.group:hover .msg-actions,
-.msg-actions:has([data-on="1"]) {
-  opacity: 1;
-}
-.voice-btn {
-  display: flex;
-  width: 22px;
-  height: 22px;
-  align-items: center;
-  justify-content: center;
-  border-radius: 999px;
-  color: var(--faint);
-  transition:
-    color 0.2s,
-    background 0.2s;
-}
-.voice-btn:hover,
-.voice-btn[data-on="1"] {
-  color: var(--dot);
-  background: var(--hover);
-}
-.voice-note {
-  height: 22px;
-  padding: 0 7px;
-  border-radius: 999px;
-  font-size: 12px;
-  color: var(--faint);
-  transition:
-    color 0.2s,
-    background 0.2s;
-}
-/* 念不出来／被拦着，得让人一眼看见，不能靠鼠标移上去才露出来 */
-.msg-actions:has(.voice-note) {
-  opacity: 1;
-}
-.voice-note:hover {
-  color: var(--dot);
-  background: var(--hover);
-}
-
 /* 说话按钮：录音时变红、慢慢呼吸，旁边挂着已经录了几秒 */
 .mic-btn[data-rec="1"] {
   color: #ff5a5a;

@@ -1,16 +1,15 @@
 "use client";
 
 import { AnimatePresence, motion } from "motion/react";
-import { BookHeart, Cpu, LayoutGrid, Moon, Phone, Sparkles, Volume2 } from "lucide-react";
+import { BookHeart, Cpu, LayoutGrid, Moon, Phone, Sparkles } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Theme } from "./Starfield";
-import { useVoice } from "./Voice";
 
 type Models = { active: string; profiles: { id: string; label: string; model: string }[] };
 
 /**
  * 右上角只留一个按钮，点开是一块浮窗：打电话 / 记忆 / 相册三个入口，
- * 下面是自动念、深色、模型线路三个设置。以前五个图标排一排，太挤。
+ * 下面是深色、模型线路两个设置。以前五个图标排一排，太挤。
  */
 export default function Dock({
   theme,
@@ -31,7 +30,6 @@ export default function Dock({
   memCount: number | null;
   pulse: number;
 }) {
-  const { autoplay, setAutoplay } = useVoice();
   const [open, setOpen] = useState(false);
   const [models, setModels] = useState<Models | null>(null);
   const [switching, setSwitching] = useState<string | null>(null);
@@ -128,7 +126,6 @@ export default function Dock({
 
             <div className="my-2 h-px bg-[var(--border)]" />
 
-            <Row icon={<Volume2 size={15} strokeWidth={1.6} />} label="自动念出来" on={autoplay} onClick={() => setAutoplay(!autoplay)} />
             <Row icon={<Moon size={15} strokeWidth={1.6} />} label="深色" on={theme === "dark"} onClick={onToggleTheme} />
 
             {models && models.profiles.length > 1 && (
