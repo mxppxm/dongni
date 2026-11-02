@@ -221,9 +221,11 @@ async function showImage({ path: p }: { path: string }, ctx?: ToolCtx) {
 function drawImage(args: { prompt: string; self?: boolean }) {
   const taskId = startTask("generate_image", `画图：${short(args.prompt)}`);
   void drawNow(args)
-    .then((r) => {
+    .then(async (r) => {
       finishTask(taskId, r.ok, r.ok ? r.markdown : r.message.slice(0, 200));
-      postAssistant(r.ok ? `画好了，你看～\n\n${r.markdown}` : `刚才那张没画出来：${r.message}`);
+      const fact = r.ok ? `你刚才在后台画的「${short(args.prompt, 40)}」画好了，图会贴在你这句话后面。` : `你刚才在后台画的「${short(args.prompt, 40)}」没画出来，真实原因：${r.message}`;
+      const said = await speakAsHer(`${fact}用一两句自然地告诉他，接得上刚才的话头。`, "").catch(() => "");
+      postAssistant([said.trim(), r.ok ? r.markdown : said.trim() ? "" : `没画出来：${r.message}`].filter(Boolean).join("\n\n"));
     })
     .catch((e) => {
       const msg = e instanceof Error ? e.message : String(e);

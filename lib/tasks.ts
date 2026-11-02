@@ -75,3 +75,26 @@ export function markInterrupted() {
     .prepare("UPDATE tasks SET status = 'error', result = '中途重启，没跑完', ended_at = ? WHERE status = 'running' AND kind != 'repair'")
     .run(Date.now());
 }
+
+/**
+ * 给她看的后台真实状态：正在做的、十分钟内做完的。
+ * 画图、派活这些丢到后台的事，回复里只留了一句「我去画了」；不把这里给她看，她下一句就以为自己没做，
+ * 「说了没做」的核对也看不见，会逼她再做一遍（2026-11-02 一通电话里同一张图画了三遍）。
+ */
+export function taskStateLines(now = Date.now()): string {
+  table();
+  const rows = db()
+    .prepare("SELECT * FROM tasks WHERE status = 'running' OR ended_at > ? ORDER BY id DESC LIMIT 12")
+    .all(now - 10 * 60_000) as TaskRow[];
+  const ago = (t: number) => `${Math.max(1, Math.round((now - t) / 60000))} 分钟前`;
+  const running = rows.filter((r) => r.status === "running").map((r) => `「${r.title}」（${ago(r.started_at)}开始，还在做）`);
+  const done = rows
+    .filter((r) => r.status !== "running")
+    .map((r) => `「${r.title}」${r.status === "done" ? "做完了" : `没做成（${r.result.slice(0, 40)}）`}（${ago(r.ended_at ?? now)}）`);
+  return [
+    running.length ? `后台正在做：${running.join("；")}。` : "后台现在没有在做的事。",
+    done.length ? `最近做完的：${done.join("；")}。` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}

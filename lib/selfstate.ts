@@ -6,6 +6,7 @@ import { moodGenerating } from "./moods";
 import { pendingReminders } from "./reminders";
 import { repairStatus } from "./selfrepair";
 import { listDispatches } from "./superagent";
+import { taskStateLines } from "./tasks";
 import { photoState } from "./wardrobe";
 import { voiceReady } from "./voiceconfig";
 
@@ -15,6 +16,7 @@ import { voiceReady } from "./voiceconfig";
  */
 export function selfState(): string {
   const lines: string[] = [];
+  lines.push(taskStateLines());
   lines.push(repairStatus());
   const jobs = listDispatches();
   lines.push(

@@ -328,6 +328,7 @@ export function qwenBridge(page: WebSocket, cfg: QwenConfig, isGoodbye: (t: stri
   let checking = false;
   let enrolling: Buffer[] | null = null;
   let partial = "";
+  let cutThisTurn = false; // 这一句已经让她停过嘴了
 
   // 心跳：页面半开（合盖、切网）时 close 不来，别让「在通话」一直挂着
   let ponged = true;
@@ -385,7 +386,10 @@ export function qwenBridge(page: WebSocket, cfg: QwenConfig, isGoodbye: (t: stri
       verdict = score >= VOICEPRINT_MAYBE;
       log(`声纹 开头 ${score.toFixed(2)} ${score >= VOICEPRINT_MIN ? "是他" : verdict ? "大概是他" : "不像他"}`);
       if (verdict) {
-        interrupt();
+        if (!cutThisTurn) {
+          cutThisTurn = true;
+          interrupt();
+        }
         if (partial) tell({ type: "you", text: partial });
       }
     } catch {
@@ -425,6 +429,7 @@ export function qwenBridge(page: WebSocket, cfg: QwenConfig, isGoodbye: (t: stri
         break;
       case "input_audio_buffer.speech_started":
         partial = "";
+        cutThisTurn = false;
         if (!voiceprint()) {
           utter = []; // 还没声纹：这句攒下来拿去自动录；等识别出成句的话再打断，笑一声、咳一下不算
           break;
@@ -437,6 +442,12 @@ export function qwenBridge(page: WebSocket, cfg: QwenConfig, isGoodbye: (t: stri
         break;
       case "conversation.item.input_audio_transcription.text":
         partial = `${e.text ?? ""}${e.stash ?? ""}`;
+        // 识别出第一个像样的字就让她停嘴（开口后零点几秒），不等声纹那 1.2 秒；
+        // 声纹只决定这句要不要回，不决定她要不要先闭嘴。开头已经认出不是他的除外。
+        if (!cutThisTurn && verdict !== false && !NOISE.test(partial)) {
+          cutThisTurn = true;
+          interrupt();
+        }
         if (partial && (verdict === true || !voiceprint())) tell({ type: "you", text: partial });
         break;
       case "conversation.item.input_audio_transcription.completed": {
@@ -450,7 +461,7 @@ export function qwenBridge(page: WebSocket, cfg: QwenConfig, isGoodbye: (t: stri
           break;
         }
         if (heard && !voiceprint()) {
-          interrupt();
+          if (!cutThisTurn) interrupt();
           if (text.length >= 2) void autoEnroll(heard);
           tell({ type: "you", text });
         } else if (heard && voiceprint()) {
@@ -465,10 +476,10 @@ export function qwenBridge(page: WebSocket, cfg: QwenConfig, isGoodbye: (t: stri
             verdict = null;
             break;
           }
-          if (verdict !== true) interrupt();
+          if (verdict !== true && !cutThisTurn) interrupt();
           tell({ type: "you", text, unsure: maybe });
         } else {
-          interrupt();
+          if (!cutThisTurn) interrupt();
           tell({ type: "you", text });
         }
         verdict = null;
