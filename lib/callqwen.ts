@@ -200,7 +200,6 @@ export function qwenBridge(page: WebSocket, cfg: QwenConfig, isGoodbye: (t: stri
     say: ReturnType<typeof speaker>;
     spoken: string;
     text: string;
-    filler: boolean;
     lastDelta: number;
     fillers: number;
     genDone: boolean;
@@ -265,7 +264,6 @@ export function qwenBridge(page: WebSocket, cfg: QwenConfig, isGoodbye: (t: stri
         ),
         spoken: "",
         text: "",
-        filler: false,
         lastDelta: Date.now(),
         fillers: 0,
         genDone: false,
@@ -291,11 +289,6 @@ export function qwenBridge(page: WebSocket, cfg: QwenConfig, isGoodbye: (t: stri
       current.say.push(e.text);
       current.text += e.text;
       tell({ type: "her", text: current.text });
-    } else if (e.type === "mood" && (e.mood === "run" || e.mood === "draw") && !current.text && !current.filler) {
-      // 要去干活了（查电脑、画画）还一个字没说：先应一声
-      current.filler = true;
-      const lines = e.mood === "draw" ? ["好，我画一下，等我会儿～", "行，我这就画，稍等哦"] : ["好，我弄一下，等我一会儿～", "行，我去看看，马上", "嗯嗯，我来弄，稍等哈"];
-      current.say.push(lines[Math.floor(Math.random() * lines.length)] + "\n");
     } else if (e.type === "done") {
       current.genDone = true;
       current.say.end();

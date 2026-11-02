@@ -591,7 +591,8 @@ async function oneReply(
     // 工具照常执行，但界面上不出现任何调用痕迹：铺垫话丢掉，只留最终回答
     // 画图、拍照要等一分钟：调用前说的那句「我给你画…」留着，算是先跟他说一声；其他工具前的铺垫话照旧丢掉
     const slow = calls.some((c) => ["generate_image", "take_photo", "create_mood"].includes(c.function.name));
-    if (roundText.trim() && !slow) onDiscard();
+    // 打电话时铺垫话已经念出去了：留在记录里，念的和屏幕上的才对得上
+    if (roundText.trim() && !slow && !onCall()) onDiscard();
     else if (roundText.trim()) onText("\n\n");
     msgs.push({ role: "assistant", content: roundText, tool_calls: calls });
     // 去干活了：画图就「画画」，其他都是「跑腿」
