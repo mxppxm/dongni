@@ -22,7 +22,6 @@ import {
 } from "./voiceprint";
 import { wardrobeNote } from "./wardrobe";
 import { qwenBridge, qwenCallConfig } from "./callqwen";
-import { audioPacer } from "./callaudio";
 
 /**
  * 打电话：页面 ⇄ 这里（本机 3940 端口）⇄ 豆包端到端实时语音。
@@ -441,13 +440,8 @@ function bridge(page: WebSocket) {
       "X-Api-Connect-Id": crypto.randomUUID(),
     },
   });
-  // 上行：麦克风的声音按真实时间一包一包喂过去（见 lib/callaudio.ts），主线程被占一下也不会攒成一坨
-  const uplink = audioPacer((pcm) => {
-    if (up.readyState === WebSocket.OPEN) up.send(frame(200, null, sid, 0b0010, pcm));
-  });
   const close = () => {
     clearInterval(beat);
-    uplink.stop();
     unsubscribe();
     unsubscribe = () => {};
     clearInterval(watcher);
@@ -671,7 +665,7 @@ function bridge(page: WebSocket) {
         tell(r.ok ? { type: "enrolled" } : { type: "enroll-failed", message: r.message });
       }
       // 录的时候她别听见（送静音保持连线）
-      uplink.push(Buffer.alloc(pcm.length));
+      up.send(frame(200, null, sid, 0b0010, Buffer.alloc(pcm.length)));
       return;
     }
     pre.push(pcm);
@@ -680,7 +674,7 @@ function bridge(page: WebSocket) {
       utter.push(pcm);
       if (verdict === null && !checking && utter.length >= 60 && voiceprint()) void checkEarly(utter);
     }
-    uplink.push(pcm);
+    up.send(frame(200, null, sid, 0b0010, pcm));
   });
   page.on("close", () => close());
 }

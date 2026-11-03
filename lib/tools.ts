@@ -14,7 +14,6 @@ import { postAssistant, startRepair } from "./selfrepair";
 import { speakAsHer } from "./speak";
 import { cancelDispatch, dispatch, judge, runningJobs } from "./superagent";
 import { finishTask, startTask } from "./tasks";
-import { onCall } from "./presence";
 import { saveVoiceConfig, voiceReady } from "./voiceconfig";
 
 /**
@@ -691,19 +690,14 @@ const TASK_TITLE: Record<string, (a: Record<string, unknown>) => string> = {
  * 回复马上能说完，对话（打字、电话）不被一件慢活卡住——他接着说话她立刻能接。
  * 后台做完：结果（连同挂上的图片、文件卡片）用她的口吻单独发一条进对话，电话里也会念。
  */
-/** 不在电话里时：慢工具可以等一会儿，等到结果就能直接答。 */
 const SOON_MS = 8_000;
-/** 通话中：绝不能把她的嘴占住——1.5 秒没回话就全部转后台，先接着聊别的。 */
-const SOON_ON_CALL_MS = 1_500;
 /** runToolSoon 转后台时返回的开头：对话那边认这个前缀，知道活已经交出去了 */
 export const BACKGROUND_PREFIX = "这件事";
 export async function runToolSoon(name: string, rawArgs: string, ctx: ToolCtx): Promise<string> {
   let late = false;
   const lateAttach: string[] = [];
   const work = runTool(name, rawArgs, { ...ctx, attach: (md) => (late ? lateAttach.push(md) : ctx.attach(md)) });
-  // 打电话时这整个过程不能占用通话循环：等超过这个窗口的活一律交后台，她马上能接下一句话
-  const wait = onCall() ? SOON_ON_CALL_MS : SOON_MS;
-  const quick = await Promise.race([work, new Promise<null>((ok) => setTimeout(() => ok(null), wait))]);
+  const quick = await Promise.race([work, new Promise<null>((ok) => setTimeout(() => ok(null), SOON_MS))]);
   if (quick !== null) return quick;
   late = true;
   let args: Record<string, unknown> = {};
@@ -711,7 +705,7 @@ export async function runToolSoon(name: string, rawArgs: string, ctx: ToolCtx): 
     args = JSON.parse(rawArgs || "{}");
   } catch {}
   const what = TASK_TITLE[name]?.(args) ?? name;
-  console.log(`[dongni] 「${what}」超过 ${wait / 1000} 秒${onCall() ? "（通话中）" : ""}，转后台接着做`);
+  console.log(`[dongni] 「${what}」超过 ${SOON_MS / 1000} 秒，转后台接着做`);
   void work.then(async (out) => {
     const cards = lateAttach.join("\n\n");
     const said = await speakAsHer(
