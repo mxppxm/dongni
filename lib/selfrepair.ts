@@ -344,15 +344,22 @@ async function shelve(why: string) {
 const INFLIGHT_KEY = "repair_inflight";
 type Inflight = { request: string; good: string; taskId: number; at: number };
 
+/** 她自己回看后决定的改进：标着这个的一律不改（他 2026-11-03 定的：只改他让改的） */
+const SELF_INITIATED = "（这是你自己回看后决定的改进）";
+
 export function drainRepairQueue() {
   if (state.running) return;
-  const q = queue();
+  const q = queue().filter((r) => !r.includes(SELF_INITIATED));
   const next = q.shift();
   setKv("repair_queue", JSON.stringify(q));
   if (next) startRepair(next);
 }
 
 export function startRepair(request: string): string {
+  if (request.includes(SELF_INITIATED)) {
+    log(`不改：这是她自己决定的改进，他没让改：${request.slice(0, 80)}`);
+    return "改自己只改他让你改的；这是你自己想改的，没有交出去。别说在改；想法可以照实跟他说，由他决定要不要改。";
+  }
   if (getKv("repair_paused") === "1")
     return "改自己的功能现在被对方暂停了（对方让别人来改）。这次没有交出去，别说你在改；如实告诉对方，你把想法记下了。";
   const again = repeatOf(request);

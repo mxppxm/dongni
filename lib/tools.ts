@@ -13,6 +13,7 @@ import { addLocalImage, IMAGE_EXT, imageMarkdown } from "./images";
 import { postAssistant, startRepair } from "./selfrepair";
 import { speakAsHer } from "./speak";
 import { cancelDispatch, dispatch, judge, runningJobs } from "./superagent";
+import { db } from "./db";
 import { finishTask, startTask } from "./tasks";
 import { saveVoiceConfig, voiceReady } from "./voiceconfig";
 
@@ -555,6 +556,19 @@ export const TOOLS = [
   },
 ];
 
+/** 他让她改东西的说法 */
+const ASK_TO_CHANGE = /改|修|调|优化|加个|加上|去掉|删掉|换成|换个|别再|不要再|关掉|打开|弄成|重做|实现|支持|fix/i;
+
+/** 这条回复对应的、他最近说的那句话（通话里 turnId 不是数字时取最新一句） */
+function lastUserText(assistantId: number): string {
+  const row = (
+    assistantId
+      ? db().prepare("SELECT content FROM messages WHERE id < ? AND role = 'user' ORDER BY id DESC LIMIT 1").get(assistantId)
+      : db().prepare("SELECT content FROM messages WHERE role = 'user' ORDER BY id DESC LIMIT 1").get()
+  ) as { content: string } | undefined;
+  return row?.content ?? "";
+}
+
 const IMPL: Record<string, (a: never, ctx?: ToolCtx) => Promise<string>> = {
   dispatch_task: (async ({ task, dir, force }: { task: string; dir?: string; force?: boolean }) => {
     const j = judge(task, { force });
@@ -619,7 +633,13 @@ const IMPL: Record<string, (a: never, ctx?: ToolCtx) => Promise<string>> = {
       ? "凭据存好了（只存在这台机器的本机配置里），现在能发语音、也能听懂他发的语音。回复里别提 key 本身。"
       : "存了一部分，但还缺：旧版控制台要 APP ID 和 Access Token 一起给，新版控制台给 API Key 就行。";
   }) as (a: never, ctx?: ToolCtx) => Promise<string>,
-  repair_self: async ({ request }: { request: string }) => startRepair(request),
+  repair_self: (async ({ request }: { request: string }, ctx?: ToolCtx) => {
+    // 只改他让改的：这一轮他说的话里得真有让她改的意思，不然是她自己想改，不交出去
+    const asked = lastUserText(Number(ctx?.turnId) || 0);
+    if (!ASK_TO_CHANGE.test(asked))
+      return "他这一轮没让你改自己，改自己只改他让你改的。没有交出去，别说在改；你的想法可以照实跟他说，问他要不要改。";
+    return startRepair(request);
+  }) as (a: never, ctx?: ToolCtx) => Promise<string>,
   set_reminder: setReminder as (a: never, ctx?: ToolCtx) => Promise<string>,
   list_reminders: listReminders,
   cancel_reminder: cancelReminderTool as (a: never) => Promise<string>,
