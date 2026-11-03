@@ -10,6 +10,7 @@ import { recentDiary } from "./diary";
 import { HONESTY, selfState } from "./selfstate";
 import { addUploadedImage, getImage, imageDataUrl, imageIdsIn, imageMarkdown, stripImageMarkdown } from "./images";
 import { checkClaims, correction, maybeClaims } from "./claims";
+import { markWrong, noteDispute, wrongNotes, wrongSuffix } from "./wrongs";
 import { BACKGROUND_PREFIX, runToolSoon, toolsFor } from "./tools";
 import { formatMemories, getProfile, nowText, relevantMemories, scheduleExtraction } from "./memory";
 import { INTRO, PERSONA, SPEAKING } from "./persona";
@@ -143,6 +144,7 @@ function history(beforeOrAtId: number): ChatMessage[] {
       .map((m) => m.id),
   );
   const out: { role: "user" | "assistant"; text: string; images: number[] }[] = [];
+  const wrongs = wrongNotes(rows.filter((m) => m.role === "assistant").map((m) => m.id));
   let prev = 0;
   const recentFrom = rows.length - FULL_TURNS;
   for (const [i, m] of rows.entries()) {
@@ -154,7 +156,7 @@ function history(beforeOrAtId: number): ChatMessage[] {
     let body = stripCards(stripImageMarkdown(m.content));
     const limit = i < recentFrom ? OLD_CHARS : MAX_TURN;
     if (body.length > limit) body = body.slice(0, limit) + "…";
-    const text = stamp + body + (ids.length && !send.length && m.role === "user" ? "（他发了图）" : "");
+    const text = stamp + body + (ids.length && !send.length && m.role === "user" ? "（他发了图）" : "") + wrongSuffix(wrongs.get(m.id));
     const last = out[out.length - 1];
     // 连发多条合成一条，避免出现连续两个 user
     if (last && last.role === m.role) {
@@ -245,6 +247,7 @@ export function startReply(clientId: string, content: string, onEvent: (e: ChatE
         .lastInsertRowid,
     );
     user = d.prepare("SELECT * FROM messages WHERE id = ?").get(id) as MessageRow;
+    void noteDispute(user); // 他像是在说她上一句不对：后台看看是不是真说错了，是就记下，以后不再照着说
   }
 
   // 同一条消息重发：已有回复就接着用（完成的直接返回，没完成的前端去轮询）。
@@ -600,6 +603,7 @@ async function oneReply(
         const v = await checkClaims({ reply: roundText, asked: stripImageMarkdown(userRow.content), tools: did, state: selfState() });
         if (v?.unbacked && !stopped()) {
           console.warn(`[dongni] #${assistantId} 说了没做：「${v.claim}」→ 让她补做或改口（${v.fix}）`);
+          markWrong(assistantId, v.claim, "核对：没做却说了");
           said += roundText;
           msgs.push({ role: "assistant", content: roundText });
           msgs.push({ role: "user", content: `${correction(v)}\n${goOn(said)}` });

@@ -1,6 +1,7 @@
 import "server-only";
 import { db, getKv, setKv, type LinkRow, type MemoryRow, type MessageRow } from "./db";
 import { completeJson } from "./llm";
+import { wrongNotes, wrongSuffix } from "./wrongs";
 import { stripImageMarkdown } from "./images";
 
 export const CATEGORIES = ["人", "偏好", "经历", "近况", "想法"] as const;
@@ -174,8 +175,13 @@ async function extractBatch(pending: MessageRow[]) {
     .prepare("SELECT * FROM messages WHERE id >= ? AND id <= ? + 1 AND status != 'error' AND kind != 'system' ORDER BY id")
     .all(firstId, lastId) as MessageRow[];
 
-  const fmt = (ms: MessageRow[]) =>
-    ms.map((m) => `${m.role === "user" ? `用户[#${m.id}]` : "AI"}（${nowText(m.created_at)}）：${stripImageMarkdown(m.content) || "[图片]"}`).join("\n");
+  // 她说错过的话带上注：别把错话当成事实整理进记忆
+  const fmt = (ms: MessageRow[]) => {
+    const wrongs = wrongNotes(ms.filter((m) => m.role !== "user").map((m) => m.id));
+    return ms
+      .map((m) => `${m.role === "user" ? `用户[#${m.id}]` : "AI"}（${nowText(m.created_at)}）：${stripImageMarkdown(m.content) || "[图片]"}${wrongSuffix(wrongs.get(m.id))}`)
+      .join("\n");
+  };
   const newText = batch.map((m) => m.content).join("\n");
   const existing = relevantMemories(newText, 150);
 
