@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import WebSocket from "ws";
 import { cutReply, startReply } from "./chat";
+import { audioPacer } from "./callaudio";
 import { db } from "./db";
 import { replyMode } from "./llm";
 import { callEnded, callStarted, type ReplyEvent, subscribeReplies } from "./presence";
@@ -106,7 +107,21 @@ export function qwenBridge(page: WebSocket, cfg: QwenConfig, isGoodbye: (t: stri
     let bytes = 0;
     let odd: Buffer | null = null;
     let reported = false;
+    // 合成这头也会卡死（连接半开、commit 之后一句话不回来）：十几秒没动静就收掉这一句，
+    // 别让后面排着的（提醒、派活回来）一直等它——以前就是这么一声不响地没下文了
+    let quiet: NodeJS.Timeout | undefined;
+    const keepAlive = () => {
+      clearTimeout(quiet);
+      quiet = setTimeout(() => {
+        console.warn("[dongni][qwen] 合成 15 秒没动静，这一句先收掉");
+        try {
+          ws?.close();
+        } catch {}
+        done();
+      }, 15_000);
+    };
     const done = () => {
+      clearTimeout(quiet);
       if (reported) return;
       reported = true;
       onDone(bytes / 48000);
@@ -123,13 +138,16 @@ export function qwenBridge(page: WebSocket, cfg: QwenConfig, isGoodbye: (t: stri
       wsP = takeTts();
       void wsP.then((got) => {
         if (!got || myTurn !== turn) {
+          if (!got) console.warn("[dongni][qwen] 合成连接没建起来，这一句跳过");
           got?.close();
           return done();
         }
         ws = got;
+        keepAlive();
         got.on("message", (raw: Buffer) => {
           const e = JSON.parse(raw.toString());
           if (e.type === "response.audio.delta") {
+            keepAlive();
             if (myTurn !== turn) return;
             // 两个字节一个采样：切在奇数字节上的那一个留给下一片
             let buf = Buffer.from(String(e.delta), "base64");
@@ -143,6 +161,7 @@ export function qwenBridge(page: WebSocket, cfg: QwenConfig, isGoodbye: (t: stri
           } else if (e.type === "response.done") {
             chars += Number(e.response?.usage?.characters ?? 0);
           } else if (e.type === "session.finished") {
+            clearTimeout(quiet);
             got.close();
             done();
           } else if (e.type === "error") {
@@ -187,6 +206,7 @@ export function qwenBridge(page: WebSocket, cfg: QwenConfig, isGoodbye: (t: stri
       },
       stop() {
         finished = true;
+        clearTimeout(quiet);
         lines.length = 0;
         try {
           ws?.close();
@@ -249,8 +269,20 @@ export function qwenBridge(page: WebSocket, cfg: QwenConfig, isGoodbye: (t: stri
     speakExtras();
   };
 
+  /** 只收声音、不动记录：新的一句要开口了，上一句还在放就让位，别两个声音叠在一起（叠着就是一团杂音） */
+  const stopAudio = () => {
+    tell({ type: "clear" });
+    turn++;
+    if (!current) return;
+    current.say.stop();
+    clearTimeout(current.playEnd);
+    current = null;
+  };
+
   const onReply = (e: ReplyEvent) => {
     if (e.type === "start") {
+      // 上一句的字已经写进对话了，这里只把还没放完的声音收了
+      if (current) stopAudio();
       generated.add(e.assistantId);
       const me: Speaking = {
         id: e.assistantId,
@@ -280,14 +312,16 @@ export function qwenBridge(page: WebSocket, cfg: QwenConfig, isGoodbye: (t: stri
     }
   };
 
+  /** 她这会儿是不是正在出声（字已经送去念、或者声音还在放） */
+  const sheIsTalking = () => (current && current.spoken) || extraBusy;
+
   /**
    * 他一开口：她正在出声就先停嘴（页面清掉没放完的声音、这一句不再往下念）。
    * 只停声音，不取消回复——是不是他、是不是一句话还没定；她还没开口（还在想、在交活）就什么都不动。
    * 2026-11-02：一段「嘟嘟嘟」的杂音把她还没开口的回复整条取消了，她就一直不吭声。
    */
   const hush = () => {
-    const talking = (current && current.spoken) || extraBusy;
-    if (!talking) return;
+    if (!sheIsTalking()) return;
     tell({ type: "clear" });
     turn++;
     current?.say.stop();
@@ -395,6 +429,12 @@ export function qwenBridge(page: WebSocket, cfg: QwenConfig, isGoodbye: (t: stri
 
   // ─────────── 耳朵：一整通电话一条识别连接 ───────────
   const asr = open(ASR_MODEL);
+  // 上行：麦克风的声音按真实时间一包一包喂给识别（见 lib/callaudio.ts）——
+  // 主线程忙一下再回来，也不把攒下的声音一股脑倒过去（识别那头时间轴一乱，句子就断错了）
+  const up = audioPacer((pcm) => {
+    if (asr.readyState === WebSocket.OPEN)
+      asr.send(JSON.stringify({ type: "input_audio_buffer.append", audio: pcm.toString("base64") }));
+  });
   let ready = false;
   let counted = false;
   let unsubscribe = () => {};
@@ -426,11 +466,15 @@ export function qwenBridge(page: WebSocket, cfg: QwenConfig, isGoodbye: (t: stri
     clearTimeout(waitTimer);
     unsubscribe();
     cancelBye();
+    up.stop();
     current?.say.stop();
     if (counted) callEnded();
     // 识别 0.00033 元/秒，合成 1 元/万字符（北京）
     const secs = (Date.now() - startedAt) / 1000;
-    log(`挂断｜通话 ${Math.round(secs)} 秒，合成 ${chars} 字符｜约 ${(secs * 0.00033 + chars / 10000).toFixed(4)} 元`);
+    log(
+      `挂断｜通话 ${Math.round(secs)} 秒，合成 ${chars} 字符｜约 ${(secs * 0.00033 + chars / 10000).toFixed(4)} 元` +
+        (up.droppedMs() ? `｜上行丢帧 ${up.droppedMs()}ms` : ""),
+    );
     void spare.then((w) => w?.close());
     try {
       asr.close();
@@ -524,8 +568,15 @@ export function qwenBridge(page: WebSocket, cfg: QwenConfig, isGoodbye: (t: stri
         // 识别出第一个像样的字就让她停嘴（开口后零点几秒），不等声纹那 1.2 秒；
         // 声纹只决定这句要不要回，不决定她要不要先闭嘴。开头已经认出不是他的除外。
         if (!cutThisTurn && verdict !== false && !NOISE.test(partial)) {
-          cutThisTurn = true;
-          hush();
+          // 例外：她正在出声的时候，先等开头那一下声纹认完再决定掐不掐。
+          // 扬声器漏回麦克风的她自己的声音，听上去也是「有人开口了」——以前一律立刻掐，
+          // 她就经常一句话说到一半就断在那里（日志里那些「被打断，只记说出口的」一大半是这么来的）。
+          // 认出来是他，checkEarly 里马上停；认出来不是他，就让她把这句说完。
+          const waitVerdict = !!voiceprint() && verdict === null && sheIsTalking();
+          if (!waitVerdict) {
+            cutThisTurn = true;
+            hush();
+          }
         }
         if (partial && (verdict === true || !voiceprint())) tell({ type: "you", text: partial });
         break;
@@ -595,9 +646,7 @@ export function qwenBridge(page: WebSocket, cfg: QwenConfig, isGoodbye: (t: stri
     close();
   });
 
-  // 页面传来的 16k PCM：攒 100ms 转给识别；文字消息是控制（手动录声纹）
-  let chunk: Buffer[] = [];
-  let size = 0;
+  // 页面传来的 16k PCM：先进节拍器，再按真实时间送给识别；文字消息是控制（手动录声纹）
   const ENROLL_BYTES = ENROLL_SECONDS * 32000;
   page.on("message", async (data: Buffer, isBinary: boolean) => {
     if (!isBinary) {
@@ -628,16 +677,11 @@ export function qwenBridge(page: WebSocket, cfg: QwenConfig, isGoodbye: (t: stri
       if (pre.length > 25) pre.shift();
       if (utter) {
         utter.push(pcm);
-        if (verdict === null && !checking && utter.length >= 60 && voiceprint()) void checkEarly(utter);
+        // 她正在出声时早一点认（她一句话被掐断比早认准零点几秒重要）：0.8 秒就够认个大概
+        if (verdict === null && !checking && utter.length >= (sheIsTalking() ? 40 : 60) && voiceprint()) void checkEarly(utter);
       }
     }
-    chunk.push(pcm);
-    size += pcm.length;
-    if (size >= 3200) {
-      asr.send(JSON.stringify({ type: "input_audio_buffer.append", audio: Buffer.concat(chunk).toString("base64") }));
-      chunk = [];
-      size = 0;
-    }
+    up.push(pcm);
   });
   page.on("close", () => close());
 }
