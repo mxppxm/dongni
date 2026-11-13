@@ -17,7 +17,7 @@ import { finishTask, startTask } from "./tasks";
  * 改完做类型检查 → 提交 → 后台重新编译并重启。任何一步失败都退回修改前的版本。
  *
  * 跟别人共用一个代码目录，所以：
- * - 只在工作区干净时开工；有别人没提交的改动就先排队，不把别人的东西吞进自己的提交。
+ * - 工作区里有别人没提交的改动：先原样提交成一笔留底再开工，不把别人的东西吞进自己的提交，也不排队干等。
  * - 退回用 git stash 留底，不用 reset --hard / clean，谁的改动都不会被删掉。
  * - 同一件事连着两次没改成就不再改，改不动的（外部接口没授权、网络不通）也不该反复交给编码助手。
  */
@@ -333,8 +333,6 @@ function dirtyNow() {
   }
 }
 
-let dirtyRetry: NodeJS.Timeout | null = null;
-
 /** 改到一半退回：用 stash 留底，不删任何东西；万一是别人的改动混进来了，也能从 stash 里找回 */
 async function shelve(why: string) {
   if (!(await dirtyFiles()).length) return;
@@ -376,13 +374,17 @@ export function startRepair(request: string): string {
     setKv("repair_queue", JSON.stringify([...queue(), request]));
     return "前面还有一处正在改，这个已经排上队了：前一个改完（可能会重启一下）就接着改这个。如实告诉对方要排一会儿。";
   }
-  // 有人（他、或者别的助手）正在改代码：不碰，排回队首，过一阵再看。要在答话之前查——不然嘴上说「开始改了」其实没动
+  // 代码目录里有别人（他、或者别的助手）没提交的改动：不再因此排队干等——他要的是说改就改。
+  // 先把现有改动原样提交成一笔留底，再开工；她自己的改动另成一笔，退回时只撤她那一笔，别人的东西不丢。
   const dirty = dirtyNow();
   if (dirty.length) {
-    log(`代码目录里有没提交的改动，先不动，10 分钟后再看：${dirty.slice(0, 5).join(" ")}`);
-    setKv("repair_queue", JSON.stringify([request, ...queue().filter((q) => q !== request)]));
-    if (!dirtyRetry) dirtyRetry = setTimeout(() => ((dirtyRetry = null), drainRepairQueue()), 10 * 60_000);
-    return "现在代码目录里有别人正在改的东西，这件先排着没开始改，等那边弄完（十分钟后再看一次）。如实告诉对方还没开始。";
+    try {
+      execFileSync("git", ["add", "-A"], { cwd: ROOT });
+      execFileSync("git", ["commit", "-q", "-m", `自我修复前留底：${dirty.length} 个文件有没提交的改动`], { cwd: ROOT });
+      log(`代码目录里有没提交的改动，先提交留底再开工：${dirty.slice(0, 8).join(" ")}`);
+    } catch (e) {
+      log(`留底提交没成（${e instanceof Error ? e.message : e}），照样开工`);
+    }
   }
   state.running = request.slice(0, 40);
   setKv("repair_started_at", String(Date.now()));
