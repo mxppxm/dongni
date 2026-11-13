@@ -13,7 +13,7 @@
 - **一条路**：打字、语音消息、电话里说的话是同一场对话，回复排一条队；通话时打的字也会在电话里念出来。连着说的几句会合在一起回一次，不会分开回好几段。
 - **动手干活**：查你的 Mac（只读，密钥类文件一律不读）、写文件到 `~/Downloads/敏`、画图、设提醒、润色文字……左边的任务栏把她干的每件事都列出来，画好的图点开就能看。
 - **她自己的小日子**：几套固定的衣服跟着天气换，每天拍一张照片进相册，写一篇日记；该说话时会主动找你。
-- **自己改自己**：你让她改功能、修毛病，她会叫编码助手（[pi](https://github.com/badlogic/pi-mono)）改自己的代码，过了类型检查才提交并重启；改坏了自动退回。
+- **自己改自己**：你让她改功能、修毛病，她会把活交给后台的 DSH superagent 改自己的代码，改完检查没碰内核文件、过了类型检查才提交并重启；改坏了自动退回。
 
 ## 跑起来
 
@@ -37,13 +37,11 @@ pnpm install
 {
   "active": "company",
   "profiles": {
-    "company": { "label": "公司", "baseUrl": "…", "apiKey": "…", "model": "…", "piModel": "provider/模型" },
+    "company": { "label": "公司", "baseUrl": "…", "apiKey": "…", "model": "…" },
     "mine":    { "label": "我的", "baseUrl": "https://api.deepseek.com", "apiKey": "sk-...", "model": "deepseek-flash" }
   }
 }
 ```
-
-`piModel` 可省，写了的话自我修复叫 pi 时也跟着这条线路走。
 
 装了 pi 的话可以不写这个文件，会直接读 `~/.pi/agent/models.json` 和 `settings.json` 里的默认模型。
 
@@ -63,7 +61,7 @@ pnpm start          # 打开 http://localhost:3939，电话服务在 3940（网�
 | 语音消息、念出来、打电话 | 豆包（火山引擎）语音的 key 写到 `~/.config/dongni/voice.json`，见下 | 录音照样能发，她会开口问你要 key；「念出来」退回 edge-tts |
 | 画图、拍照、新表情 | 准备一个 gpt-image 生图脚本放到 `vendor/gptimg/scripts/gptimg.mjs`（`.env` 里写 `GPTIMG_API_KEY`） | 她会照实告诉你画不了、为什么 |
 | 声纹 | 不用配，第一次用自动下载模型（28MB）到 `data/models/` | — |
-| 自己改自己 | 本机装好 pi | 她会说这件事做不了 |
+| 自己改自己、派活 | 本机装好 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 和 dsh-superagent，key 写在 `~/.dsh/env` | 改自己做不了，她会照实说；派活退回内置执行器 |
 
 `~/.config/dongni/voice.json`（权限建议 600）：
 

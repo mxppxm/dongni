@@ -8,7 +8,7 @@ import { LLM_CONFIG } from "./portable";
  * - 多条可切：{ active: "company", profiles: { company: { label, baseUrl, apiKey, model, piModel? }, mine: {…} } }
  * 页面右上角菜单里切的就是 active；改完写回文件，llm.ts 按文件 mtime 自动换线路，不用重启。
  */
-/** piModel：自我修复叫 pi 时用的「provider/模型」，跟着这条线路一起切；不写就用 pi 自己的默认 */
+/** piModel：以前自我修复外挂 pi 时用的，现在改代码交给 superagent，这个字段留着只为老配置文件不报错 */
 export type LlmProfile = { label?: string; baseUrl: string; apiKey: string; model: string; piModel?: string };
 type MultiConfig = { active?: string; profiles: Record<string, LlmProfile> };
 type FileConfig = LlmProfile | MultiConfig;
@@ -57,15 +57,4 @@ export function setActiveProfile(id: string) {
   const tmp = `${LLM_CONFIG}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(c, null, 2), { mode: 0o600 });
   fs.renameSync(tmp, LLM_CONFIG);
-}
-
-/** 自我修复用的 pi 模型参数：当前线路配了 piModel 就跟着它，否则交给 pi 的默认 */
-export function piModelArgs(): string[] {
-  try {
-    if (!hasLlmConfig()) return [];
-    const m = activeProfile().piModel;
-    return m ? ["--model", m] : [];
-  } catch {
-    return [];
-  }
 }

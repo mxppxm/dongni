@@ -1,19 +1,18 @@
 import "server-only";
 import { execFile, execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { piModelArgs } from "./llmconfig";
 import { db, getKv, setKv } from "./db";
 import { speakAsHer } from "./speak";
 import { onCall, whenOffCall } from "./presence";
-import { stallWatchdog } from "./stall";
+import { dshBackend } from "./backend/dsh";
+import type { Job } from "./backend/types";
 import { listDispatches } from "./superagent";
 import { finishTask, startTask } from "./tasks";
 
 /**
- * 自我修复：把用户的要求交给 pi（编码 agent）去改本项目的代码，
+ * 自我修复：把用户的要求交给 DSH superagent 的执行器去改本项目的代码（以前是外挂的 pi，已经拿掉），
  * 改完做类型检查 → 提交 → 后台重新编译并重启。任何一步失败都退回修改前的版本。
  *
  * 跟别人共用一个代码目录，所以：
@@ -23,7 +22,6 @@ import { finishTask, startTask } from "./tasks";
  */
 const run = promisify(execFile);
 const ROOT = process.cwd();
-const PI = process.env.DONGNI_PI_BIN || path.join(os.homedir(), ".local", "bin", "pi");
 const LOG = path.join(ROOT, "logs", "self-repair.log");
 const RESULT = path.join(ROOT, "data", "rebuild-result.json");
 
@@ -49,7 +47,11 @@ async function touchedProtected(good: string) {
   return [...tracked, ...untracked].filter((f) => PROTECTED.includes(f) || PROTECTED_DIRS.some((d) => f.startsWith(d)));
 }
 
-const state = ((globalThis as unknown as { __dongniRepair?: { running: string | null } }).__dongniRepair ??= { running: null });
+/** coder：正在替她改代码的那件 superagent 活（他中途补话、回答它的问题要找得到它） */
+const state = ((globalThis as unknown as { __dongniRepair?: { running: string | null; coder: Job | null } }).__dongniRepair ??= {
+  running: null,
+  coder: null,
+});
 
 function log(line: string) {
   fs.mkdirSync(path.dirname(LOG), { recursive: true });
@@ -74,164 +76,110 @@ async function head() {
   return (await git("rev-parse", "HEAD")).stdout.trim();
 }
 
-function piPrompt(request: string) {
-  return `你在修改「懂你」这个应用自己的代码（你就是这个应用里的 AI 伙伴，现在要改自己）。项目根目录：${ROOT}
+function coderPrompt(request: string) {
+  return `你在修改「懂你」这个聊天应用的代码。项目根目录就是当前工作目录：${ROOT}
 先读 README.md 了解结构。日志在 logs/dongni.log（运行日志）和 logs/self-repair.log。
 
-用户的要求：
+他的要求：
 ${request}
 
-约束：
+怎么干：
+- 直接在这个目录里改文件。不要建分支、不要建 worktree、不要 git commit、不要开 PR、不要 git stash / reset / checkout——提交、编译、重启外面会自动做，你动了版本历史这次改动会被整个作废。
 - 只改这个项目里的代码。不要动 data/、logs/、.next/、node_modules/，不要删用户数据。
 - 以下「内核」文件不许改，改了整次会被作废退回：${PROTECTED.join("、")}。需要新的存储就在别的模块里用 db() 建新表（CREATE TABLE IF NOT EXISTS），或用 kv 表。
 - 改完会自动重启并做健康检查（打开首页、/api/health），检查不过会自动退回。所以首页和 lib/chat.ts 里的 selfTest() 必须保持能用。
 - 不许给她加任何限制：回复字数上限、发消息的次数/间隔/时段、沉默规则、按关键词裁工具、截短她记得的对话……他明确说过不要。要解决「啰嗦」「打扰」这类问题，改她的说话方式和判断，不要加硬卡。
-- 怎么干活最快：直接读相关文件、改、跑 pnpm typecheck，就够了。不要另搭测试脚手架、不要自己写测试脚本去跑（尤其别在脚本里真的设定时器、真的调接口）；不要开浏览器、截图或做界面验证；搜文件只在本项目目录里搜，别在整个用户目录里 find/grep。
+- 怎么最快：直接读相关文件、改、跑 pnpm typecheck，就够了。不要另搭测试脚手架、不要写脚本去真的设定时器或调接口；不要开浏览器、截图或做界面验证；不要另起一个服务实例；搜文件只在本项目目录里搜。
 - 保持原有设计原则：输入方便、动效好看、页面干净、非必要的东西不出现、响应快、不丢东西。不要顺手加没被要求的文案或功能。
-- 不要运行 pnpm build、不要重启服务、不要 git commit——这些外面会自动做。
+- 不要运行 pnpm build、不要重启服务。
 - 改完必须运行 pnpm typecheck，确保通过。
-- 最后用中文、大白话、三五句话告诉用户你改了什么（不要贴代码）。如果判断不该改或改不了，说明原因。`;
+- 能自己判断的自己判断；只有需求有两种理解、猜错代价大的时候才提问。
+- 最后用中文、大白话、三五句话说清你改了什么（不要贴代码）。如果判断不该改或改不了，说明原因。`;
+}
+
+/** 一次改动最多给这么久；再不交卷就叫停（它那边的活是真的停，不是只在这边放手） */
+const CODER_LIMIT_MS = Number(process.env.DONGNI_CODER_LIMIT_MS ?? 40 * 60_000);
+/** 正在改代码的那件活的编号记在库里：这边半路重启了，回来要能把它那边的活停掉 */
+const CODER_KEY = "repair_coder";
+
+/** 等 superagent 能接活：没在线会顺手拉它（见 lib/backend/dsh.ts），最多等两分钟 */
+async function coderReady() {
+  let why = await dshBackend.unavailable();
+  for (let i = 0; why && i < 12; i++) {
+    await new Promise((ok) => setTimeout(ok, 10_000));
+    why = await dshBackend.unavailable();
+  }
+  if (why) throw new Error(`superagent 现在接不了活：${why}`);
 }
 
 /**
- * 跑 pi。用 json 模式把每一步都记到 logs/pi/ 下，慢在哪一步事后能查：
- * 一共几步、模型想了多久、命令跑了多久、最慢的是哪条。
+ * 让 superagent 来改：投一件活过去（工作目录就是本项目），等它交卷，返回它说的改了什么。
+ * 它没做成、被叫停、超时，都抛错——外面按「没改成」退回。
  */
-/** 卡住的判定：这么久没有任何输出，就当这条连接死了，杀掉重来（曾经有次干了等 57 分钟） */
-const STALL_MS = Number(process.env.DONGNI_STALL_MS ?? 180_000);
+async function runCoder(request: string, taskId: number): Promise<string> {
+  await coderReady();
+  const t0 = Date.now();
+  return new Promise<string>((resolve, reject) => {
+    const job: Job = { id: taskId, request: coderPrompt(request), dir: ROOT, extId: "" };
+    let settled = false;
+    const settle = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(limit);
+      state.coder = null;
+      setKv(CODER_KEY, "");
+      fn();
+    };
+    const limit = setTimeout(() => {
+      void dshBackend.cancel(job).catch(() => {});
+      settle(() => reject(new Error(`超过 ${Math.round(CODER_LIMIT_MS / 60_000)} 分钟没改完，已经叫停`)));
+    }, CODER_LIMIT_MS);
+    state.coder = job;
+    dshBackend.start(job, {
+      ext: (extId) => {
+        job.extId = extId;
+        setKv(CODER_KEY, JSON.stringify({ id: taskId, extId }));
+      },
+      event: (type, text) => {
+        if (type === "stage") return;
+        log(`superagent ${type}｜${text.replace(/\s+/g, " ").slice(0, 300)}`);
+        // 它停下来问他：把问题转给他；他的回答由 task_append 送回来（见 repairAppend）
+        if (type === "ask")
+          void say(
+            `你在改自己的代码，改到一半需要他拿个主意。问题原文是：\n${text.slice(0, 800)}\n把这个问题用你的话问他，别替他答。他回答之后用 task_append 把回答转过去。`,
+            `改到一半要你拿个主意：\n\n${text.slice(0, 800)}`,
+            { fresh: true },
+          );
+      },
+      finish: (stage, text) => {
+        log(`superagent 交卷（${stage}）｜用时 ${Math.round((Date.now() - t0) / 1000)} 秒\n--- 结果 ---\n${text}`);
+        settle(() => (stage === "done" ? resolve(text.trim()) : reject(new Error(`superagent 没改成（${stage}）：${text.slice(0, 400)}`))));
+      },
+    });
+  });
+}
 
-async function runPi(request: string): Promise<string> {
-  try {
-    return await runPiOnce(request);
-  } catch (e) {
-    if (!/STALLED/.test(String(e))) throw e;
-    log("上一轮卡在网络上，重来一遍（已经改到磁盘上的文件还在）");
-    return await runPiOnce(
-      `${request}\n\n（刚才那一轮卡在网络上了，代码可能已经改了一部分。先看现在代码的真实状态，接着改完，别从头再来一遍）`,
-    );
-  }
+/** 他中途补的话、对它提问的回答：送给正在改代码的那件活。现在没有在改就返回 null */
+export async function repairAppend(text: string): Promise<string | null> {
+  const job = state.coder;
+  if (!job) return null;
+  const no = await dshBackend.append(job, text);
+  if (no) return `出错了：没补上——${no}`;
+  log(`他补了一句｜${text.replace(/\s+/g, " ").slice(0, 200)}`);
+  return "补上了，改代码的那边下一步就能看到。";
 }
 
 /**
  * 子进程的 locale 由我们补：服务的父进程是 launchd，环境里没有 LANG，
- * Ruby/Python 一类子进程拿到中文会按 ASCII-8BIT 处理，一编码就崩（clacky 就栽在这上面）。
- * Node 自己不在乎，但编译脚本、三方 CLI 在乎。
+ * 编译脚本、三方 CLI 拿到中文会按 ASCII 处理。
  */
 const utf8Env = (): NodeJS.ProcessEnv => ({
   ...process.env,
   LANG: process.env.LANG || "en_US.UTF-8",
   LC_ALL: process.env.LC_ALL || "en_US.UTF-8",
-  RUBYOPT: [process.env.RUBYOPT, "-Eutf-8"].filter(Boolean).join(" "),
 });
 
-/** 明细落盘：长字段（工具结果、提示词）截短，但整行还是合法 JSON，事后能解析 */
-function slimJson(v: unknown) {
-  return JSON.stringify(v, (_k, x) => (typeof x === "string" && x.length > 1500 ? `${x.slice(0, 1500)}…（共 ${x.length} 字）` : x));
-}
-
-async function runPiOnce(request: string): Promise<string> {
-  const dir = path.join(ROOT, "logs", "pi");
-  fs.mkdirSync(dir, { recursive: true });
-  const trace = path.join(dir, `${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`);
-  const t0 = Date.now();
-  return new Promise((resolve, reject) => {
-    const child = spawn(PI, ["-p", "--no-session", "--no-mcp", "--no-skills", ...piModelArgs(), "--mode", "json", "--thinking", "high", piPrompt(request)], {
-      cwd: ROOT,
-      env: utf8Env(),
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let buf = "";
-    let err = "";
-    let finalText = "";
-    let lastAt = Date.now();
-    let stalled = false;
-    /** pi 最后一条回话是怎么结束的：error / aborted 说明它其实没干完，只是进程正常退出了 */
-    let stopReason = "";
-    let steps = 0;
-    let toolMs = 0;
-    const toolStart = new Map<string, { at: number; what: string }>();
-    let slowest = { ms: 0, what: "" };
-    const onEvent = (e: Record<string, unknown>, at: number) => {
-      const type = e.type as string;
-      if (type === "turn_start") steps++;
-      if (type === "tool_execution_start") {
-        const args = JSON.stringify(e.args ?? {}).slice(0, 120);
-        toolStart.set(String(e.toolCallId), { at, what: `${e.toolName} ${args}` });
-      }
-      if (type === "tool_execution_end") {
-        const st = toolStart.get(String(e.toolCallId));
-        if (st) {
-          const ms = at - st.at;
-          toolMs += ms;
-          if (ms > slowest.ms) slowest = { ms, what: st.what };
-        }
-      }
-      if (type === "message_end") {
-        const m = e.message as { role?: string; content?: unknown; stopReason?: string };
-        if (m?.role === "assistant") {
-          stopReason = String(m.stopReason ?? "");
-          const c = m.content;
-          const text = typeof c === "string" ? c : Array.isArray(c) ? c.filter((x) => x?.type === "text").map((x) => x.text).join("") : "";
-          if (text.trim()) finalText = text.trim();
-        }
-      }
-    };
-    // 看门狗：连接挂死时 pi 自己不设超时，会一直干等（曾经一次等了 57 分钟）
-    const stopWatchdog = stallWatchdog({
-      stallMs: STALL_MS,
-      touch: () => lastAt,
-      onStall: () => {
-        stalled = true;
-        log(`pi 卡住了：${Math.round((Date.now() - lastAt) / 1000)} 秒没有任何输出（已跑 ${Math.round((Date.now() - t0) / 1000)} 秒），杀掉重来`);
-        child.kill("SIGTERM");
-        setTimeout(() => child.kill("SIGKILL"), 5000);
-      },
-    });
-
-    child.stdout.on("data", (chunk: Buffer) => {
-      const at = Date.now();
-      lastAt = at;
-      buf += chunk.toString("utf8");
-      let i;
-      while ((i = buf.indexOf("\n")) >= 0) {
-        const line = buf.slice(0, i);
-        buf = buf.slice(i + 1);
-        if (!line.trim()) continue;
-        try {
-          const e = JSON.parse(line);
-          // message_update 是逐字增量，太多了，不落盘
-          if (e.type !== "message_update") fs.appendFileSync(trace, slimJson({ t: at - t0, ...e }) + "\n");
-          onEvent(e, at);
-        } catch {
-          // 不是 json 的行忽略
-        }
-      }
-    });
-    child.stderr.on("data", (b) => {
-      lastAt = Date.now();
-      err += b;
-    });
-    child.on("error", reject);
-    child.on("close", (code) => {
-      stopWatchdog();
-      if (stalled) return reject(new Error(`STALLED：连着 ${Math.round(STALL_MS / 1000)} 秒没动静（一共跑了 ${Math.round((Date.now() - t0) / 1000)} 秒），已杀掉`));
-      const total = Date.now() - t0;
-      const sec = (ms: number) => `${Math.round(ms / 1000)} 秒`;
-      log(
-        `pi 退出 code=${code}｜用时 ${sec(total)}，${steps} 步，模型思考约 ${sec(total - toolMs)}，跑命令 ${sec(toolMs)}；最慢一步 ${sec(slowest.ms)}：${slowest.what}｜明细 ${path.relative(ROOT, trace)}\n--- 结果 ---\n${finalText}\n--- stderr ---\n${err.slice(-4000)}`,
-      );
-      // 进程正常退出不等于干完了：最后一句是连接出错 / 被中止，或者压根没给结论，都按没改成算，
-      // 不能记成「看过了，不用改」——不然下一轮又会把同一件事提一遍
-      if (code === 0 && (stopReason === "error" || stopReason === "aborted"))
-        reject(new Error(`pi 半路出错了（${stopReason}），没干完：${finalText.slice(-300) || "没有结论"}`));
-      else if (code === 0 && !finalText) reject(new Error("pi 退出了，但没给任何结论"));
-      else if (code === 0) resolve(finalText);
-      else reject(new Error(`pi 退出码 ${code}：${(err || finalText).slice(-500)}`));
-    });
-  });
-}
-
-/** pi 改完后的硬检查：不许自己提交/改历史，不许碰内核 */
+/** 改完后的硬检查：不许自己提交/改历史，不许碰内核 */
 async function guard(good: string) {
   if ((await head()) !== good) throw new Error("改动里动了版本历史，不允许");
   const bad = await touchedProtected(good);
@@ -341,7 +289,7 @@ async function shelve(why: string) {
   );
 }
 
-/** 正在进行中的那次改动，记在库里：pi 跑到一半服务被重启了，回来能收拾干净 */
+/** 正在进行中的那次改动，记在库里：改到一半服务被重启了，回来能收拾干净 */
 const INFLIGHT_KEY = "repair_inflight";
 type Inflight = { request: string; good: string; taskId: number; at: number };
 
@@ -400,7 +348,7 @@ export function startRepair(request: string): string {
       good = await head();
       setKv(INFLIGHT_KEY, JSON.stringify({ request, good, taskId, at: Date.now() } satisfies Inflight));
 
-      let summary = await runPi(request);
+      let summary = await runCoder(request, taskId);
       await guard(good);
       const changed = (await git("status", "--porcelain")).stdout.trim();
       if (!changed) {
@@ -412,10 +360,10 @@ export function startRepair(request: string): string {
       try {
         await run("pnpm", ["typecheck"], { cwd: ROOT, maxBuffer: 20 << 20 });
       } catch (e) {
-        // 类型检查没过：让 pi 再修一次
+        // 类型检查没过：让它再修一次
         const msg = (e as { stdout?: string }).stdout?.slice(-3000) ?? String(e);
-        log(`typecheck 失败，让 pi 再修：\n${msg}`);
-        summary = await runPi(`${request}\n\n（上一轮改完 pnpm typecheck 没通过，报错如下，请修好）\n${msg}`);
+        log(`typecheck 失败，再修一次：\n${msg}`);
+        summary = await runCoder(`${request}\n\n（上一轮已经改过，代码就在目录里，但 pnpm typecheck 没通过，报错如下。接着现在的代码修好，别从头再来）\n${msg}`, taskId);
         await guard(good);
         await run("pnpm", ["typecheck"], { cwd: ROOT, maxBuffer: 20 << 20 });
       }
@@ -471,7 +419,7 @@ export function startRepair(request: string): string {
       if (!restarting) setTimeout(drainRepairQueue, 1000);
     }
   })();
-  return "已经交给编码助手开始改了。改代码要几分钟，改好会在对话里告诉对方，然后自动重启。";
+  return "已经交到后台开始改了。改代码要几分钟，改好会在对话里告诉对方，然后自动重启。";
 }
 
 /**
@@ -496,7 +444,7 @@ async function waitIdle() {
 }
 
 /**
- * 启动时收拾：上一次 pi 跑到一半服务被重启了（pi 跟着服务一起没了），
+ * 启动时收拾：上一次改到一半服务被重启了，
  * 改了一半的文件 stash 留底，任务栏那件收尾，免得下一次把半成品当成「好的版本」。
  */
 export function recoverInterruptedRepair() {
@@ -506,6 +454,16 @@ export function recoverInterruptedRepair() {
   } catch {}
   if (!r || state.running) return;
   setKv(INFLIGHT_KEY, "");
+  // 这边没了，superagent 那边可能还在接着改这个目录：先把那件活停掉，再收拾改了一半的文件
+  try {
+    const c = JSON.parse(getKv(CODER_KEY) || "null") as { id: number; extId: string } | null;
+    setKv(CODER_KEY, "");
+    if (c?.extId) {
+      const job: Job = { id: c.id, request: "", dir: ROOT, extId: c.extId };
+      dshBackend.resume(job, { ext: () => {}, event: () => {}, finish: () => {} });
+      void dshBackend.cancel(job).then((no) => log(no ? `上次那件改代码的活没停成：${no}` : "上次那件改代码的活已经停掉"));
+    }
+  } catch {}
   log(`上次改到一半服务被重启了，收拾掉：${r.request}`);
   void shelve(r.request).then(() => {
     noteAttempt(r.request, false);

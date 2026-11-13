@@ -8,7 +8,7 @@ import type { Backend, Job, JobHooks } from "./backend/types";
 import { inLane } from "./lane";
 import { notify, onBack, pageVisible } from "./notify";
 import { onCall } from "./presence";
-import { postAssistant } from "./selfrepair";
+import { postAssistant, repairAppend } from "./selfrepair";
 import { speakAsHer } from "./speak";
 import { addJobEvent, createJob, endJob, getJob, jobEvents, openJobs, recentJobs, setJobProgress, updateJob, type JobRow, type JobStage } from "./tasks";
 
@@ -322,7 +322,11 @@ export async function cancelDispatch(id?: string): Promise<{ ok: boolean; cancel
 export async function appendDispatch(id: string | undefined, text: string): Promise<string> {
   if (!text?.trim()) return "要补什么得说清楚。";
   const { job, why } = pick(id, openJobs());
-  if (!job) return `出错了：没补上——${why}`;
+  if (!job) {
+    // 派出去的活里没有：看看是不是她正在改自己，那件也收补话
+    const viaRepair = await repairAppend(text.trim());
+    return viaRepair ?? `出错了：没补上——${why}`;
+  }
   if (!job.backend) return "出错了：这件还在排队没人接，补不进去；先叫停，带上新要求重新派。";
   const no = await byName(job.backend)?.append(asJob(job), text.trim());
   if (no) return `出错了：没补上——${no}。照实告诉他，别说已经转达了。`;
