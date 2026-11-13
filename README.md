@@ -17,12 +17,13 @@
 
 ## 跑起来
 
-需要 macOS、Node.js 22、pnpm。
+需要 macOS、Node.js 22.19+ 和 pnpm 9.15.4。下列步骤先启动懂你；需要 Superagent（SA）派活和自改能力，再继续本节末尾的 SA 安装步骤。
 
 ```bash
 git clone https://github.com/mxppxm/dongni.git
 cd dongni
 pnpm install
+mkdir -p config
 ```
 
 **1. 配大模型（必需）。** 任何 OpenAI 兼容接口都行，写到 `config/llm.json`（这个目录不进仓库）：
@@ -53,6 +54,14 @@ pnpm start          # 打开 http://localhost:3939，电话服务在 3940（网�
 ```
 
 想开机自启，可以自己写一个 launchd 配置跑 `pnpm start`（工作目录设成项目目录）。
+
+**3. 安装 Superagent（可选）。** SA 源码已包含在 `vendor/dsh-superagent/`，但它是独立服务，根目录的 `pnpm install` 和 `pnpm start` 不会安装或启动 SA。请继续按 [懂你与 SA 安装配置说明](vendor/dsh-superagent/DONGNI.md) 操作，里面包含依赖安装、Harness profile、GitHub 账户、本地收件箱和执行目录配置。
+
+当前 SA 即使只处理本地任务，也要求配置一个自己有写权限的 GitHub 仓库，以及已登录的 GitHub CLI；可以使用自己的懂你 fork。懂你与 Harness 的模型配置分别填写。只运行懂你、不安装 SA 时，普通派活使用内置执行器，自改不可用。
+
+自改完成后的自动重启还依赖 launchd：当前脚本固定使用 `com.mico.dongni` 和 `~/Library/LaunchAgents/com.mico.dongni.plist`。只有手动 `pnpm start` 的安装，请先按 [SA 说明中的自改前置条件](vendor/dsh-superagent/DONGNI.md#自改前置条件) 配置服务，再使用自改功能。
+
+本文提供安装配置步骤；尚未完成全新机器从克隆到启动、派活和自改的完整验收。
 
 ### 可选能力
 
