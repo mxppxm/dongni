@@ -8,7 +8,7 @@ import type { Backend, Job, JobHooks } from "./backend/types";
 import { inLane } from "./lane";
 import { notify, onBack, pageVisible } from "./notify";
 import { onCall } from "./presence";
-import { postAssistant, repairAppend } from "./selfrepair";
+import { cancelRepair, postAssistant, repairAppend } from "./selfrepair";
 import { speakAsHer } from "./speak";
 import { addJobEvent, createJob, endJob, getJob, jobEvents, openJobs, recentJobs, setJobProgress, updateJob, type JobRow, type JobStage } from "./tasks";
 
@@ -323,7 +323,11 @@ export function dispatchStatus(): string {
 /** 叫停一件后台活：真停执行那边，不是只改账 */
 export async function cancelDispatch(id?: string): Promise<{ ok: boolean; cancelled: string[]; why?: string }> {
   const { job, why } = pick(id, openJobs());
-  if (!job) return { ok: false, cancelled: [], why };
+  if (!job) {
+    // 派出去的活里没有：看看是不是正在改她自己的那件——那件也得停得掉
+    const r = await cancelRepair(id);
+    return r ? { ok: r.ok, cancelled: [r.text], why: r.text } : { ok: false, cancelled: [], why };
+  }
   // 还没人接：直接销账
   if (!job.backend) {
     endJob(job.id, "stopped", "他叫停了，还没开始做", "他叫停了，还没开始做");

@@ -597,11 +597,23 @@ async function oneReply(
         const v = await checkClaims({ reply: roundText, asked: stripImageMarkdown(userRow.content), tools: did, state: selfState() });
         if (v?.unbacked && !stopped()) {
           console.warn(`[dongni] #${assistantId} 说了没做：「${v.claim}」→ 让她补做或改口（${v.fix}）`);
-          markWrong(assistantId, v.claim, "核对：没做却说了");
-          said += roundText;
           msgs.push({ role: "assistant", content: roundText });
-          msgs.push({ role: "user", content: `${correction(v)}\n${goOn(said)}` });
-          onText("\n\n");
+          if (onCall()) {
+            // 电话里这段已经念出去了，收不回：接着往下说，改口
+            markWrong(assistantId, v.claim, "核对：没做却说了");
+            said += roundText;
+            msgs.push({ role: "user", content: `${correction(v)}\n${goOn(said)}` });
+            onText("\n\n");
+          } else {
+            // 打字：这段还只是屏幕上的半成品——整段收回，让她照实重说一遍。
+            // 以前是在后面接一句「刚才说错了，其实没弄」，一条回复里自己打自己的脸，读着像坏了。
+            onDiscard();
+            said = "";
+            msgs.push({
+              role: "user",
+              content: `（系统核对：你刚才那段回复里「${v.claim.slice(0, 80)}」这句不属实——这一轮你没有真的调用工具去做，后台状态里也没有这件事。那段回复已经收回，他不会看到。现在重新回他这句话：这件事能做，就先调用对应的工具（${v.fix || "对应的工具"}）真的去做，做完再照结果说；做不了或者不该做，就照现在的真实情况说。直接给出完整的回复，不要出现「刚才说错了」「其实没弄」这类改口的话。）`,
+            });
+          }
           continue;
         }
       }

@@ -50,7 +50,7 @@ const PROTECTED = [
 const PROTECTED_DIRS = ["data/", "logs/", ".git/"];
 
 /** 正在改的一件：要求、任务栏那一行、它的代码副本、替她改代码的那件 superagent 活 */
-type Repair = { taskId: number; request: string; wt: string; branch: string; at: number; coder: Job | null };
+type Repair = { taskId: number; request: string; wt: string; branch: string; at: number; coder: Job | null; stopped?: boolean; abort?: () => void };
 /** 这一批已经并回来、等重启生效的改动：good 是这一批开始之前的版本（体检不过退回这里） */
 type Batch = { good: string; fix: string; items: { taskId: number; request: string; summary: string }[] };
 type State = { repairs: Map<number, Repair>; merging: Promise<unknown>; batch: Batch | null; restarting: boolean };
@@ -157,6 +157,8 @@ async function runCoder(r: Repair, request: string): Promise<string> {
       settle(() => reject(new Error(`超过 ${Math.round(CODER_LIMIT_MS / 60_000)} 分钟没改完，已经叫停`)));
     }, CODER_LIMIT_MS);
     r.coder = job;
+    // 他叫停：这边马上放手（那边的活由 cancelRepair 去停）
+    r.abort = () => settle(() => reject(new Error("他叫停了")));
     dshBackend.start(job, {
       ext: (extId) => {
         job.extId = extId;
@@ -192,6 +194,27 @@ async function runCoder(r: Repair, request: string): Promise<string> {
       },
     });
   });
+}
+
+/**
+ * 叫停一件正在改自己的活：superagent 那边真停，这件的代码副本删掉，运行中的代码没被碰过。
+ * 没有在改的返回 null；已经并进来等重启的那些停不了（它们已经是代码的一部分了）。
+ */
+export async function cancelRepair(id?: string): Promise<{ ok: boolean; text: string } | null> {
+  const live = [...state.repairs.values()].filter((r) => !r.stopped);
+  if (!live.length) return null;
+  const want = Number(String(id ?? "").replace(/[^0-9]/g, ""));
+  const picked = want ? live.filter((x) => x.taskId === want) : live;
+  if (want && !picked.length) return null;
+  for (const r of picked) {
+    r.stopped = true;
+    log(`#${r.taskId} 他叫停了`);
+    if (r.coder) await dshBackend.cancel(r.coder).catch(() => {});
+    r.abort?.();
+  }
+  // 排着队还没开始的也一并撤掉：他说停，就别等这几件停完又冒出新的
+  if (!want) setKv("repair_queue", "[]");
+  return { ok: true, text: `改自己的那${picked.length > 1 ? `${picked.length} 件` : "件"}停掉了（${picked.map((r) => `#${r.taskId}`).join("、")}），还没并进来的改动都丢掉了，运行中的代码没动。${want ? "" : "排着队的也撤了。"}` };
 }
 
 /** 他中途补的话、对它提问的回答：送给正在改代码的那件活。现在没有在改就返回 null；同时改着好几件要说是哪件 */
@@ -417,7 +440,9 @@ async function pipeline(r: Repair, attempt = 1): Promise<void> {
   try {
     log(`==== ${tag} 开始${attempt > 1 ? "（和别的改动撞了，在最新代码上重来）" : ""}：${r.request}`);
     const base = await prepareWorktree(r);
+    if (r.stopped) throw new Error("他叫停了");
     let summary = await runCoder(r, r.request);
+    if (r.stopped) throw new Error("他叫停了");
     await guard(r.wt, base);
     if (!(await gitIn(r.wt, "status", "--porcelain")).stdout.trim()) {
       await say(`你看了一圈，这次没有改代码。后台的说明：${summary}`, "看了一圈，这次没动代码。");
@@ -474,9 +499,12 @@ async function pipeline(r: Repair, attempt = 1): Promise<void> {
     log(`${tag} 并进来了`);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    log(`${tag} 失败：${msg}`);
-    noteAttempt(r.request, false);
-    await say(`这次改自己（${r.request.replace(/\s+/g, " ").slice(0, 40)}）没改成，运行中的代码没被动过，什么都没坏。原因（技术细节别说）：${msg.slice(0, 200)}`, "这次没改成，啥也没坏。").catch(() => {});
+    log(`${tag} ${r.stopped ? "被叫停" : "失败"}：${msg}`);
+    // 他叫停的不算「改不成」，也不用再说一遍——叫停的那句回复里已经说了
+    if (r.stopped) note = "他叫停了";
+    else noteAttempt(r.request, false);
+    if (!r.stopped)
+      await say(`这次改自己（${r.request.replace(/\s+/g, " ").slice(0, 40)}）没改成，运行中的代码没被动过，什么都没坏。原因（技术细节别说）：${msg.slice(0, 200)}`, "这次没改成，啥也没坏。").catch(() => {});
   } finally {
     if (!handed) {
       await removeWorktree(r).catch(() => {});

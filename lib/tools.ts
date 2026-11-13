@@ -480,7 +480,7 @@ export const TOOLS = [
     type: "function",
     function: {
       name: "cancel_task",
-      description: "把派出去、还在跑的活真的停掉（他说「别弄了」「停下」「先不用了」时用）。不调用这个，活就还在跑，不能说「停了」。只有一件在跑时 id 可以不写。",
+      description: "把后台还在跑的活真的停掉：派出去的活、正在改你自己代码的活都归它管（他说「别弄了」「停下」「先不用了」「别改了」时用）。不调用这个，活就还在跑，不能说「停了」。只有一件在跑时 id 可以不写。",
       parameters: {
         type: "object",
         properties: { id: { type: "string", description: "要停的那件的编号（dispatch_status 里看得到），只有一件在跑时可省" } },

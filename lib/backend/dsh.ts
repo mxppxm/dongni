@@ -223,7 +223,9 @@ function readTicket(t: Ticket, since = 0): { kind: "open"; stage: JobStage } | {
   }
   if (t.stage === "person") {
     if (t.action === "answer") return { kind: "ask", id: String(t.attention?.id ?? ""), question: String(t.attention?.question ?? "") };
-    if (t.action === "blocked" || t.action === "failed") return { kind: "end", stage: "failed" };
+    // 受阻：它停在半路等人回话（需求有歧义、缺东西）。当成提问转给他；他回了话它就接着干
+    if (t.action === "blocked") return { kind: "ask", id: `blocked:${String(t.summary ?? "").length}`, question: String(t.summary ?? "它卡住了，等你回话") };
+    if (t.action === "failed") return { kind: "end", stage: "failed" };
     if (t.action === "review") return { kind: "end", stage: "done" };
   }
   return { kind: "open", stage: t.stage === "working" && t.action === "queued" ? "queued" : "working" };
