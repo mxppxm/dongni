@@ -44,7 +44,8 @@ function dshEnv(): Record<string, string> {
   try {
     for (const line of fs.readFileSync(path.join(os.homedir(), ".dsh", "env"), "utf8").split("\n")) {
       const m = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
-      if (m) out[m[1]] = m[2].trim().replace(/^(["'])(.*)\1$/, "$2");
+      // 他个人的 DeepSeek 账户不带过去：superagent 现在走公司网关（~/.dsh/settings.yaml 里的 company 线路，key 是 DONGNI_COMPANY_API_KEY）
+      if (m && m[1] !== "DEEPSEEK_API_KEY") out[m[1]] = m[2].trim().replace(/^(["'])(.*)\1$/, "$2");
     }
   } catch {}
   return out;
@@ -71,6 +72,10 @@ export function ensureSuperagent(why: string) {
       execFileSync("tmux", ["set-environment", "-g", k, v], { env, stdio: "ignore", timeout: 5_000 });
     } catch {}
   }
+  try {
+    execFileSync("tmux", ["set-environment", "-g", "-u", "DEEPSEEK_API_KEY"], { env, stdio: "ignore", timeout: 5_000 });
+  } catch {}
+  delete (env as Record<string, string | undefined>).DEEPSEEK_API_KEY;
   if (!Object.keys(keys).length) console.warn("[dongni][dsh] ~/.dsh/env 里没读到 key，superagent 起来后可能调不了模型");
   execFile(
     "/usr/bin/python3",
@@ -172,8 +177,8 @@ export function dshActivity(jobId: number): Activity | null {
 /** 这么久没有任何动静，就当它卡住了 */
 const STALL_MS = 5 * 60_000;
 
-type Watch = { job: Job; hooks: JobHooks; seen: Set<string>; ticket: string; asked: string; summary: string; since: number; lastTicketAt: number; busy: boolean; stalledAt: number };
-type Saved = { seen: string[]; ticket: string; asked: string; since: number; summary?: string };
+type Watch = { job: Job; hooks: JobHooks; seen: Set<string>; ticket: string; asked: string; summary: string; since: number; lastTicketAt: number; busy: boolean; stalledAt: number; lastThreadAt: number; adopted: boolean };
+type Saved = { seen: string[]; ticket: string; asked: string; since: number; summary?: string; adopted?: boolean };
 
 const state = ((globalThis as unknown as { __dongniDsh?: { watches: Map<number, Watch>; timer: NodeJS.Timeout | null } }).__dongniDsh ??= {
   watches: new Map<number, Watch>(),
@@ -182,7 +187,7 @@ const state = ((globalThis as unknown as { __dongniDsh?: { watches: Map<number, 
 
 const savedKey = (id: number) => `dsh_watch:${id}`;
 function save(w: Watch) {
-  setKv(savedKey(w.job.id), JSON.stringify({ seen: [...w.seen], ticket: w.ticket, asked: w.asked, since: w.since, summary: w.summary } satisfies Saved));
+  setKv(savedKey(w.job.id), JSON.stringify({ seen: [...w.seen], ticket: w.ticket, asked: w.asked, since: w.since, summary: w.summary, adopted: w.adopted } satisfies Saved));
 }
 
 async function api(method: "GET" | "POST", route: string, timeoutMs = 4_000): Promise<Record<string, unknown>> {
@@ -206,7 +211,10 @@ type Ticket = {
 };
 
 /** 工单现在算什么：还在干 / 在等他回答 / 已经有结论 */
-function readTicket(t: Ticket): { kind: "open"; stage: JobStage } | { kind: "ask"; id: string; question: string } | { kind: "end"; stage: "done" | "failed" | "stopped" } {
+function readTicket(t: Ticket, since = 0): { kind: "open"; stage: JobStage } | { kind: "ask"; id: string; question: string } | { kind: "end"; stage: "done" | "failed" | "stopped" } {
+  // 这件活被并到了一张以前的工单上：那张工单在这件活之前的「已结束」是上一次的，不算这一次的结果
+  const endedAt = t.ended && (t.ended as { at?: string }).at ? Date.parse(String((t.ended as { at?: string }).at)) : 0;
+  if (t.ended && since && endedAt && endedAt < since) return { kind: "open", stage: "working" };
   if (t.state === "ended" || t.stage === "ended" || t.ended) {
     const how = `${t.ended?.outcome ?? ""} ${t.ended?.by ?? ""} ${t.ended?.reason ?? ""}`;
     if (/stop/i.test(how)) return { kind: "end", stage: "stopped" };
@@ -259,6 +267,22 @@ async function check(w: Watch) {
     save(w);
   }
 
+  // 一直没等到接单：它可能没新开工单，而是把这件并到了一张以前的相关工单上（回复不会写到这件活的目录里）。
+  // 去问这件活的线程挂在哪张工单上，挂上了就改盯那张——2026-11-13 有一件就这么被当成「没人接单」，其实早做完了。
+  if (!w.ticket && Date.now() - w.since > 15_000 && Date.now() - w.lastThreadAt > 15_000) {
+    w.lastThreadAt = Date.now();
+    try {
+      const th = (await api("GET", `threads/${encodeURIComponent(`local:${w.job.extId}`)}`)) as { tickets?: { id?: string }[] };
+      const id = th.tickets?.[0]?.id;
+      if (id) {
+        w.ticket = String(id);
+        w.adopted = true;
+        save(w);
+        w.hooks.event("adopted", "superagent 没新开工单，把这件并到了一张以前的相关工单上接着干", "working");
+      }
+    } catch {}
+  }
+
   // 工单走到哪了：有新回复时一定问一次（分清是结果还是提问），平时隔一阵问一次
   let ticket: ReturnType<typeof readTicket> | null = null;
   let summary = "";
@@ -266,7 +290,7 @@ async function check(w: Watch) {
     w.lastTicketAt = Date.now();
     try {
       const t = (await api("GET", `tickets/${encodeURIComponent(w.ticket)}`)) as Ticket;
-      ticket = readTicket(t);
+      ticket = readTicket(t, w.adopted ? w.since : 0);
       summary = String(t.summary ?? "");
     } catch {
       // 面板问不到（它在重启、没开）：有回复就照回复办，没有就下一轮再问
@@ -345,6 +369,8 @@ function watch(job: Job, hooks: JobHooks, saved?: Saved) {
     lastTicketAt: 0,
     busy: false,
     stalledAt: 0,
+    lastThreadAt: 0,
+    adopted: saved?.adopted ?? false,
   });
   ensureTimer();
 }
@@ -376,7 +402,14 @@ export const dshBackend: Backend = {
       fs.mkdirSync(pending, { recursive: true });
       // 先写成别的后缀再改名：它只认 .json，不会读到写了一半的文件
       const tmp = path.join(pending, `${extId}.tmp`);
-      fs.writeFileSync(tmp, JSON.stringify({ id: extId, text: job.request, from: "owner", cwd: job.dir, at: new Date().toISOString() }), "utf8");
+      fs.writeFileSync(tmp, JSON.stringify({
+          id: extId,
+          // 开头写明是新任务：它的评估有时会把相关的新活并到以前的工单上，那张工单的执行器还在旧目录里，改动会落错地方
+          text: `【这是一件新的、独立的任务（${extId}），不是任何已有工单的后续：请新开工单，在下面指定的工作目录里干，不要并到以前的工单上。】\n\n${job.request}`,
+          from: "owner",
+          cwd: job.dir,
+          at: new Date().toISOString(),
+        }), "utf8");
       fs.renameSync(tmp, path.join(pending, `${extId}.json`));
       hooks.ext(extId);
       const mine = { ...job, extId };

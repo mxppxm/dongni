@@ -345,7 +345,7 @@ export async function appendDispatch(id: string | undefined, text: string): Prom
   const { job, why } = pick(id, openJobs());
   if (!job) {
     // 派出去的活里没有：看看是不是她正在改自己，那件也收补话
-    const viaRepair = await repairAppend(text.trim());
+    const viaRepair = await repairAppend(text.trim(), id);
     return viaRepair ?? `出错了：没补上——${why}`;
   }
   if (!job.backend) return "出错了：这件还在排队没人接，补不进去；先叫停，带上新要求重新派。";
