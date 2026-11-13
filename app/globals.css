@@ -732,50 +732,51 @@ a.card:hover,
   font-variant-numeric: tabular-nums;
   color: var(--paper-sub);
 }
-/* 「在 Finder 中显示」：贴右下角的一个小动作，只有一点淡边，不占一整行 */
+/* 卡片右下角两个小动作：无框、无底的纯图标（外链 = 在浏览器打开，文件夹 = 在 Finder 中显示） */
 .filecard-act {
   flex: none;
-  margin: 0 -3px -2px auto;
-  padding: 2px 8px;
-  border: 1px solid var(--paper-border);
-  border-radius: 999px;
+}
+/* 图标钮：平时很淡，鼠标移上去才亮起来；含义看 title */
+.filecard-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 0 -2px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
   background: transparent;
-  font: inherit;
-  font-size: 11.5px;
-  line-height: 1.45;
-  white-space: nowrap;
-  color: var(--paper-sub);
-  transition:
-    color 0.2s,
-    background 0.2s,
-    border-color 0.2s;
-}
-.filecard-act:hover {
   color: var(--paper-ink);
-  border-color: var(--dot);
-  background: var(--paper-tile);
+  opacity: 0.45;
+  cursor: pointer;
+  transition:
+    opacity 0.2s,
+    color 0.2s;
 }
-/* 网页卡片：整张都能点，去浏览器里开一个新标签页；「在浏览器打开」比 Finder 那行小字显眼一点 */
+.filecard-icon-btn + .filecard-icon-btn {
+  margin-left: -3px;
+}
+.filecard-icon-btn:first-of-type {
+  margin-left: auto;
+}
+.filecard-icon-btn:hover {
+  opacity: 1;
+}
+.filecard-icon-btn:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--dot);
+  outline-offset: 1px;
+}
+.filecard-icon-btn:disabled {
+  cursor: default;
+}
+/* 网页卡片：整张都能点，去浏览器里开一个新标签页 */
 .filecard-web {
   cursor: pointer;
 }
 .filecard-web:focus-visible {
   outline: 2px solid var(--dot);
   outline-offset: 2px;
-}
-.filecard-open {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  color: var(--paper-ink);
-  border-color: var(--dot);
-}
-.filecard-open:hover {
-  background: var(--paper-tile);
-}
-.filecard-open:disabled {
-  opacity: 0.6;
-  cursor: default;
 }
 /* 打不开时先用这一行说明，几秒后自己收回 */
 .filecard-note {

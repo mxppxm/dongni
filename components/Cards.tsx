@@ -1,13 +1,14 @@
 "use client";
 
-import { Bell, BellOff, ExternalLink, File, FileArchive, FileImage, FileText, Globe } from "lucide-react";
+import { Bell, BellOff, ExternalLink, File, FileArchive, FileImage, FileText, Folder, Globe } from "lucide-react";
 import { useEffect, useState } from "react";
 import { openInBrowser } from "./openBrowser";
 
 /**
  * 卡片：链接、文件、提醒。链接和提醒用同一套壳（浅底、细边框、圆角、hover 微微上浮）；
  * 文件卡片单独做成一张纸的样子：左边类型图标，右边文件名 + 类型/大小/时间，
- * 「在 Finder 中显示」只是右下角一行小字，不做成按钮。
+ * 右下角两个无框小图标：外链 = 在浏览器打开（网页文件才有），文件夹 = 在 Finder 中显示，
+ * 平时很淡，鼠标移上去才亮起来；含义放在 title 里。
  * 内容全部来自消息里的 JSON，不认 HTML。
  */
 
@@ -248,20 +249,23 @@ function FileCard({ spec }: { spec: Spec }) {
               {html && (
                 <button
                   type="button"
-                  className="filecard-act filecard-open"
+                  className="filecard-act filecard-icon-btn"
                   disabled={busy}
+                  title="在浏览器打开"
+                  aria-label="在浏览器打开"
                   onClick={(e) => {
                     e.stopPropagation();
                     void open();
                   }}
                 >
-                  <ExternalLink size={12} strokeWidth={1.9} />
-                  {opened ? "打开了" : "在浏览器打开"}
+                  <ExternalLink size={15} strokeWidth={1.8} />
                 </button>
               )}
               <button
                 type="button"
-                className="filecard-act"
+                className="filecard-act filecard-icon-btn"
+                title="在 Finder 中显示"
+                aria-label="在 Finder 中显示"
                 onClick={(e) => {
                   e.stopPropagation();
                   setShown(true);
@@ -269,7 +273,7 @@ function FileCard({ spec }: { spec: Spec }) {
                   window.setTimeout(() => setShown(false), 1500);
                 }}
               >
-                {shown && !html ? "打开了" : "在 Finder 中显示"}
+                <Folder size={15} strokeWidth={1.8} />
               </button>
             </>
           )}
