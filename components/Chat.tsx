@@ -184,8 +184,9 @@ export default function Chat() {
   const [memCount, setMemCount] = useState<number | null>(null);
   const [pulse, setPulse] = useState(0);
   const [theme, setTheme] = useState<Theme>("light");
-  // 有后台的活在跑（派出去的、改自己的、排队的）：输入框顶部一条光带慢慢扫；
-  // 活干完先停住动画、所有光缓缓淡掉（1.4 秒）再撤掉这层，回到完全静止的普通输入框
+  // 有活在跑（画图、派出去的、改自己的、排队的）：输入框顶部一条光带慢慢扫；
+  // 活干完先停住动画、所有光缓缓淡掉（1.4 秒）再撤掉这层，回到完全静止的普通输入框。
+  // 任务卡片自己那圈流动光在 Tasks.tsx 里另管
   const runningTasks = useRunningTasks();
   const [sweep, setSweep] = useState({ shown: false, on: false });
   useEffect(() => {
