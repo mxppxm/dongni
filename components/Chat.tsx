@@ -185,7 +185,7 @@ export default function Chat() {
   const [pulse, setPulse] = useState(0);
   const [theme, setTheme] = useState<Theme>("light");
   // 有后台的活在跑（派出去的、改自己的、排队的）：输入框顶部一条光带慢慢扫；
-  // 活干完先把动画淡掉（0.7 秒）再撤掉这层，回到完全静止的普通输入框
+  // 活干完先停住动画、所有光缓缓淡掉（1.4 秒）再撤掉这层，回到完全静止的普通输入框
   const runningTasks = useRunningTasks();
   const [sweep, setSweep] = useState({ shown: false, on: false });
   useEffect(() => {
@@ -194,7 +194,7 @@ export default function Chat() {
       return;
     }
     setSweep((s) => (s.shown ? { ...s, on: false } : s));
-    const t = setTimeout(() => setSweep({ shown: false, on: false }), 720);
+    const t = setTimeout(() => setSweep({ shown: false, on: false }), 1420);
     return () => clearTimeout(t);
   }, [runningTasks]);
 
@@ -813,6 +813,7 @@ export default function Chat() {
             {sweep.shown && (
               <>
                 <span className="sweep-inner" aria-hidden />
+                <span className="sweep-rim" aria-hidden />
                 <span className="sweep-band" aria-hidden />
                 <span className="sweep-outer" aria-hidden />
               </>
