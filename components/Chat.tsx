@@ -7,8 +7,9 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import Dock from "./Dock";
 import Markdown from "./Markdown";
 import Mood from "./Mood";
+import { CompanionDock, type CompanionState } from "./Companion";
 import Starfield, { type Theme } from "./Starfield";
-import { useRunningTasks } from "./Tasks";
+import { useTaskSnapshot } from "./Tasks";
 import { AttachmentStrip, flushAttachments, useAttachments } from "./useAttachments";
 import useAutoReload from "./useAutoReload";
 import MicButton, { type VoiceSendResult } from "./VoiceRecorder";
@@ -184,10 +185,48 @@ export default function Chat() {
   const [memCount, setMemCount] = useState<number | null>(null);
   const [pulse, setPulse] = useState(0);
   const [theme, setTheme] = useState<Theme>("light");
+  const [inputFocused, setInputFocused] = useState(false);
+  const taskSnapshot = useTaskSnapshot();
+  const runningTasks = taskSnapshot?.filter((t) => t.status === "running").length ?? 0;
+  const [companionResult, setCompanionResult] = useState<"success" | "confused" | null>(null);
+  const lastReply = msgs.findLast((m) => m.role === "assistant" && m.kind !== "system");
+  const lastTask = taskSnapshot?.filter((t) => t.endedAt).sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0))[0];
+  const previousReply = useRef<{ key: string; status: Status } | null>(null);
+  const previousTask = useRef<string | null>(null);
+  const resultTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  // 只回应亲眼看到的完成转换；刷新时已有的历史消息和旧任务不触发庆祝。
+  useEffect(() => {
+    const prev = previousReply.current;
+    previousReply.current = lastReply ? { key: lastReply.key, status: lastReply.status } : null;
+    if (!prev || prev.key !== lastReply?.key || prev.status === lastReply.status) return;
+    if (lastReply.status !== "done" && lastReply.status !== "error") return;
+    clearTimeout(resultTimer.current);
+    setCompanionResult(lastReply.status === "error" ? "confused" : "success");
+    resultTimer.current = setTimeout(() => setCompanionResult(null), 2600);
+  }, [lastReply?.key, lastReply?.status]);
+
+  useEffect(() => {
+    if (!taskSnapshot) return;
+    const key = lastTask ? `${lastTask.id}:${lastTask.status}` : "";
+    const prev = previousTask.current;
+    previousTask.current = key;
+    if (prev === null || key === prev || !lastTask) return;
+    clearTimeout(resultTimer.current);
+    setCompanionResult(lastTask.status === "error" ? "confused" : "success");
+    resultTimer.current = setTimeout(() => setCompanionResult(null), 2600);
+  }, [taskSnapshot, lastTask?.id, lastTask?.status]);
+
+  useEffect(() => () => clearTimeout(resultTimer.current), []);
+
+  const pendingReply = msgs.some((m) => m.role === "assistant" && (m.status === "waiting" || m.status === "streaming"))
+    || msgs.some((m) => m.role === "user" && m.status === "sending");
+  const needsAnswer = taskSnapshot?.some((t) => t.status === "running" && t.stage === "asking");
+  const companionState: CompanionState = pendingReply ? "thinking" : needsAnswer ? "confused" : runningTasks > 0 ? "working"
+    : companionResult ?? (inputFocused && draft.length > 0 ? "typing" : "idle");
   // 有活在跑（画图、派出去的、改自己的、排队的）：输入框顶部一条光带慢慢扫；
   // 活干完先停住动画、所有光缓缓淡掉（1.4 秒）再撤掉这层，回到完全静止的普通输入框。
   // 任务卡片自己那圈流动光在 Tasks.tsx 里另管
-  const runningTasks = useRunningTasks();
   const [sweep, setSweep] = useState({ shown: false, on: false });
   useEffect(() => {
     if (runningTasks > 0) {
@@ -804,6 +843,7 @@ export default function Chat() {
 
       <div className="pointer-events-none fixed inset-x-0 bottom-0 z-20 bg-[linear-gradient(to_top,var(--bg)_0%,var(--bg-85)_45%,transparent_100%)] pt-16 pb-6">
         <div className="pointer-events-auto mx-auto w-full max-w-[680px] px-5">
+          {!calling && !showMap && !showAlbum && !showAbilities && <CompanionDock state={companionState} label={companionState === "confused" && needsAnswer ? "等你回答" : undefined} />}
           {att.hint && <div className="mb-2 text-center text-xs text-[var(--faint)]">{att.hint}</div>}
           {micHint && <div className="mb-2 text-center text-xs text-[var(--faint)]">{micHint}</div>}
           <div
@@ -825,6 +865,8 @@ export default function Chat() {
               onPaste={att.onPaste}
               ref={input}
               value={draft}
+              onFocus={() => setInputFocused(true)}
+              onBlur={() => setInputFocused(false)}
               rows={1}
               onChange={(e) => {
                 setDraft(e.target.value);

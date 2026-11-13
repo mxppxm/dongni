@@ -18,6 +18,7 @@ type Task = {
   live?: { steps: number; idleSec: number; doing: string; recent: { at: number; text: string }[] } | null;
   /** 还没开工时卡在哪：排队、等接单、在等他回答 */
   waiting?: string;
+  stage?: string;
 };
 
 /** 一句话：这件活现在什么情况。两分钟没动静就明说 */
@@ -202,6 +203,7 @@ function Row({ t, now, open, onToggle, ring }: { t: Task; now: number; open: boo
 /* ---------- 在跑的活有几件：输入框的流光跟着它走 ---------- */
 // 0 件就是一件在跑的都没有
 let runningCount = 0;
+let taskSnapshot: readonly Task[] | null = null;
 const busyHooks = new Set<() => void>();
 const subscribeBusy = (fn: () => void) => {
   busyHooks.add(fn);
@@ -235,6 +237,11 @@ export function useRunningTasks() {
 const SLOTS = ["left", "drawer"] as const;
 type Slot = (typeof SLOTS)[number];
 
+/** 与任务栏共用同一轮结果，小人的状态无需再发一次请求。 */
+export function useTaskSnapshot() {
+  return useSyncExternalStore(subscribeBusy, () => taskSnapshot, () => null);
+}
+
 /** 左边的任务栏：她动手干的事一件件列着，跑着的转圈，点开能看细节和结果 */
 export default function Tasks() {
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -247,6 +254,8 @@ export default function Tasks() {
   const load = useCallback(async () => {
     try {
       const { tasks } = (await (await fetch("/api/tasks")).json()) as { tasks: Task[] };
+      taskSnapshot = tasks;
+      busyHooks.forEach((fn) => fn());
       setTasks(tasks);
     } catch {}
   }, []);

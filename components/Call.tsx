@@ -3,7 +3,7 @@
 import { motion } from "motion/react";
 import { AudioLines, Maximize2, Mic, MicOff, Minimize2, PhoneOff } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import Mood from "./Mood";
+import Companion, { type CompanionState } from "./Companion";
 
 /**
  * 打电话：麦克风 16k PCM 推给本机 3940（再转豆包实时语音），她的声音 24k PCM 回来边收边放。
@@ -303,7 +303,8 @@ export default function Call({ onClose, mini, onMini }: { onClose: () => void; m
   };
 
   const mm = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`;
-  const mood = phase === "connecting" ? "wave" : talking === "her" ? "cheer" : talking === "you" ? "think" : "think";
+  const companionState: CompanionState = phase === "error" ? "confused" : phase === "connecting" ? "thinking"
+    : phase === "ended" ? "idle" : talking === "her" ? "speaking" : "listening";
 
   const enrollingNow = typeof vp === "number";
   const status = phase === "connecting" ? "正在接通…" : phase === "live" ? mm : phase === "ended" ? "通话结束" : err;
@@ -337,13 +338,7 @@ export default function Call({ onClose, mini, onMini }: { onClose: () => void; m
           transition={{ type: "spring", stiffness: 420, damping: 32 }}
           className="fixed right-5 bottom-28 z-40 flex cursor-grab items-center gap-2.5 rounded-full border border-[var(--border)] bg-[var(--panel)] py-2 pr-2 pl-2.5 shadow-[var(--shadow)] backdrop-blur-xl active:cursor-grabbing"
         >
-          <motion.div
-            animate={{ scale: talking === "her" ? [1, 1.12, 1] : 1 }}
-            transition={talking === "her" ? { duration: 0.9, repeat: Infinity } : { duration: 0.3 }}
-            className="h-9 w-9 shrink-0 overflow-hidden"
-          >
-            <Mood mood={mood} />
-          </motion.div>
+          <Companion state={companionState} size={36} />
           <div className="min-w-[52px] leading-tight">
             <div className="text-[13px] text-[var(--text-strong)]">敏</div>
             <div className="text-[11px] text-[var(--dim)] tabular-nums">{enrollingNow ? "录声纹…" : status}</div>
@@ -385,13 +380,7 @@ export default function Call({ onClose, mini, onMini }: { onClose: () => void; m
             <Minimize2 size={18} strokeWidth={1.6} />
           </button>
           <div className="relative flex flex-col items-center">
-            <motion.div
-              animate={{ scale: talking === "her" ? [3.2, 3.45, 3.2] : 3.2 }}
-              transition={talking === "her" ? { duration: 0.9, repeat: Infinity } : { duration: 0.3 }}
-              className="mb-24 h-11 w-11"
-            >
-              <Mood mood={mood} />
-            </motion.div>
+            <div className="mb-8"><Companion state={companionState} size={160} /></div>
             <div className="text-lg text-[var(--text-strong)]">敏</div>
             <div className="mt-1 h-5 text-sm text-[var(--dim)]">{status}</div>
             <div className="mt-8 h-14 max-w-[520px] px-6 text-center text-[15px] leading-relaxed text-[var(--faint)]">
