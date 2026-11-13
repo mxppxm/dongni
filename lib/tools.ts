@@ -566,6 +566,8 @@ export const TOOLS = [
           name: { type: "string", description: "这身的名字，如「阴天的图书馆」" },
           wear: { type: "string", description: "穿什么，从上到下写具体：上装、外套、下装、鞋、配饰" },
           when: { type: "string", description: "什么时候穿，一句话，如「秋天阴天 5~12°C 的白天」" },
+          pose: { type: "string", description: "这身的招牌动作，英文一句话，要贴这身的气质、和其他衣服不重复（如 walking while lifting the hem of her long coat）" },
+          poses: { type: "array", items: { type: "string" }, description: "可选：两三个动作（英文），第一句用于定妆照，拍今天的照片会轮换；不写就用 pose" },
           key: { type: "string", description: "改已有的一身时写它的 key；新加的不用写" },
           real: { type: "boolean", description: "定妆照要真人照片感就写 true（默认 true）" },
           rule: {

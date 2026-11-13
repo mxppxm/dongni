@@ -24,7 +24,7 @@ export function selfState(): string {
   const jobs = listDispatches();
   lines.push(
     jobs.length
-      ? `派出去的活：${jobs.map((j) => `#${j.id}「${j.title.slice(0, 24)}」${j.stageText}，${j.backend === "dsh" ? "DS superagent 在干" : j.backend === "builtin" ? "内置执行器在干" : "还没人接"}（${Math.max(1, Math.round((Date.now() - j.startedAt) / 60000))} 分钟了）`).join("；")}。`
+      ? `派出去的活：${jobs.map((j) => `#${j.id}「${j.title.slice(0, 24)}」${j.stageText}，${j.backend === "dsh" ? "DS superagent 在干" : j.backend === "builtin" ? "内置执行器在干" : "还没人接"}（${Math.max(1, Math.round((Date.now() - j.startedAt) / 60000))} 分钟了${j.live ? `；真实动静：${j.live}` : ""}）`).join("；")}。他问进度、问是不是卡住了，就照「真实动静」说。`
       : "现在没有派出去在跑的活。",
   );
   // 这几条是事实，他问起来照这个说，别自己猜

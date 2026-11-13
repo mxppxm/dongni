@@ -2,8 +2,8 @@ import "server-only";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { builtinBackend } from "./backend/builtin";
-import { dshBackend } from "./backend/dsh";
+import { builtinActivity, builtinBackend } from "./backend/builtin";
+import { dshActivity, dshBackend } from "./backend/dsh";
 import type { Backend, Job, JobHooks } from "./backend/types";
 import { inLane } from "./lane";
 import { notify, onBack, pageVisible } from "./notify";
@@ -150,6 +150,18 @@ function ensureBackHook() {
   onBack(whenBack);
 }
 
+/**
+ * 一件后台的活（派出去的，或者正在改她自己的那件）现在的真实动静，写成一句话：第几步、在干什么、多久没动了。
+ * 没有记录（还没人接、刚交出去）返回空串。任务栏和她的实时状态都用这个。
+ */
+export function activityLine(taskId: number, now = Date.now()): string {
+  const a = dshActivity(taskId) ?? builtinActivity(taskId);
+  if (!a) return "";
+  const idle = Math.max(0, Math.round((now - a.lastAt) / 1000));
+  const ago = idle < 60 ? `${idle} 秒前还在动` : `${Math.floor(idle / 60)} 分钟没动静了${idle >= 300 ? "，可能卡住了" : ""}`;
+  return `第 ${a.steps} 步，${ago}${a.doing ? `，${a.doing}` : ""}`;
+}
+
 function hooksFor(id: number): JobHooks {
   return {
     ext: (extId) => updateJob(id, { ext_id: extId }),
@@ -165,6 +177,13 @@ function hooksFor(id: number): JobHooks {
       if (type === "progress") setJobProgress(id, text);
       else if (type === "ack") mention(`后台接单了：${clean(text)}`);
       else if (type === "notice") mention(clean(text));
+      else if (type === "stall")
+        void tell(
+          `你后台在做的那件事（${what}）${text}，可能卡住了。照实告诉他这个情况，问他是再等等、还是停掉重来（停用 cancel_task）。`,
+          `那件事（${what}）${text}，可能卡住了。要再等等，还是停掉重来？`,
+          "",
+          what,
+        );
       else if (type === "ask")
         void tell(
           `你后台在做的那件事（${what}）干到一半，停下来等他拿个主意。问题原文是：\n${text.slice(0, 800)}\n把这个问题用你的话问他，问清楚，别替他答。他回答之后你要用 task_append 把回答转给后台。`,
@@ -260,7 +279,7 @@ export function dispatch(task: string, dir?: string): string {
 }
 
 /** 给她看的后台真实状态（lib/selfstate.ts），也给改自己时判断能不能重启（lib/selfrepair.ts） */
-export function listDispatches(): { id: number; title: string; startedAt: number; stage: JobStage; stageText: string; backend: string }[] {
+export function listDispatches(): { id: number; title: string; startedAt: number; stage: JobStage; stageText: string; backend: string; live: string }[] {
   return openJobs().map((j) => ({
     id: j.id,
     title: clean(j.title).slice(0, 60),
@@ -268,6 +287,7 @@ export function listDispatches(): { id: number; title: string; startedAt: number
     stage: j.stage,
     stageText: STAGE_TEXT[j.stage] ?? j.stage,
     backend: j.backend,
+    live: activityLine(j.id),
   }));
 }
 
@@ -291,8 +311,9 @@ export function dispatchStatus(): string {
     jobs
       .map((j) => {
         const last = jobEvents(j.id, 1)[0];
+        const live = activityLine(j.id);
         return `#${j.id}｜${clean(j.request).slice(0, 50)}｜${STAGE_TEXT[j.stage] ?? j.stage}（${BACKEND_TEXT[j.backend] ?? j.backend}）｜在 ${j.dir.replace(HOME, "~")}｜${mins(j.started_at)} 分钟了${
-          last?.text ? `｜最近：${clean(last.text).slice(0, 80)}` : ""
+          live ? `｜真实动静：${live}` : last?.text ? `｜最近：${clean(last.text).slice(0, 80)}` : ""
         }`;
       })
       .join("\n")

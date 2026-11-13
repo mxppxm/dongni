@@ -16,7 +16,7 @@ const LOGDIR = path.join(process.cwd(), "logs", "super");
 const ASK_WAIT_MS = 20 * 60_000;
 
 /** notes：他中途补的话，执行器下一步取走；answer：它正停下来等他回答时，回答从这里送进去 */
-type Live = { ac: AbortController; notes: string[]; answer: ((text: string) => void) | null };
+type Live = { ac: AbortController; notes: string[]; answer: ((text: string) => void) | null; lastAt: number; steps: number; doing: string };
 const running = ((globalThis as unknown as { __dongniBuiltinLive?: Map<number, Live> }).__dongniBuiltinLive ??= new Map<number, Live>());
 
 export const builtinBackend: Backend = {
@@ -28,7 +28,7 @@ export const builtinBackend: Backend = {
 
   start(job: Job, hooks: JobHooks) {
     const ac = new AbortController();
-    const live: Live = { ac, notes: [], answer: null };
+    const live: Live = { ac, notes: [], answer: null, lastAt: Date.now(), steps: 0, doing: "" };
     running.set(job.id, live);
     hooks.event("working", "内置执行器开始干了", "working");
     fs.mkdirSync(LOGDIR, { recursive: true });
@@ -65,6 +65,26 @@ export const builtinBackend: Backend = {
       progress: (text) => hooks.event("progress", text),
       notes: () => live.notes.splice(0),
       log: (entry) => {
+        // 每一步都记一下动静：任务栏和她都看这个，知道它没死
+        live.lastAt = Date.now();
+        if (typeof entry.step === "number") live.steps = entry.step;
+        if (entry.type === "tool") {
+          const name = String(entry.name ?? "");
+          let a: Record<string, unknown> = {};
+          try {
+            a = JSON.parse(String(entry.args ?? "{}")) as Record<string, unknown>;
+          } catch {}
+          live.doing =
+            name === "run_shell"
+              ? `在跑命令：${String(a.cmd ?? "").replace(/\s+/g, " ").slice(0, 70)}`
+              : name === "read_file" || name === "list_dir" || name === "find_files"
+                ? `在看 ${path.basename(String(a.path ?? "")) || "文件"}`
+                : name === "write_file" || name === "edit_file"
+                  ? `在改 ${path.basename(String(a.path ?? ""))}`
+                  : name === "ask_user"
+                    ? "在等他回答"
+                    : live.doing;
+        }
         try {
           fs.appendFileSync(trace, JSON.stringify(entry) + "\n");
         } catch {}
@@ -109,3 +129,9 @@ export const builtinBackend: Backend = {
 };
 
 export const builtinRunning = () => running.size;
+
+/** 内置执行器这件活现在的动静 */
+export function builtinActivity(jobId: number): { lastAt: number; steps: number; doing: string } | null {
+  const live = running.get(jobId);
+  return live ? { lastAt: live.lastAt, steps: live.steps, doing: live.doing } : null;
+}

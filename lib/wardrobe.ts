@@ -10,7 +10,7 @@ import { completeJson } from "./llm";
 import { nowText } from "./memory";
 import { INTRO, PERSONA } from "./persona";
 import { track } from "./tasks";
-import { outfits, outfitsVersion, pickByRule, WARDROBE_DIR, type Outfit, type WeatherKind } from "./wardrobeoutfits";
+import { outfitPoses, outfits, outfitsVersion, pickByRule, WARDROBE_DIR, type Outfit, type WeatherKind } from "./wardrobeoutfits";
 
 /** 造型清单在 lib/wardrobeoutfits.ts：以 data/wardrobe/outfits.json 为准，加衣服不用重启 */
 export type { Outfit } from "./wardrobeoutfits";
@@ -35,7 +35,37 @@ const STYLE =
   "Stylized realistic 3D character render, like a modern animated feature film, soft global illumination, high detail, full body from head to shoes clearly visible, no text, no watermark";
 /** 新加的几套走「手机随手拍」的真照片感，跟相册里最近那些一个味道，不是 3D 动画渲染 */
 const PHOTO_STYLE =
-  "Casual phone snapshot taken by a friend, natural window light, real skin texture with pores and fine lines, no beauty retouching, no studio lighting, slightly imperfect framing, full body from head to shoes clearly visible, not a 3D render, not anime, not an illustration, no text, no watermark";
+  "Casual phone snapshot taken by a friend, natural light, real skin texture with pores and fine lines, no beauty retouching, no studio lighting, slightly imperfect framing, full body from head to shoes clearly visible, not a 3D render, not anime, not an illustration, no text, no watermark";
+
+/**
+ * 机位：定妆照按清单顺序错开，拍照时按这套衣服拍过的张数轮换，不会永远是同一个正面站定。
+ * 每条都写明全身、鞋要入镜，免得模型把头或脚裁掉。
+ */
+const CAMERAS = [
+  "eye-level three-quarter angle from her left, 35mm lens, full-body framing with her shoes visible",
+  "slightly low angle from her right, 28mm look, full-body framing with her shoes in frame",
+  "high angle from a few steps away, wide full-body shot with the floor visible",
+  "side profile angle from her right, 50mm, full-body framing",
+  "off-centre wide shot from farther back at a slight tilt, 24mm, full body and shoes visible",
+  "from behind at an angle, her head turned back over her shoulder towards the camera, full body in frame",
+  "low angle from the front-left, close to the floor, full body and shoes visible",
+  "slightly above and to the side, handheld snapshot angle, full body in frame",
+  "three-quarter angle from her right at knee height, 35mm, full-body framing",
+  "wide shot from her left at waist height, camera tilted a little, full body and shoes visible",
+];
+
+const cameraFor = (index: number) => CAMERAS[((index % CAMERAS.length) + CAMERAS.length) % CAMERAS.length];
+
+/** 定妆照的动作：这身动作组的第一句 */
+const anchorPose = (o: Outfit) => outfitPoses(o)[0];
+
+/** 定妆照「动作 + 机位」的指纹：换了就重拍那一张，没换就复用 */
+const anchorMark = (o: Outfit, index: number) => JSON.stringify({ pose: anchorPose(o), camera: cameraFor(index) });
+const anchorKey = (key: string) => `wardrobe_anchor_${key}`;
+
+/** 动作、机位、全身、自然感：定妆照和拍照都带上这几句 */
+const shotNotes = (pose: string, camera: string) =>
+  `Pose: ${pose}. Camera: ${camera}. Full body from head to shoes clearly visible, natural candid action, not a stiff front-facing standing pose, not a passport-style centred pose, no cropped head or feet, no text, no watermark.`;
 
 /* 衣橱清单见 lib/wardrobeoutfits.ts：每次读都按需读 data/wardrobe/outfits.json，加一件、改一件不用重启 */
 
@@ -456,11 +486,20 @@ export async function today() {
  * 只在清单版本变了时查一次，不会每轮都去试。
  */
 let outfitsChecked = -1;
+/** 定妆照是不是该拍 / 该重拍了：文件没有，或者动作、机位变了 */
+function anchorStale(o: Outfit, index: number) {
+  if (!fs.existsSync(path.join(DIR, `${o.key}.jpg`))) return true;
+  try {
+    return getKv(anchorKey(o.key)) !== anchorMark(o, index);
+  } catch {
+    return true;
+  }
+}
 function ensureNewOutfits() {
   const v = outfitsVersion();
   if (v === outfitsChecked) return;
   outfitsChecked = v;
-  if (outfits().every((o) => fs.existsSync(path.join(DIR, `${o.key}.jpg`)))) return;
+  if (outfits().every((o, i) => !anchorStale(o, i))) return;
   void ensureWardrobe();
 }
 
@@ -520,7 +559,7 @@ async function draw(prompt: string, refs: string[], out: string, size = "1024x15
 
 const g = globalThis as unknown as { __dongniWardrobeBusy?: boolean; __dongniAlbumReady?: boolean };
 
-/** 衣橱：定妆照缺哪套补哪套（一次性，之后都复用） */
+/** 衣橱：定妆照缺哪套补哪套；动作或机位换了的那套重拍（拍过就复用，不用每次重启都重来） */
 export async function ensureWardrobe() {
   if (g.__dongniWardrobeBusy) return;
   g.__dongniWardrobeBusy = true;
@@ -535,23 +574,37 @@ export async function ensureWardrobe() {
         ANCHOR3D,
       );
     }
-    for (const o of outfits()) {
+    const list = outfits();
+    for (const [i, o] of list.entries()) {
+      if (!anchorStale(o, i)) continue;
+      const pose = anchorPose(o);
+      const camera = cameraFor(i);
       const file = path.join(DIR, `${o.key}.png`);
-      if (fs.existsSync(file.replace(/\.png$/, ".jpg"))) continue;
+      const jpg = file.replace(/\.png$/, ".jpg");
+      const redo = fs.existsSync(jpg);
       await track(
         "wardrobe",
-        `做定妆照「${o.name}」`,
+        `${redo ? "重拍" : "做"}定妆照「${o.name}」`,
         () =>
           draw(
             o.real
-              ? `Same girl as the reference (same face, brown high messy ponytail with an orange scrunchie), but as a real photograph of ${LOOK}, a young adult woman, not the reference's rendering style. She is wearing ${o.wear}. ${PHOTO_STYLE}. Standing relaxed in a quiet room by the window, plain soft background.`
-              : `Same girl as the reference (same face, hair, scrunchie, proportions, same rendering style). ${STYLE}. Fashion lookbook shot, she is wearing ${o.wear}. Standing pose full of energy, plain soft light-grey studio background.`,
+              ? `Same girl as the reference (same face, brown high messy ponytail with an orange scrunchie), but as a real photograph of ${LOOK}, a young adult woman, not the reference's rendering style. She is wearing ${o.wear}. ${PHOTO_STYLE}. A natural setting that fits the pose, nothing distracting in the foreground. ${shotNotes(pose, camera)}`
+              : `Same girl as the reference (same face, hair, scrunchie, proportions, same rendering style). ${STYLE}. Fashion lookbook shot, she is wearing ${o.wear}, in a simple setting that fits the pose. ${shotNotes(pose, camera)}`,
             [ANCHOR3D.replace(/\.png$/, ".jpg")],
             file,
           ),
-        () => ({ ok: true, result: `![${o.name}](/api/wardrobe/${o.key}.jpg)` }),
+        () => {
+          let v = "";
+          try {
+            v = `?v=${Math.floor(fs.statSync(jpg).mtimeMs)}`;
+          } catch {
+            /* 版本号只是用来避开图片缓存，取不到就不带 */
+          }
+          return { ok: true, result: `![${o.name}](/api/wardrobe/${o.key}.jpg${v})` };
+        },
       );
-      console.log(`[dongni] 衣橱：做好「${o.name}」`);
+      setKv(anchorKey(o.key), anchorMark(o, i));
+      console.log(`[dongni] 衣橱：${redo ? "重拍了" : "做好"}「${o.name}」`);
     }
   } catch (e) {
     console.warn("[dongni] 衣橱定妆照失败：", e instanceof Error ? e.message : e);
@@ -749,15 +802,21 @@ async function takeDailyPhotoInner(force: boolean, inReply = false): Promise<str
     return "衣橱的定妆照还没做好，正在做，做好了再拍。";
   }
   const weatherText = t.weather ? `${t.weather.city} ${t.weather.text} ${t.weather.temp}°C` : "实时天气没取到";
+  // 同一身拍过几次就换到第几个动作、下一个机位；这样反复拍也不会老是同一个画面
+  const poses = outfitPoses(t.outfit);
+  const count = (db().prepare("SELECT COUNT(*) n FROM album_photos WHERE outfit = ?").get(t.outfit.name) as { n: number }).n;
+  const pose = poses[count % poses.length];
+  const outfitIndex = Math.max(0, outfits().findIndex((o) => o.key === t.outfit.key));
+  const camera = cameraFor(count + outfitIndex + 1);
 
   const plan = await completeJson<{ before: string; scene: string; caption: string }>(
     [
       {
         role: "system",
-        content: `${INTRO}\n\n${PERSONA}\n\n现在是 ${nowText()}，${weatherText}，你今天穿「${t.outfit.name}」。你要给自己拍今天的相册照片（一天一张，像日记）。
+        content: `${INTRO}\n\n${PERSONA}\n\n现在是 ${nowText()}，${weatherText}，你今天穿「${t.outfit.name}」。你要给自己拍今天的相册照片（一天一张，像日记）。这身今天的动作是：「${pose}」（英文）。
 输出 JSON：
 - before：拍之前跟他说的一句话（口语、短，让他知道你要拍了）
-- scene：照片场景，英文，一句话：地点、在做什么、光线，要贴合今天的时间、季节、天气和这身衣服，全身入镜能看到鞋
+- scene：照片场景，英文，一句话：地点、周围环境、光线和氛围，要贴合今天的时间、季节、天气、这身衣服，也要放得下这个动作；不要写她的动作和摄影机位（这两样另外给）
 - caption：相册里这张照片下面写的一句话，像日记，中文，二十字以内`,
       },
       { role: "user", content: "拍今天这张" },
@@ -775,7 +834,7 @@ async function takeDailyPhotoInner(force: boolean, inReply = false): Promise<str
       "拍今天的照片",
       () =>
         draw(
-          `Same girl wearing exactly the same outfit as the reference image (same face, hair, scrunchie, clothes, shoes, same rendering style). ${STYLE}. ${plan.scene}`,
+          `Same girl wearing exactly the same outfit as the reference image (same face, hair, scrunchie, clothes, shoes, same rendering style). Use the reference only for her face and outfit, not for its pose or camera angle. ${STYLE}. Scene: ${plan.scene}. ${shotNotes(pose, camera)}`,
           [ref],
           path.join(DIR, file),
         ),

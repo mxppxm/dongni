@@ -3,6 +3,7 @@ import { execFile, execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import zlib from "node:zlib";
 import { getKv, setKv } from "../db";
 import type { JobStage } from "../tasks";
 import type { Backend, Job, JobHooks } from "./types";
@@ -84,7 +85,94 @@ export function ensureSuperagent(why: string) {
   );
 }
 
-type Watch = { job: Job; hooks: JobHooks; seen: Set<string>; ticket: string; asked: string; summary: string; since: number; lastTicketAt: number; busy: boolean };
+/* ─────────── 它现在在干什么：读执行器会话的记录 ───────────
+ * superagent 的每个执行器是一个 DSH 会话，每走一步、每调一次工具都记在
+ * ~/.dsh/sessions/<目录>/worker-<工单号>/session.v4.jsonl.zstd 里。
+ * 这是它真实的动静：文件多久没变 = 多久没动；最后一次工具调用 = 正在干什么。不用猜，也不用它自己汇报。
+ */
+export type Activity = { lastAt: number; steps: number; doing: string };
+const SESSIONS = path.join(os.homedir(), ".dsh", "sessions");
+const actCache = new Map<string, { file: string; mtime: number; act: Activity }>();
+
+function sessionFile(ticket: string): string | null {
+  const hit = actCache.get(ticket)?.file;
+  if (hit && fs.existsSync(hit)) return hit;
+  try {
+    for (const dir of fs.readdirSync(SESSIONS)) {
+      const f = path.join(SESSIONS, dir, `worker-${ticket}`, "session.v4.jsonl.zstd");
+      if (fs.existsSync(f)) return f;
+    }
+  } catch {}
+  return null;
+}
+
+const base = (p: unknown) => path.basename(String(p ?? "")).slice(0, 40);
+/** 一次工具调用 → 一句人话 */
+function describe(name: string, rawArgs: string): string {
+  let a: Record<string, unknown> = {};
+  try {
+    a = JSON.parse(rawArgs || "{}") as Record<string, unknown>;
+  } catch {}
+  const cmd = String(a.command ?? a.cmd ?? "").replace(/\s+/g, " ").trim();
+  if (name === "bash" || name === "pwsh") return `在跑命令：${cmd.slice(0, 70)}`;
+  if (name === "read" || name === "read_image") return `在读 ${base(a.path ?? a.file_path ?? a.file)}`;
+  if (name === "edit" || name === "write") return `在改 ${base(a.path ?? a.file_path ?? a.file)}`;
+  if (/search|glob|grep|find/.test(name)) return /web/.test(name) ? `在上网查：${String(a.query ?? "").slice(0, 40)}` : "在找文件";
+  if (/web|fetch/.test(name)) return "在上网看资料";
+  if (/subagent/.test(name)) return "派了个子任务在跑";
+  if (/job/.test(name)) return "在等一条命令跑完";
+  if (name === "orchestrator_report" || name === "orchestrator_ack") return "在写汇报";
+  if (name.startsWith("orchestrator_")) return "在看任务要求";
+  if (/todo/.test(name)) return "在理下一步";
+  return `在用 ${name}`;
+}
+
+function readActivity(ticket: string): Activity | null {
+  const file = sessionFile(ticket);
+  if (!file) return null;
+  let mtime = 0;
+  try {
+    mtime = fs.statSync(file).mtimeMs;
+  } catch {
+    return null;
+  }
+  const cached = actCache.get(ticket);
+  if (cached && cached.mtime === mtime) return cached.act;
+  const act: Activity = { lastAt: mtime, steps: cached?.act.steps ?? 0, doing: cached?.act.doing ?? "" };
+  try {
+    const unzstd = (zlib as unknown as { zstdDecompressSync?: (b: Buffer) => Buffer }).zstdDecompressSync;
+    if (unzstd) {
+      let steps = 0;
+      let doing = "";
+      for (const line of unzstd(fs.readFileSync(file)).toString("utf8").split("\n")) {
+        if (line.includes('"type":"step/start"')) steps++;
+        else if (line.includes('"type":"tool/call"')) {
+          try {
+            const d = (JSON.parse(line) as { data?: { name?: string; arguments?: string } }).data;
+            if (d?.name) doing = describe(d.name, String(d.arguments ?? ""));
+          } catch {}
+        }
+      }
+      act.steps = steps;
+      act.doing = doing;
+    }
+  } catch {
+    // 它正往文件里写、读到半截：这一次只认「文件刚动过」，下一轮再读内容
+  }
+  actCache.set(ticket, { file, mtime, act });
+  return act;
+}
+
+/** 这件活现在的真实动静；它那边还没开出工单、或者找不到记录，返回 null */
+export function dshActivity(jobId: number): Activity | null {
+  const w = state.watches.get(jobId);
+  return w?.ticket ? readActivity(w.ticket) : null;
+}
+
+/** 这么久没有任何动静，就当它卡住了 */
+const STALL_MS = 5 * 60_000;
+
+type Watch = { job: Job; hooks: JobHooks; seen: Set<string>; ticket: string; asked: string; summary: string; since: number; lastTicketAt: number; busy: boolean; stalledAt: number };
 type Saved = { seen: string[]; ticket: string; asked: string; since: number; summary?: string };
 
 const state = ((globalThis as unknown as { __dongniDsh?: { watches: Map<number, Watch>; timer: NodeJS.Timeout | null } }).__dongniDsh ??= {
@@ -203,6 +291,14 @@ async function check(w: Watch) {
   }
   if (ticket?.kind === "open") {
     w.hooks.event("stage", "", ticket.stage);
+    // 在干的活很久没有任何动静：告诉他一次（它之后又动了、再停住，会再说）
+    const act = ticket.stage === "working" ? readActivity(w.ticket) : null;
+    if (act && Date.now() - act.lastAt > STALL_MS) {
+      if (w.stalledAt !== act.lastAt) {
+        w.stalledAt = act.lastAt;
+        w.hooks.event("stall", `已经 ${Math.round((Date.now() - act.lastAt) / 60_000)} 分钟没有任何动静了，停在第 ${act.steps} 步${act.doing ? `（${act.doing}）` : ""}`);
+      }
+    }
     // 它的执行器报了新的进展（工单上最近一条报告的摘要变了）
     if (summary && summary !== w.summary) {
       w.summary = summary;
@@ -248,6 +344,7 @@ function watch(job: Job, hooks: JobHooks, saved?: Saved) {
     since: saved?.since ?? Date.now(),
     lastTicketAt: 0,
     busy: false,
+    stalledAt: 0,
   });
   ensureTimer();
 }

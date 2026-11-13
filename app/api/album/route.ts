@@ -14,10 +14,21 @@ export async function GET() {
       key: o.key,
       name: o.name,
       when: o.when,
-      url: wardrobeFile(`${o.key}.jpg`) ? `/api/wardrobe/${o.key}.jpg` : null,
+      url: outfitUrl(o.key),
     })),
     photos: [...dailyPhotos(), ...drawnPhotos()].sort((a, b) => b.created_at - a.created_at || b.id - a.id),
   });
+}
+
+/** 定妆照重拍后文件名不变，URL 带上修改时间，浏览器才不会一直拿旧缓存 */
+function outfitUrl(key: string) {
+  const f = wardrobeFile(`${key}.jpg`);
+  if (!f) return null;
+  try {
+    return `/api/wardrobe/${key}.jpg?v=${Math.floor(fs.statSync(f).mtimeMs)}`;
+  } catch {
+    return `/api/wardrobe/${key}.jpg`;
+  }
 }
 
 /** 每天拍的那张 */
