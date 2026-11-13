@@ -1,9 +1,11 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { ExternalLink } from "lucide-react";
+import { useEffect, useState, type ReactNode } from "react";
 import CardBlock from "./Cards";
 import Chart from "./Chart";
 import ImageFigure from "./ImageFigure";
+import { openInBrowser } from "./openBrowser";
 import { VoiceClip } from "./Voice";
 
 /** 语音消息用图片语法存在正文里，但画的不是一个图片，是播放条 */
@@ -25,6 +27,7 @@ type Block =
   | { type: "quote"; text: string }
   | { type: "table"; head: string[]; align: ("left" | "right" | "center")[]; rows: string[][] }
   | { type: "images"; items: { alt: string; src: string }[] }
+  | { type: "html"; items: { alt: string; html: string }[] }
   | { type: "hr" };
 
 const FENCE = /^\s*(```|~~~)\s*([\w+#.-]*)\s*$/;
@@ -36,6 +39,9 @@ const QUOTE = /^\s{0,3}>\s?(.*)$/;
 const TABLE_SEP = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/;
 const IMAGE_LINE = /^\s*(!\[[^\]]*\]\([^)\s]+\)\s*)+$/;
 const IMAGE = /!\[([^\]]*)\]\(([^)\s]+)\)/g;
+/** 正文里直接以预览形式渲染出来的网页（<iframe srcDoc>）：html 原样放在 srcDoc="…" 里，老写法 src="data:text/html,…" 也认 */
+const IFRAME_SRCDOC = /<iframe\b[^>]*\bsrcDoc="([^"]*)"/gi;
+const IFRAME_DATA = /<iframe\b[^>]*\bsrc="data:text\/html(?:;charset=[\w-]+)?;base64,([^"]+)"/gi;
 
 const cells = (l: string) =>
   l
@@ -47,8 +53,10 @@ const cells = (l: string) =>
 
 const isTableStart = (lines: string[], i: number) => lines[i]?.includes("|") && TABLE_SEP.test(lines[i + 1] ?? "") && lines[i + 1].includes("-");
 
+const isImageLine = (l: string) => IMAGE_LINE.test(l) || /^\s*<iframe\b/i.test(l);
+
 const isBlockStart = (l: string) =>
-  FENCE.test(l) || HEADING.test(l) || HR.test(l) || UL.test(l) || OL.test(l) || QUOTE.test(l) || IMAGE_LINE.test(l);
+  FENCE.test(l) || HEADING.test(l) || HR.test(l) || UL.test(l) || OL.test(l) || QUOTE.test(l) || isImageLine(l);
 
 function parse(src: string): Block[] {
   const lines = src.replace(/\r\n?/g, "\n").split("\n");
@@ -88,13 +96,21 @@ function parse(src: string): Block[] {
       continue;
     }
 
-    if (IMAGE_LINE.test(line)) {
+    if (isImageLine(line)) {
       const items: { alt: string; src: string }[] = [];
-      while (i < lines.length && IMAGE_LINE.test(lines[i])) {
-        for (const m of lines[i].matchAll(IMAGE)) items.push({ alt: m[1], src: m[2] });
-        i++;
+      const htmls: { alt: string; html: string }[] = [];
+      while (i < lines.length && isImageLine(lines[i])) {
+        const cur = lines[i++];
+        for (const m of cur.matchAll(IMAGE)) items.push({ alt: m[1], src: m[2] });
+        // 预览的网页要给一个「在浏览器打开」：srcDoc 是写在此处的 html；data: 那种是 base64 的
+        for (const m of cur.matchAll(IFRAME_SRCDOC)) htmls.push({ alt: "", html: decodeAttr(m[1]) });
+        for (const m of cur.matchAll(IFRAME_DATA)) {
+          const html = fromB64(m[1]);
+          if (html !== null) htmls.push({ alt: "", html });
+        }
       }
-      out.push({ type: "images", items });
+      if (items.length) out.push({ type: "images", items });
+      if (htmls.length) out.push({ type: "html", items: htmls });
       continue;
     }
 
@@ -157,6 +173,20 @@ function parse(src: string): Block[] {
     }
   }
   return out;
+}
+
+/** 属性里的 &quot; 之类还原回来；解出来不对就原样 */
+function decodeAttr(s: string): string {
+  const named: Record<string, string> = { quot: '"', amp: "&", lt: "<", gt: ">", apos: "'", "#34": '"', "#39": "'", "#38": "&", "#60": "<", "#62": ">" };
+  return s.replace(/&(quot|amp|lt|gt|apos|#\d+);/g, (all, k: string) => named[k] ?? all);
+}
+
+function fromB64(b64: string): string | null {
+  try {
+    return new TextDecoder().decode(Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)));
+  } catch {
+    return null;
+  }
 }
 
 /* ---------------- 行内 ---------------- */
@@ -293,6 +323,58 @@ function highlight(code: string, lang: string): ReactNode[] {
   return out;
 }
 
+/* ---------------- 网页 ---------------- */
+
+/** 「在浏览器打开」入口的两种样子，动作是同一个：落成临时文件 → 系统默认浏览器新开一个标签页 */
+function useBrowserOpen(html: string) {
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState("");
+  useEffect(() => {
+    if (!note) return;
+    const t = window.setTimeout(() => setNote(""), 4000);
+    return () => window.clearTimeout(t);
+  }, [note]);
+  const open = async () => {
+    if (busy) return;
+    setBusy(true);
+    const msg = await openInBrowser({ html });
+    setBusy(false);
+    setNote(msg);
+  };
+  return { busy, note, open };
+}
+
+/** 正文里的 ```html 代码块：代码照旧显示，右上角一个「在浏览器打开」 */
+function HtmlCode({ code }: { code: string }) {
+  const { busy, note, open } = useBrowserOpen(code);
+  return (
+    <div className="md-html">
+      <button type="button" className="md-html-btn" disabled={busy} onClick={open} title="在浏览器里开一个新标签页">
+        <ExternalLink size={12} strokeWidth={1.9} />
+        在浏览器打开
+      </button>
+      <pre className="md-pre scroll-thin">
+        <code>{highlight(code, "html")}</code>
+      </pre>
+      {!!note && <span className="md-html-note">{note}</span>}
+    </div>
+  );
+}
+
+/** 已经以预览形式渲染在消息里的网页：下面给一行「在浏览器打开」 */
+function HtmlLink({ html }: { html: string }) {
+  const { busy, note, open } = useBrowserOpen(html);
+  return (
+    <span className="md-html-row">
+      <button type="button" className="md-html-link" disabled={busy} onClick={open}>
+        <ExternalLink size={12} strokeWidth={1.9} />
+        在浏览器打开
+      </button>
+      {!!note && <span className="md-html-note">{note}</span>}
+    </span>
+  );
+}
+
 /* ---------------- 组装 ---------------- */
 
 export default function Markdown({ text, animate = false, voiceAuto = false }: { text: string; animate?: boolean; voiceAuto?: boolean }) {
@@ -313,6 +395,8 @@ export default function Markdown({ text, animate = false, voiceAuto = false }: {
               if (b.lang === "chart") return <Chart key={i} spec={spec} />;
               return <CardBlock key={i} items={(Array.isArray(spec) ? spec : [spec]) as Record<string, unknown>[]} />;
             }
+            // 网页代码块：正文里直接看照样是代码，旁边给一个「在浏览器打开」，点了先把这段落成临时文件再去浏览器里开
+            if (b.lang === "html") return <HtmlCode key={i} code={b.code} />;
             return (
               <pre key={i} className="md-pre scroll-thin">
                 <code>{highlight(b.code, b.lang)}</code>
@@ -354,6 +438,14 @@ export default function Markdown({ text, animate = false, voiceAuto = false }: {
                     isVoice(im.src) ? <VoiceClip key={k} src={im.src} auto={voiceAuto} /> : /^(\/api\/|\/mood\/|https?:\/\/)/.test(im.src) ? <ImageFigure key={k} src={im.src} alt={im.alt} /> : null
                   ) : null,
                 )}
+              </div>
+            );
+          case "html":
+            return (
+              <div key={i} className="md-html-links">
+                {b.items.map((h, k) => (
+                  <HtmlLink key={k} html={h.html} />
+                ))}
               </div>
             );
           case "heading":

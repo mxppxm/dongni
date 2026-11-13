@@ -266,6 +266,59 @@ ol.md-list {
   white-space: pre;
   tab-size: 2;
 }
+/* 网页代码块：代码照旧，右上角一个「在浏览器打开」，点了去系统浏览器新开标签页看真的页面 */
+.md-html {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.md-html-btn,
+.md-html-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: nowrap;
+  color: var(--dim);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 9px;
+  cursor: pointer;
+  transition:
+    color 0.2s,
+    border-color 0.2s,
+    background 0.2s;
+}
+.md-html-btn {
+  align-self: flex-end;
+}
+.md-html-btn:hover,
+.md-html-link:hover {
+  color: var(--text);
+  border-color: var(--dot);
+}
+.md-html-btn:disabled,
+.md-html-link:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.md-html-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.md-html-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.md-html-note {
+  font-size: 12px;
+  color: var(--text);
+}
 .tk-com {
   color: var(--tk-com);
   font-style: italic;
@@ -701,6 +754,32 @@ a.card:hover,
   color: var(--paper-ink);
   border-color: var(--dot);
   background: var(--paper-tile);
+}
+/* 网页卡片：整张都能点，去浏览器里开一个新标签页；「在浏览器打开」比 Finder 那行小字显眼一点 */
+.filecard-web {
+  cursor: pointer;
+}
+.filecard-web:focus-visible {
+  outline: 2px solid var(--dot);
+  outline-offset: 2px;
+}
+.filecard-open {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--paper-ink);
+  border-color: var(--dot);
+}
+.filecard-open:hover {
+  background: var(--paper-tile);
+}
+.filecard-open:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+/* 打不开时先用这一行说明，几秒后自己收回 */
+.filecard-note {
+  color: var(--paper-ink);
 }
 
 /* 说话按钮：录音时变红、慢慢呼吸，旁边挂着已经录了几秒 */

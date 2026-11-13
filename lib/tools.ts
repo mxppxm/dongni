@@ -336,7 +336,9 @@ async function writeFile({ name, content, dir }: { name: string; content: string
   const note = humanized?.degraded ? "（这次去 AI 味没改成功，存的是原文，别跟他说润色过了。）" : "";
   return fellBack
     ? `那个位置写不进去（路径不合法），文件改放到我自己的文件夹了，名字是「${path.basename(file)}」。${note}回复里别写路径，卡片会自动带上。`
-    : `文件写好了，回复末尾会自动带一张文件卡片，对方点一下就能在 Finder 里看到。${note}回复里不用写路径。`;
+    : `文件写好了，回复末尾会自动带一张文件卡片，对方点一下就能在 Finder 里看到。${
+        /\.html?$/i.test(file) ? "网页文件卡片上还有个「在浏览器打开」，点一下直接在浏览器里开一个新标签页。" : ""
+      }${note}回复里不用写路径。`;
 }
 
 export const TOOLS = [

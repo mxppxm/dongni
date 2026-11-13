@@ -2,6 +2,7 @@
 
 import { Bell, BellOff, ExternalLink, File, FileArchive, FileImage, FileText, Globe } from "lucide-react";
 import { useEffect, useState } from "react";
+import { openInBrowser } from "./openBrowser";
 
 /**
  * 卡片：链接、文件、提醒。链接和提醒用同一套壳（浅底、细边框、圆角、hover 微微上浮）；
@@ -142,10 +143,16 @@ const kindOf = (name: string, ext: string) => (ext ? KIND[ext] || `${ext.toUpper
 
 type FileInfo = { ok: boolean; name?: string; size?: number; mtime?: number; dir?: boolean };
 
+/** 网页文件：卡片多一个「在浏览器打开」，整张卡片也走同一个动作 */
+const isHtmlName = (name: string) => /\.html?$/i.test(name);
+
 function FileCard({ spec }: { spec: Spec }) {
   const target = str(spec.path);
   const [info, setInfo] = useState<FileInfo | null>(null);
   const [shown, setShown] = useState(false);
+  const [opened, setOpened] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState("");
 
   useEffect(() => {
     if (!target) return;
@@ -159,6 +166,13 @@ function FileCard({ spec }: { spec: Spec }) {
     };
   }, [target]);
 
+  // 提示过一会儿自己收回去，不在卡片上留一行字
+  useEffect(() => {
+    if (!note) return;
+    const t = window.setTimeout(() => setNote(""), 4000);
+    return () => window.clearTimeout(t);
+  }, [note]);
+
   if (!target) return null;
   const name = info?.name || str(spec.name) || target.split("/").pop() || "";
   const size = info?.size ?? (typeof spec.size === "number" ? spec.size : undefined);
@@ -167,14 +181,58 @@ function FileCard({ spec }: { spec: Spec }) {
   const rawExt = (name.match(/\.([^.\\/]+)$/)?.[1] ?? "").toLowerCase();
   const ext = rawExt && name.length > rawExt.length + 1 ? rawExt : "";
   const base = ext ? name.slice(0, -(ext.length + 1)) : name;
+  const html = !gone && !info?.dir && isHtmlName(name);
   const meta = gone
     ? "这个文件不在了"
     : [info?.dir ? "文件夹" : kindOf(name, ext), size !== undefined ? fmtSize(size) : "", mtime ? stampText(mtime) : ""]
         .filter(Boolean)
         .join(" · ");
 
+  const showInFinder = async () => {
+    await fetch("/api/file", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: target }),
+    }).catch(() => {});
+  };
+
+  const open = async () => {
+    if (busy) return;
+    setBusy(true);
+    setShown(true);
+    setNote("");
+    const msg = await openInBrowser({ path: target });
+    setBusy(false);
+    if (msg) {
+      setShown(false);
+      setNote(msg);
+      return;
+    }
+    setOpened(true);
+    window.setTimeout(() => {
+      setOpened(false);
+      setShown(false);
+    }, 1500);
+  };
+
   return (
-    <div className="filecard">
+    <div
+      className={html ? "filecard filecard-web" : "filecard"}
+      {...(html
+        ? {
+            role: "button",
+            tabIndex: 0,
+            "aria-label": `在浏览器打开 ${base}${ext ? `.${ext}` : ""}`,
+            title: "在浏览器打开",
+            onClick: () => void open(),
+            onKeyDown: (e: React.KeyboardEvent<HTMLDivElement>) => {
+              if (e.key !== "Enter" && e.key !== " ") return;
+              e.preventDefault();
+              void open();
+            },
+          }
+        : {})}
+    >
       <span className="filecard-icon" aria-hidden>
         {iconFor(name)}
       </span>
@@ -184,23 +242,36 @@ function FileCard({ spec }: { spec: Spec }) {
           {!!ext && !gone && <span className="filecard-ext">.{ext}</span>}
         </div>
         <div className="filecard-sub">
-          <span className="filecard-meta">{meta}</span>
+          <span className={`filecard-meta${note ? " filecard-note" : ""}`}>{note || meta}</span>
           {!gone && (
-            <button
-              type="button"
-              className="filecard-act"
-              onClick={async () => {
-                setShown(true);
-                await fetch("/api/file", {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ path: target }),
-                }).catch(() => {});
-                window.setTimeout(() => setShown(false), 1500);
-              }}
-            >
-              {shown ? "打开了" : "在 Finder 中显示"}
-            </button>
+            <>
+              {html && (
+                <button
+                  type="button"
+                  className="filecard-act filecard-open"
+                  disabled={busy}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void open();
+                  }}
+                >
+                  <ExternalLink size={12} strokeWidth={1.9} />
+                  {opened ? "打开了" : "在浏览器打开"}
+                </button>
+              )}
+              <button
+                type="button"
+                className="filecard-act"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShown(true);
+                  void showInFinder();
+                  window.setTimeout(() => setShown(false), 1500);
+                }}
+              >
+                {shown && !html ? "打开了" : "在 Finder 中显示"}
+              </button>
+            </>
           )}
         </div>
       </div>
