@@ -10,6 +10,11 @@ import { completeJson } from "./llm";
 import { nowText } from "./memory";
 import { INTRO, PERSONA } from "./persona";
 import { track } from "./tasks";
+import { outfits, outfitsVersion, pickByRule, WARDROBE_DIR, type Outfit, type WeatherKind } from "./wardrobeoutfits";
+
+/** 造型清单在 lib/wardrobeoutfits.ts：以 data/wardrobe/outfits.json 为准，加衣服不用重启 */
+export type { Outfit } from "./wardrobeoutfits";
+export { outfits } from "./wardrobeoutfits";
 
 /**
  * 衣橱和相册。
@@ -19,8 +24,7 @@ import { track } from "./tasks";
  */
 const run = promisify(execFile);
 const ROOT = process.cwd();
-const DATA_DIR = process.env.DONGNI_DATA_DIR || path.join(ROOT, "data");
-const DIR = path.join(DATA_DIR, "wardrobe");
+const DIR = WARDROBE_DIR;
 const GPTIMG = gptimgScript();
 const CHIBI = path.join(ROOT, "public", "mood", "anchor.png");
 const ANCHOR3D = path.join(DIR, "anchor3d.png");
@@ -33,19 +37,7 @@ const STYLE =
 const PHOTO_STYLE =
   "Casual phone snapshot taken by a friend, natural window light, real skin texture with pores and fine lines, no beauty retouching, no studio lighting, slightly imperfect framing, full body from head to shoes clearly visible, not a 3D render, not anime, not an illustration, no text, no watermark";
 
-export type Outfit = { key: string; name: string; when: string; wear: string; /** 定妆照要真照片感，不用 3D 渲染那套 */ real?: boolean };
-
-/** 几套固定造型（衣服定死，每次都穿得一模一样） */
-export const OUTFITS: Outfit[] = [
-  { key: "sunny", name: "晴天亮色", when: "晴天、多云，不冷不热的白天", wear: "a mint-green oversized hoodie, light denim shorts, white sneakers with mint laces" },
-  { key: "rainy", name: "雨天灰调", when: "下雨、下雪、阴沉的天", wear: "a soft grey hooded raincoat over a cream knit sweater, dark grey jeans, glossy black rain boots, holding a clear umbrella" },
-  { key: "cold", name: "冷天外套", when: "气温低于 12°C", wear: "a camel wool duffle coat, a chunky cream scarf, a brown knit beanie, dark jeans, brown lace-up ankle boots" },
-  { key: "run", name: "跑步那身", when: "清晨 6–8 点，天不下雨", wear: "an orange zip running jacket, black running leggings, a white cap, neon running shoes, a sports watch" },
-  { key: "home", name: "夜里窝着", when: "晚上 10 点以后到早上 7 点", wear: "a loose oatmeal cardigan over lavender pajamas with tiny star prints, fluffy white slippers" },
-  { key: "indoor", name: "窝着的下午", when: "白天 10°C 以下的室内日子", wear: "杏色粗针织开衫配白圆领T，深棕格纹A字裙，厚羊毛连裤袜，米白软底家居拖鞋", real: true },
-  { key: "leaf", name: "出门踩叶子", when: "冷天出门 3–8°C 晴或多云", wear: "奶白短羽绒服、灰蓝连帽卫衣、直筒牛仔裤、燕麦色粗针织围巾、白色帆布鞋", real: true },
-  { key: "evening", name: "晚上有点讲究", when: "18 点以后出门", wear: "墨绿丝绒连衣裙、黑色薄开衫、细金项链、黑色短靴", real: true },
-];
+/* 衣橱清单见 lib/wardrobeoutfits.ts：每次读都按需读 data/wardrobe/outfits.json，加一件、改一件不用重启 */
 
 /* ---------------- 天气 ---------------- */
 
@@ -59,7 +51,7 @@ export type Weather = {
   /** 体感温度（°C） */
   feels?: number;
   text: string;
-  kind: "sun" | "cloud" | "rain" | "snow" | "unknown";
+  kind: WeatherKind;
   humidity?: number;
   /** 风速 km/h */
   wind?: number;
@@ -424,17 +416,21 @@ export async function getWeather(): Promise<Weather | null> {
 
 const season = (m = new Date().getMonth() + 1) => (m >= 3 && m <= 5 ? "春" : m >= 6 && m <= 8 ? "夏" : m >= 9 && m <= 11 ? "秋" : "冬");
 
-/** 规则写死：同样的时间、天气，穿出来一定是同一身 */
+/** 规则写死的那几套：同样的时间、天气，穿出来一定是同一身。清单里带条件的那几身（outfits.json 加的）条件都满足时先穿它 */
 export function pickOutfit(w: Weather | null, d = new Date()): Outfit {
   const h = d.getHours();
-  const byKey = (k: string) => OUTFITS.find((o) => o.key === k)!;
+  const list = outfits();
+  const byKey = (k: string) => list.find((o) => o.key === k) ?? list[0];
   const wet = w?.kind === "rain" || w?.kind === "snow";
+  // 体感优先：同样的温度，风一吹就不是一回事
+  const feels = w ? (w.feels ?? w.temp) : undefined;
+  // 清单里带条件的那几身（比如从 outfits.json 新加的）先看：条件都满足就穿它
+  const byRule = pickByRule({ hour: h, temp: feels, kind: w?.kind, month: d.getMonth() + 1 });
+  if (byRule) return byRule;
   if (h >= 22 || h < 6) return byKey("home");
   if (h < 8 && !wet) return byKey("run");
   if (h < 7) return byKey("home");
   if (wet) return byKey("rainy");
-  // 体感优先：同样的温度，风一吹就不是一回事
-  const feels = w ? (w.feels ?? w.temp) : undefined;
   // 18 点以后出门，穿得讲究一点
   if (h >= 18) return byKey("evening");
   const clear = !w || w.kind === "sun" || w.kind === "cloud";
@@ -448,9 +444,24 @@ export function pickOutfit(w: Weather | null, d = new Date()): Outfit {
 }
 
 export async function today() {
+  void ensureNewOutfits();
   const w = await getWeather();
   const outfit = pickOutfit(w);
   return { weather: w, outfit, season: season() };
+}
+
+/**
+ * 清单换了（往 outfits.json 里加了衣服、改了衣服）就先看看定妆照齐不齐：
+ * 缺的在后台补上，下一眼就能穿、能出图，不用重启。
+ * 只在清单版本变了时查一次，不会每轮都去试。
+ */
+let outfitsChecked = -1;
+function ensureNewOutfits() {
+  const v = outfitsVersion();
+  if (v === outfitsChecked) return;
+  outfitsChecked = v;
+  if (outfits().every((o) => fs.existsSync(path.join(DIR, `${o.key}.jpg`)))) return;
+  void ensureWardrobe();
 }
 
 /** 提示词里等不起太久：一点点没回来就先拿上次成功的数据顶上，请求本身还在后台跑，下次就有新的 */
@@ -487,6 +498,7 @@ export function weatherText(w: Weather) {
 
 /** 写进她的系统提示词：她知道自己今天穿什么、外面什么天。没取到就明说，不许编。 */
 export async function wardrobeNote() {
+  void ensureNewOutfits();
   const w = await weatherSoon(1200);
   const outfit = pickOutfit(w);
   const city = getCity();
@@ -523,7 +535,7 @@ export async function ensureWardrobe() {
         ANCHOR3D,
       );
     }
-    for (const o of OUTFITS) {
+    for (const o of outfits()) {
       const file = path.join(DIR, `${o.key}.png`);
       if (fs.existsSync(file.replace(/\.png$/, ".jpg"))) continue;
       await track(

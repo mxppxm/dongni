@@ -2,7 +2,7 @@ import fs from "node:fs";
 import { db } from "@/lib/db";
 import { diaryOf } from "@/lib/diary";
 import { captionOf, fillCaptions } from "@/lib/captions";
-import { listPhotos, OUTFITS, today, wardrobeFile } from "@/lib/wardrobe";
+import { listPhotos, outfits, today, wardrobeFile } from "@/lib/wardrobe";
 
 export const dynamic = "force-dynamic";
 
@@ -10,7 +10,7 @@ export async function GET() {
   const t = await today();
   return Response.json({
     today: { outfit: t.outfit.key, weather: t.weather, season: t.season },
-    outfits: OUTFITS.map((o) => ({
+    outfits: outfits().map((o) => ({
       key: o.key,
       name: o.name,
       when: o.when,
