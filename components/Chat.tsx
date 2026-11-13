@@ -47,6 +47,7 @@ type Outbox = { clientId: string; content: string; createdAt: number; images?: s
 const DRAFT_KEY = "dongni:draft";
 const THEME_KEY = "dongni:theme";
 const OUTBOX_KEY = "dongni:outbox";
+const NOTIFY_KEY = "dongni:notify";
 
 const readOutbox = (): Outbox[] => {
   try {
@@ -64,20 +65,94 @@ const writeOutbox = (o: Outbox[]) => {
   }
 };
 
-/* ---------- Chrome 通知：页面在后台时弹，点一下跳回来 ---------- */
+/* ---------- 系统通知：页面不在眼前时收到她的新消息才弹，点一下跳回来、跳到那条 ---------- */
 let swReg: ServiceWorkerRegistration | null = null;
 let myName = "懂你";
 const plain = (t: string) =>
   t
     .replace(/```[\s\S]*?```/g, " ")
-    .replace(/!\[[^\]]*\]\([^)]*\)/g, "[图片]")
-    .replace(/[*_~`#>]/g, "")
+    .replace(/!\[[^\]]*\]\(([^)]*)\)/g, (_, f: string) => (isVoiceSrc(f) ? "[语音] " : "[图片] "))
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/[*_~`#>|]/g, "")
     .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 120);
-function browserNotify(id: number, text: string) {
-  if (!document.hidden || !swReg || typeof Notification === "undefined" || Notification.permission !== "granted") return;
-  void swReg.showNotification(myName, { body: plain(text) || "给你发了条消息", tag: `msg-${id}` });
+    .trim();
+const isVoiceSrc = (src: string) => src.startsWith("/api/voice/clip/");
+/** 通知正文：最多 60 个字，后面提一句还有几条 */
+const snippet = (text: string, more = 0) => {
+  const body = [...(plain(text) || "给你发了条消息")];
+  const cut = body.length > 60 ? [...body.slice(0, 60)].join("") + "…" : body.join("");
+  return more > 0 ? `${cut}（还有 ${more} 条）` : cut;
+};
+
+// 权限：first 只试着要一次，他拒了就不再弹；每次打开问一遍，还关着就认作「不想被打扰」
+const NOTIFY_DEFAULT = { state: "first", at: 0 };
+function readNotifyPref() {
+  try {
+    return { ...NOTIFY_DEFAULT, ...JSON.parse(localStorage.getItem(NOTIFY_KEY) || "{}") };
+  } catch {
+    return { ...NOTIFY_DEFAULT };
+  }
+}
+function writeNotifyPref(p: { state: string; at: number }) {
+  try {
+    localStorage.setItem(NOTIFY_KEY, JSON.stringify(p));
+  } catch {}
+}
+/** 要权限：only 传了，就只在他拒过的记录已被清掉时再要一次 */
+function askNotify(only?: "first") {
+  if (only === "first" && readNotifyPref().state !== "first") return;
+  if (typeof Notification === "undefined" || Notification.permission !== "default") return;
+  void Notification.requestPermission().then((p) => {
+    // 新开页面时手上没有用户动作，浏览器直接答「拒绝」不算数，等他要发消息时再问
+    if (p === "denied" && document.hasFocus()) writeNotifyPref({ state: "denied", at: Date.now() });
+  });
+}
+
+const NOTIFY_GRACE = 600;
+// 还没弹出去的新消息：ids 等着弹的，items 已经拿到正文的，timers 每条最多等多久
+let notifyDraft = { ids: new Set<number>(), items: new Map<number, string>(), timers: new Map<number, number>(), timer: 0 };
+const notifySeen = new Set<number>(); // 弹过的，绝不弹第二次
+/** 一串新消息：攒几百毫秒合成一条；同一条只弹一次。正文还没写出来就用「N 条新消息」 */
+function browserNotifySoon(ids: number[]) {
+  for (const id of ids) {
+    notifyDraft.ids.add(id);
+    notifyDraft.timers.set(id, Date.now() + NOTIFY_GRACE);
+  }
+  if (!notifyDraft.timer) notifyDraft.timer = window.setTimeout(flushNotify, NOTIFY_GRACE);
+}
+/** 她这一条回完了：正文知道了，还没弹出去的通知用正文补上 */
+function browserNotifyText(id: number, text: string) {
+  if (notifySeen.has(id)) return;
+  notifyDraft.items.set(id, text);
+}
+/** 攒着的消息：正文出来了就弹正文，等不到正文（比如打电话时说的）就数条数 */
+function flushNotify() {
+  notifyDraft.timer = 0;
+  const now = Date.now();
+  const fresh = [...notifyDraft.ids].filter((id) => !notifySeen.has(id)).sort((a, b) => a - b);
+  const waiting = fresh.filter((id) => !notifyDraft.items.has(id) && now < (notifyDraft.timers.get(id) ?? 0));
+  const ready = fresh.filter((id) => !waiting.includes(id));
+  notifyDraft.ids = new Set(waiting);
+  if (waiting.length) notifyDraft.timer = window.setTimeout(flushNotify, NOTIFY_GRACE);
+  else notifyDraft = { ...notifyDraft, items: new Map(), timers: new Map() };
+  if (!ready.length) return;
+  ready.forEach((id) => notifySeen.add(id));
+  const last = ready[ready.length - 1];
+  const body = snippet(notifyDraft.items.get(last) ?? "", ready.length - 1);
+  void showNotice(last, body);
+}
+async function showNotice(messageId: number | null, body: string) {
+  if (typeof Notification === "undefined" || Notification.permission !== "granted" || !swReg) return;
+  if (document.visibilityState === "visible" && document.hasFocus()) return;
+  try {
+    await swReg.showNotification(myName, {
+      body,
+      tag: "dongni-message",
+      data: { messageId },
+      // 手机上没监听 body 的话条本身就点不了，直接把页面带回来
+      ...({ clickAction: "/" } as Record<string, unknown>),
+    });
+  } catch {}
 }
 const fromServer = (m: ServerMsg): Msg => ({ ...m, key: `s${m.id}` });
 
@@ -128,6 +203,11 @@ export default function Chat() {
   const inflight = useRef(0); // 还在收回复的条数
   const composing = useRef(false);
   const memCountRef = useRef<number | null>(null);
+  const focusMsg = useRef<number | null>(null); // 点了通知要跳过去的那条
+  const hasMoreRef = useRef(false);
+  hasMoreRef.current = hasMore;
+  const revealNow = useRef<number | null>(null); // 正要跳过去的那条，一次只跳一条
+  const revealRef = useRef<(id: number) => void>(() => {});
 
   const patch = useCallback((key: string, fn: (m: Msg) => Msg) => {
     setMsgs((list) => list.map((m) => (m.key === key ? fn(m) : m)));
@@ -228,7 +308,7 @@ export default function Chat() {
                 } else if (e.type === "done") {
                   finished = true;
                   patch(aKey, (m) => {
-                    if (m.id) browserNotify(m.id, m.content);
+                    if (m.id) browserNotifyText(m.id, m.content);
                     return { ...m, status: "done" };
                   });
                   [6000, 15000, 30000].forEach((ms) => setTimeout(checkMemories, ms));
@@ -329,7 +409,13 @@ export default function Chat() {
           }
           return next;
         });
-        added.filter((m) => m.role === "assistant" && m.kind !== "system" && m.status === "done").forEach((m) => browserNotify(m.id!, m.content));
+        // 新到的她的消息：页面不在眼前就弹通知；一次都还没弹过权限的，这时顺手要一次
+        const arrived = added.filter((m) => m.role === "assistant" && m.kind !== "system" && m.status === "done" && m.id);
+        if (arrived.length) {
+          askNotify("first");
+          for (const m of arrived) browserNotifyText(m.id!, m.content);
+          browserNotifySoon(arrived.map((m) => m.id!));
+        }
       } catch {}
     };
     const loop = async () => {
@@ -337,7 +423,8 @@ export default function Chat() {
       // 页面切到后台也照样同步（慢一点）：后台的活做完了，得靠这里拿到新消息才弹得出浏览器通知
       await sync();
       // 通话中勤快点，电话里说的话几乎实时出现在对话框
-      timer = window.setTimeout(loop, callingRef.current ? 1000 : document.visibilityState === "visible" ? 4000 : 10000);
+      // 不在眼前时要跟着：她主动发的、打电话时说的、提醒、后台的活做完了，都得靠这里拿来才弹得出通知
+      timer = window.setTimeout(loop, callingRef.current ? 1000 : document.visibilityState === "visible" && document.hasFocus() ? 4000 : 2500);
     };
     void loop();
     return () => {
@@ -362,15 +449,82 @@ export default function Chat() {
       } catch {}
     };
     void ping();
-    const t = setInterval(ping, 45_000);
+    // 窗口也失焦（切到别的应用）时照样报到，服务端才知道他不在跟前
+    const t = setInterval(() => document.visibilityState === "visible" && void ping(), 45_000);
     // 切回来马上报到：他不在时攒着的话，回来就该说了
     const onVis = () => document.visibilityState === "visible" && void ping();
     document.addEventListener("visibilitychange", onVis);
+    window.addEventListener("focus", onVis);
+    // 注册好、页面也加载完了，试着要一次通知权限（拒绝过的不再问）
+    if (loaded) askNotify("first");
     return () => {
       clearInterval(t);
       document.removeEventListener("visibilitychange", onVis);
+      window.removeEventListener("focus", onVis);
     };
+  }, [loaded]);
+
+  /* ---------- 点通知：跳回页面、回到那条消息 ---------- */
+  // 通知交给页面里的这里处理（没开着就让后台的 service worker 直接打开页面，打开后再说一声）
+  useEffect(() => {
+    if (!("serviceWorker" in navigator)) return;
+    const onMessage = (e: MessageEvent) => {
+      if (e.data?.type !== "dongni-notify-open") return;
+      const id = Number(e.data.messageId);
+      if (Number.isFinite(id) && id > 0) void revealRef.current(id);
+    };
+    navigator.serviceWorker.addEventListener("message", onMessage);
+    return () => navigator.serviceWorker.removeEventListener("message", onMessage);
   }, []);
+
+  // 顺着往上翻，直到找到那条（翻到一半也没有就算了）
+  const loadUntil = useCallback(
+    async (id: number) => {
+      for (let i = 0; i < 50; i++) {
+        let more = true;
+        let firstId = 0;
+        setMsgs((list) => {
+          more = hasMoreRef.current;
+          firstId = list.find((m) => m.id)?.id ?? 0;
+          return list;
+        });
+        if (!more || !firstId || firstId <= id) return;
+        try {
+          const { messages, hasMore: more2 } = (await (await fetch(`/api/messages?before=${firstId}&limit=60`)).json()) as { messages: ServerMsg[]; hasMore: boolean };
+          setHasMore(more2);
+          hasMoreRef.current = more2;
+          setMsgs((list) => {
+            const have = new Set(list.map((m) => m.id));
+            const front = messages.filter((m) => !have.has(m.id)).map(fromServer);
+            return front.length ? [...front, ...list] : list;
+          });
+        } catch {
+          return;
+        }
+        await new Promise((r) => setTimeout(r, 80));
+      }
+    },
+    [],
+  );
+  const reveal = useCallback(
+    async (id: number) => {
+      revealNow.current = id;
+      await loadUntil(id);
+      let hit = false;
+      setMsgs((list) => {
+        hit = list.some((m) => m.id === id && m.role === "assistant" && m.status === "done");
+        return list;
+      });
+      if (!hit) return;
+      if (revealNow.current !== id) return;
+      revealNow.current = null;
+      // 翻完了：挂上记号，等这一帧画出来再滚过去（页面上会把它带出来）
+      focusMsg.current = id;
+      setMsgs((list) => [...list]);
+    },
+    [loadUntil],
+  );
+  revealRef.current = reveal;
 
   const att = useAttachments();
 
@@ -378,8 +532,9 @@ export default function Chat() {
     const text = draft.trim();
     const images = att.items.map((a) => a.dataUrl);
     if (!text && !images.length) return;
-    // 第一次发消息时顺手要一下通知权限（必须在用户操作里要）
-    if (typeof Notification !== "undefined" && Notification.permission === "default") void Notification.requestPermission();
+    // 第一次发消息时顺手要一下通知权限（必须在用户操作里要）；他刚在浏览器里重新允许了就再试一次
+    if (typeof Notification !== "undefined" && Notification.permission === "default" && readNotifyPref().state !== "first") writeNotifyPref(NOTIFY_DEFAULT);
+    askNotify("first");
     const item: Outbox = { clientId: crypto.randomUUID(), content: text, createdAt: Date.now(), ...(images.length ? { images } : {}) };
     att.clear();
     writeOutbox([...readOutbox(), item]);
@@ -440,6 +595,8 @@ export default function Chat() {
     (async () => {
       const { messages, hasMore } = (await (await fetch("/api/messages?limit=60")).json()) as { messages: ServerMsg[]; hasMore: boolean };
       const list = messages.map(fromServer);
+      // 打开页面之前就有的不弹通知；加载完才到的才算新消息
+      for (const m of messages) if (m.id) notifySeen.add(m.id);
       const known = new Set(messages.map((m) => m.clientId).filter(Boolean));
       const outbox = readOutbox();
       writeOutbox(outbox.filter((o) => !known.has(o.clientId)));
@@ -452,21 +609,28 @@ export default function Chat() {
       // 没写完的回复（含之前出错的）服务端会自动重新生成，这里跟着拿结果
       for (const m of list) if (m.role === "assistant" && m.id && m.status !== "done") void follow(m.key, m.id);
       resend.forEach(enqueue);
+      // 从通知里点进来（页面是它新开的）：跳到他点的那条
+      const want = Number(new URLSearchParams(location.search).get("msg"));
+      if (Number.isFinite(want) && want > 0) {
+        history.replaceState(null, "", location.pathname);
+        void revealRef.current(want);
+      }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   /* ---------- 往上翻历史 ---------- */
+  const fetchOlder = useCallback(
+    (before: number) => fetch(`/api/messages?before=${before}&limit=60`).then((r) => r.json() as Promise<{ messages: ServerMsg[]; hasMore: boolean }>),
+    [],
+  );
   const loadOlder = useCallback(async () => {
-    if (loadingOlder.current || !hasMore) return;
-    const first = msgs.find((m) => m.id);
+    if (loadingOlder.current || !hasMore || revealNow.current !== null) return;
+    const first = msgs.find((m) => m.id)?.id;
     if (!first) return;
     loadingOlder.current = true;
     try {
-      const { messages, hasMore: more } = (await (await fetch(`/api/messages?before=${first.id}&limit=60`)).json()) as {
-        messages: ServerMsg[];
-        hasMore: boolean;
-      };
+      const { messages, hasMore: more } = await fetchOlder(first);
       const el = scroller.current!;
       restore.current = { h: el.scrollHeight, top: el.scrollTop };
       setMsgs((list) => [...messages.map(fromServer), ...list]);
@@ -474,11 +638,20 @@ export default function Chat() {
     } finally {
       loadingOlder.current = false;
     }
-  }, [msgs, hasMore]);
+  }, [msgs, hasMore, fetchOlder]);
 
   useLayoutEffect(() => {
     const el = scroller.current;
     if (!el) return;
+    if (focusMsg.current !== null) {
+      // 点了通知跳过来的：这一帧别粘到底，也先别按翻历史的位置还原，直接看那条
+      const id = focusMsg.current;
+      focusMsg.current = null;
+      restore.current = null;
+      el.querySelector<HTMLElement>(`[data-mid="${id}"]`)?.scrollIntoView({ block: "center" });
+      stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+      return;
+    }
     if (restore.current) {
       el.scrollTop = el.scrollHeight - restore.current.h + restore.current.top;
       restore.current = null;
@@ -563,6 +736,7 @@ export default function Chat() {
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ duration: 0.35, ease: [0.2, 0.8, 0.2, 1] }}
                   className={m.role === "user" ? "mt-5 flex justify-end" : "mt-4"}
+                  data-mid={m.id}
                 >
                   {m.kind === "system" ? (
                     <div className="mx-auto line-clamp-2 max-w-[80%] text-center text-xs leading-relaxed text-[var(--faint)]" title={m.content}>
