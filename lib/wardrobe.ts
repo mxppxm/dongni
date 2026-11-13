@@ -487,13 +487,32 @@ export async function today() {
  */
 let outfitsChecked = -1;
 /** 定妆照是不是该拍 / 该重拍了：文件没有，或者动作、机位变了 */
-function anchorStale(o: Outfit, index: number) {
+/**
+ * 这一身的定妆照要不要拍：没有照片的拍；他明确让改这一身（add_outfit 改了已有的一身）的重拍这一张。别的一律不动。
+ *
+ * 以前只要「动作 + 机位」的指纹对不上就重拍——改一次动作的规则，整个衣橱十张照片全被重刷一遍（2026-11-13，
+ * 花钱、刷屏、还停不下来）。现在指纹只是记录，不再触发重拍：已有的照片就是已有的，绝不批量重拍。
+ */
+const reshootKey = (key: string) => `wardrobe_reshoot_${key}`;
+function anchorStale(o: Outfit, _index: number) {
   if (!fs.existsSync(path.join(DIR, `${o.key}.jpg`))) return true;
   try {
-    return getKv(anchorKey(o.key)) !== anchorMark(o, index);
+    return getKv(reshootKey(o.key)) === "1";
   } catch {
-    return true;
+    return false;
   }
+}
+
+/** 他让改了已有的某一身：只把这一身标成要重拍 */
+export function markReshoot(key: string) {
+  setKv(reshootKey(key), "1");
+}
+
+/** 叫停正在拍的定妆照：正在出的那一张收不回，后面排着的不拍了。没有在拍返回 false */
+export function stopWardrobeShoots(): boolean {
+  if (!g.__dongniWardrobeBusy) return false;
+  g.__dongniWardrobeStop = true;
+  return true;
 }
 function ensureNewOutfits() {
   const v = outfitsVersion();
@@ -557,12 +576,13 @@ async function draw(prompt: string, refs: string[], out: string, size = "1024x15
   fs.rmSync(out, { force: true });
 }
 
-const g = globalThis as unknown as { __dongniWardrobeBusy?: boolean; __dongniAlbumReady?: boolean };
+const g = globalThis as unknown as { __dongniWardrobeBusy?: boolean; __dongniAlbumReady?: boolean; __dongniWardrobeStop?: boolean };
 
 /** 衣橱：定妆照缺哪套补哪套；动作或机位换了的那套重拍（拍过就复用，不用每次重启都重来） */
 export async function ensureWardrobe() {
   if (g.__dongniWardrobeBusy) return;
   g.__dongniWardrobeBusy = true;
+  g.__dongniWardrobeStop = false;
   try {
     fs.mkdirSync(DIR, { recursive: true });
     if (!fs.existsSync(ANCHOR3D.replace(/\.png$/, ".jpg"))) {
@@ -576,6 +596,10 @@ export async function ensureWardrobe() {
     }
     const list = outfits();
     for (const [i, o] of list.entries()) {
+      if (g.__dongniWardrobeStop) {
+        console.log("[dongni] 衣橱：他叫停了，后面的定妆照不拍了");
+        break;
+      }
       if (!anchorStale(o, i)) continue;
       const pose = anchorPose(o);
       const camera = cameraFor(i);
@@ -604,6 +628,7 @@ export async function ensureWardrobe() {
         },
       );
       setKv(anchorKey(o.key), anchorMark(o, i));
+      setKv(reshootKey(o.key), "");
       console.log(`[dongni] 衣橱：${redo ? "重拍了" : "做好"}「${o.name}」`);
     }
   } catch (e) {

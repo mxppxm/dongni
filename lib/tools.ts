@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 import { addReminder, cancelReminder, pendingReminders, resolveWhen } from "./reminders";
 import { generateImage } from "./imagegen";
 import { createMood } from "./moods";
-import { ensureWardrobe, setCity, takeDailyPhoto, today, wardrobeFile } from "./wardrobe";
+import { ensureWardrobe, markReshoot, setCity, stopWardrobeShoots, takeDailyPhoto, today, wardrobeFile } from "./wardrobe";
 import { outfits, saveOutfit } from "./wardrobeoutfits";
 import { completeJson } from "./llm";
 import { addLocalImage, IMAGE_EXT, imageMarkdown } from "./images";
@@ -559,7 +559,7 @@ export const TOOLS = [
     function: {
       name: "add_outfit",
       description:
-        "给自己的衣橱加一身新衣服（或者改已有的一身）。他让你加衣服、设计新造型、改某身衣服时用这个——衣服是数据，不用改代码、不用重启，加完马上能穿，定妆照会在后台自动补拍。别为了加衣服去调 repair_self。",
+        "给自己的衣橱加一身新衣服（或者改已有的一身）。他让你加衣服、设计新造型、改某身衣服时用这个——衣服是数据，不用改代码、不用重启，加完马上能穿，定妆照会在后台自动补拍。只会给这一身补拍一张定妆照，别的衣服的照片不会动。别为了加衣服去调 repair_self。",
       parameters: {
         type: "object",
         properties: {
@@ -567,7 +567,7 @@ export const TOOLS = [
           wear: { type: "string", description: "穿什么，从上到下写具体：上装、外套、下装、鞋、配饰" },
           when: { type: "string", description: "什么时候穿，一句话，如「秋天阴天 5~12°C 的白天」" },
           pose: { type: "string", description: "这身的招牌动作，英文一句话，要贴这身的气质、和其他衣服不重复（如 walking while lifting the hem of her long coat）" },
-          poses: { type: "array", items: { type: "string" }, description: "可选：两三个动作（英文），第一句用于定妆照，拍今天的照片会轮换；不写就用 pose" },
+          poses: { type: "array", items: { type: "string" }, description: "两三个不同的动作（英文，每个一句），第一句用于定妆照，拍今天的照片会轮着用；新加衣服时尽量写上" },
           key: { type: "string", description: "改已有的一身时写它的 key；新加的不用写" },
           real: { type: "boolean", description: "定妆照要真人照片感就写 true（默认 true）" },
           rule: {
@@ -739,6 +739,8 @@ const IMPL: Record<string, (a: never, ctx?: ToolCtx) => Promise<string>> = {
   task_append: (async ({ id, text }: { id?: string; text: string }) => appendDispatch(id, text)) as (a: never, ctx?: ToolCtx) => Promise<string>,
   cancel_task: (async ({ id }: { id?: string }) => {
     const r = await cancelDispatch(id?.trim() || undefined);
+    // 后台没有活、但衣橱正在拍定妆照：他说停，就把后面排着的照片也停掉
+    if (!r.ok && stopWardrobeShoots()) return "正在拍的定妆照叫停了：手上这一张收不回，后面排着的都不拍了。照实告诉他。";
     return r.ok ? `已经停掉了：${r.cancelled.join("、")}。可以跟他说停了。` : `出错了：没停成——${r.why}。别说停了，照实告诉他。`;
   }) as (a: never, ctx?: ToolCtx) => Promise<string>,
   learn_skill: (async ({ what }: { what: string }) => {
@@ -807,8 +809,11 @@ const IMPL: Record<string, (a: never, ctx?: ToolCtx) => Promise<string>> = {
   }) as (a: never, ctx?: ToolCtx) => Promise<string>,
   add_outfit: (async (a: Record<string, unknown>) => {
     try {
+      const existed = typeof a.key === "string" && outfits().some((x) => x.key === a.key);
       const o = saveOutfit({ real: true, ...a });
-      void ensureWardrobe().catch(() => {}); // 新的一身：定妆照后台补拍
+      // 只动这一身：新加的补拍一张；改的是已有的一身、而且改了穿什么或动作，才重拍它那一张。别的衣服一张都不碰
+      if (existed && (a.wear || a.poses || a.pose)) markReshoot(o.key);
+      void ensureWardrobe().catch(() => {});
       return `加好了：「${o.name}」已经在衣橱里（现在一共 ${outfits().length} 身），不用重启，条件对上就会穿它${o.rule ? "" : "（这身没写自动条件，只有他点名才会穿）"}。定妆照在后台补拍，要一两分钟。照实告诉他加好了；别说照片已经拍好。`;
     } catch (e) {
       return `出错了：没加成——${e instanceof Error ? e.message : e}`;
