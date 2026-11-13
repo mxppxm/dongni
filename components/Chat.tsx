@@ -8,6 +8,7 @@ import Dock from "./Dock";
 import Markdown from "./Markdown";
 import Mood from "./Mood";
 import Starfield, { type Theme } from "./Starfield";
+import { useRunningTasks } from "./Tasks";
 import { AttachmentStrip, useAttachments } from "./useAttachments";
 import MicButton, { type VoiceSendResult } from "./VoiceRecorder";
 import { setPageQuiet } from "./Voice";
@@ -182,6 +183,9 @@ export default function Chat() {
   const [memCount, setMemCount] = useState<number | null>(null);
   const [pulse, setPulse] = useState(0);
   const [theme, setTheme] = useState<Theme>("light");
+  // 有后台的活在跑（派出去的、改自己的、排队的）；两件以下一档，三件以上一档，闲着就灭
+  const runningTasks = useRunningTasks();
+  const flow = runningTasks ? (runningTasks >= 3 ? "fast" : "slow") : "off";
 
   useEffect(() => {
     setTheme(document.documentElement.dataset.theme === "dark" ? "dark" : "light");
@@ -781,7 +785,7 @@ export default function Chat() {
           {att.hint && <div className="mb-2 text-center text-xs text-[var(--faint)]">{att.hint}</div>}
           {micHint && <div className="mb-2 text-center text-xs text-[var(--faint)]">{micHint}</div>}
           <div
-            className={`beam flex items-end gap-2 rounded-[26px] border bg-[var(--panel)] py-2 pr-2 pl-5 shadow-[var(--shadow)] backdrop-blur-xl transition-colors ${
+            className={`beam flow-${flow} flex items-end gap-2 rounded-[26px] border bg-[var(--panel)] py-2 pr-2 pl-5 shadow-[var(--shadow)] backdrop-blur-xl transition-colors ${
               att.dragging ? "border-[var(--dot)]" : "border-[var(--border)]"
             }`}
           >

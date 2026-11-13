@@ -2,7 +2,7 @@
 
 import { AnimatePresence, motion } from "motion/react";
 import { Check, ListTodo, LoaderCircle, X } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import Balance from "./Balance";
 
 type Task = {
@@ -190,6 +190,30 @@ function Row({ t, now, open, onToggle }: { t: Task; now: number; open: boolean; 
   );
 }
 
+/* ---------- 在跑的活有几件：输入框边框的流光跟着它走 ---------- */
+// 0 件就是在跑/在派/在改/排队的都没有；1~2 件算一档；3 件以上一档
+let runningCount = 0;
+const busyHooks = new Set<() => void>();
+const subscribeBusy = (fn: () => void) => {
+  busyHooks.add(fn);
+  return () => {
+    busyHooks.delete(fn);
+  };
+};
+const setRunningCount = (n: number) => {
+  if (n === runningCount) return;
+  runningCount = n;
+  busyHooks.forEach((fn) => fn());
+};
+/** 当前在跑的活有几件（0 表示闲着） */
+export function useRunningTasks() {
+  return useSyncExternalStore(
+    subscribeBusy,
+    () => runningCount,
+    () => 0,
+  );
+}
+
 /** 左边的任务栏：她动手干的事一件件列着，跑着的转圈，点开能看细节和结果 */
 export default function Tasks() {
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -205,6 +229,7 @@ export default function Tasks() {
   }, []);
 
   const running = tasks.filter((t) => t.status === "running").length;
+  useEffect(() => setRunningCount(running), [running]);
 
   useEffect(() => {
     void load();
