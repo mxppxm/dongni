@@ -550,12 +550,16 @@ async function oneReply(
       content: `【你后台的事·实时状态】\n${selfState()}\n\n${HONESTY}\n如果你前面说过的话和这份状态对不上，用一句话轻轻纠正就行（比如「刚才说错了，其实没在弄」），然后正常聊天。认过的错不要每句都翻出来再认一遍，也别自我检讨、别说「我没瞎说」这种话——他要的是你好好说话，不是一直道歉。`,
     },
   ];
-  const toolList = allowTools ? toolsFor(stripImageMarkdown(userRow.content)) : [];
+  // 这一轮取用过的插件：取用之后下一步它的工具就在清单里了，所以清单每一步现算
+  const loaded = new Set<string>();
+  const query = stripImageMarkdown(userRow.content);
+  let toolList = allowTools ? toolsFor(query, loaded) : [];
   const attachments: string[] = [];
   const ctx = {
     turnId: String(assistantId),
     attach: (md: string) => attachments.push(md),
     see: (id: number) => seen.push(id),
+    load: (id: string) => void loaded.add(id),
   };
   let seen: number[] = [];
   // 回复写完后，把工具挂上的图片、卡片接在末尾
@@ -572,6 +576,7 @@ async function oneReply(
     let roundText = "";
     let calls = null;
     const t0 = Date.now();
+    if (allowTools && loaded.size) toolList = toolsFor(query, loaded);
     for await (const ev of streamChat(msgs, allowTools && round < ROUNDS - 1 && toolList.length ? toolList : undefined)) {
       if (ev.type === "tools") {
         calls = ev.calls;

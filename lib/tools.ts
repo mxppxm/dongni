@@ -18,8 +18,7 @@ import { appendDispatch, cancelDispatch, dispatch, dispatchStatus, jobReport } f
 import { db, getKv, setKv } from "./db";
 import { finishTask, startTask } from "./tasks";
 import { saveVoiceConfig, voiceReady } from "./voiceconfig";
-import { CAP_DIR, capPromptLines, capStateLine, capTitle, capTools, runCap } from "./capdir";
-import { mcpStateLine, mcpTitle, mcpTools, runMcp } from "./mcp";
+import { PLUGIN_DIR, listPlugins, managePlugin, needsUsePlugin, pluginCatalog, pluginStateLine, pluginToolTitle, pluginTools, runPluginTool, setSecret, usePlugin } from "./plugins";
 import { closeGap, noteGap, openGaps } from "./gaps";
 import { inLane } from "./lane";
 
@@ -208,7 +207,7 @@ async function cancelReminderTool({ id }: { id?: number }) {
 }
 
 /** 一次回复里，工具可以往回复末尾挂东西（图片、卡片），也可以让模型「看到」图片 */
-export type ToolCtx = { turnId: string; attach: (markdown: string) => void; see: (imageId: number) => void };
+export type ToolCtx = { turnId: string; attach: (markdown: string) => void; see: (imageId: number) => void; /** 这一轮取用了哪个插件 */ load?: (pluginId: string) => void };
 
 const card = (spec: Record<string, unknown>) => "```card\n" + JSON.stringify(spec) + "\n```";
 
@@ -427,7 +426,7 @@ export const TOOLS = [
     function: {
       name: "repair_self",
       description:
-        "修改你自己（这个聊天应用）的代码：对方让你修 bug、改样式、改你的说话方式或行为、改已有功能时用。加衣服用 add_outfit，学一件新本事按「学新本事」那条派活，这两样都不用改代码。一次只交一件事，几件事就分几次交（会自动排队、一件做完接下一件），这样每件一两分钟就好，也不会一件出错连累全部。把对方的要求连同必要的上下文写清楚，交给后台的编码助手去改；改完会自动检查、重启，失败自动退回。要几分钟。",
+        "修改你自己（这个聊天应用）的代码：对方让你修 bug、改样式、改你的说话方式或行为、改已有功能时用。加衣服用 add_outfit，学一件新本事用 learn_skill，这两样都不用改代码。一次只交一件事，几件事就分几次交（会自动排队、一件做完接下一件），这样每件一两分钟就好，也不会一件出错连累全部。把对方的要求连同必要的上下文写清楚，交给后台的编码助手去改；改完会自动检查、重启，失败自动退回。要几分钟。",
       parameters: { type: "object", properties: { request: { type: "string", description: "要改什么，写具体" } }, required: ["request"] },
     },
   },
@@ -486,6 +485,40 @@ export const TOOLS = [
         type: "object",
         properties: { id: { type: "string", description: "要停的那件的编号（dispatch_status 里看得到），只有一件在跑时可省" } },
       },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "learn_skill",
+      description:
+        "学一件新本事：他让你学会一件现在不会的事（查天气、查歌曲、联网搜索、接某个服务、控制某个应用…）时用。会交给后台去写一个插件——不改你的代码、不重启。写好之后会先把它要的权限告诉他，他点头才启用。别为了学新本事去调 repair_self。",
+      parameters: {
+        type: "object",
+        properties: { what: { type: "string", description: "要学会什么，写具体：干什么用、他会怎么问、希望拿到什么样的结果、他有没有指定用哪家的服务" } },
+        required: ["what"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "plugin_manage",
+      description:
+        "管你后来学会的那些本事（插件）：list 看清单和各自的状态；enable 启用（新装的本事等他点头，他同意了才调这个）；disable 停用；remove 卸掉；rollback 退回上一版。他说「把查歌曲关掉」「那个天气的不要了」「启用吧」时用。",
+      parameters: {
+        type: "object",
+        properties: { action: { type: "string", enum: ["list", "enable", "disable", "remove", "rollback"] }, id: { type: "string", description: "插件的 id，list 时不用写" } },
+        required: ["action"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "plugin_secret",
+      description: "存下某件本事要用的 key（状态里写着缺哪个）。他把 key 发给你时用，名字照状态里写的填，值别自己编，回复里别复述 key。",
+      parameters: { type: "object", properties: { name: { type: "string", description: "key 的名字，如 WEATHER_KEY" }, value: { type: "string" } }, required: ["name", "value"] },
     },
   },
   {
@@ -706,6 +739,43 @@ const IMPL: Record<string, (a: never, ctx?: ToolCtx) => Promise<string>> = {
     const r = await cancelDispatch(id?.trim() || undefined);
     return r.ok ? `已经停掉了：${r.cancelled.join("、")}。可以跟他说停了。` : `出错了：没停成——${r.why}。别说停了，照实告诉他。`;
   }) as (a: never, ctx?: ToolCtx) => Promise<string>,
+  learn_skill: (async ({ what }: { what: string }) => {
+    if (!what?.trim()) return "没写要学什么。";
+    try {
+      const out = dispatch(
+        `给聊天应用里的她写一个插件，让她学会这件事：${what.trim()}\n\n严格按 ${PLUGIN_DIR}/SPEC.md 的规范，在 ${PLUGIN_DIR} 下新建一个文件夹（文件夹名就是插件 id），写好 plugin.json 和脚本。要求：\n1. 先读 SPEC.md。\n2. 数据源先上网核实现在真的能用；能不要 key 就不要 key，必须要 key 的在 secrets 里声明名字，不要把任何 key 写进文件。\n3. permissions 如实写。\n4. 每个工具都写 probe，并自己用 probe 的参数真跑一遍脚本，退出码是 0、输出像样才算完。\n5. 结果适合看一眼的（天气、歌曲、条目）按规范输出 card。\n6. 只动这个新文件夹；${PLUGIN_DIR} 以外的文件不要读也不要改。\n收尾时说清：插件 id、它能干什么、要不要 key、你试跑的结果。`,
+        PLUGIN_DIR,
+      );
+      return `${out}\n（这是在学新本事：后台写好之后会自动告诉他这件本事要什么权限、问他要不要启用。现在只跟他说一句你去学了。）`;
+    } catch (e) {
+      return `出错了：没交出去——${e instanceof Error ? e.message : e}`;
+    }
+  }) as (a: never, ctx?: ToolCtx) => Promise<string>,
+  plugin_manage: (async ({ action, id }: { action: string; id?: string }, ctx?: ToolCtx) => {
+    if (action === "list" || !action) {
+      const list = listPlugins(BUILTIN_NAMES);
+      if (!list.length) return "还没有后来学会的本事。他想让你学什么，用 learn_skill。";
+      return (
+        `后来学会的本事（${list.length} 件）：\n` +
+        list.map((p) => `${p.id}｜${p.title}｜${p.statusText}${p.why ? `（${p.why.replace(/\s+/g, " ").slice(0, 80)}）` : ""}｜${p.perms}｜用过 ${p.uses} 次`).join("\n")
+      );
+    }
+    if (!id?.trim()) return "要说是哪件本事（id）。先 list 看看。";
+    if (!["enable", "disable", "remove", "rollback"].includes(action)) return `没有这个动作：${action}`;
+    // 启用就是替他点头：得是他真同意了
+    if (action === "enable" && !(await heAsked(Number(ctx?.turnId) || 0, `启用一件新学的本事（插件 ${id}）`)))
+      return "他还没同意启用这件本事，没有启用。把它是什么、要什么权限照实告诉他，问他要不要开。";
+    return managePlugin(BUILTIN_NAMES, action as "enable" | "disable" | "remove" | "rollback", id.trim());
+  }) as (a: never, ctx?: ToolCtx) => Promise<string>,
+  plugin_secret: (async ({ name, value }: { name: string; value: string }) => {
+    const no = setSecret(String(name ?? "").trim(), String(value ?? ""));
+    return no ? `出错了：没存成——${no}` : "存好了（只存在这台机器上）。缺这个 key 的本事过几秒就能用。回复里别提 key 本身。";
+  }) as (a: never, ctx?: ToolCtx) => Promise<string>,
+  use_plugin: (async ({ id }: { id: string }, ctx?: ToolCtx) => {
+    const out = usePlugin(BUILTIN_NAMES, String(id ?? "").trim());
+    if (!out.startsWith("出错了")) ctx?.load?.(String(id).trim());
+    return out;
+  }) as (a: never, ctx?: ToolCtx) => Promise<string>,
   note_gap: (async ({ what }: { what: string }) => {
     if (!what?.trim()) return "没写做不到的是什么。";
     const g = noteGap(what);
@@ -810,36 +880,52 @@ const TOOL_GROUPS: { names: string[]; hint: RegExp }[] = [
 ];
 
 /** 这一句话要用到哪几件工具 */
-export function toolsFor(_query: string) {
+export function toolsFor(_query: string, loaded: Set<string> = new Set()) {
   // 按关键词挑工具会让她「手里突然没工具」：他说「无聊」时没带画图，她就真画不了。
   // 工具全给，描述走缓存，几乎不影响首字速度。
-  return [...TOOLS, ...capTools(BUILTIN_NAMES), ...mcpTools()];
+  return [...TOOLS, ...pluginTools(BUILTIN_NAMES, loaded), ...(needsUsePlugin(BUILTIN_NAMES) ? [USE_PLUGIN_TOOL] : [])];
 }
 
-/** 内置工具的名字：后来加的本事不许和它们重名 */
-const BUILTIN_NAMES = new Set(TOOLS.map((t) => t.function.name));
+/** 内置工具的名字：插件的工具不许和它们重名 */
+const BUILTIN_NAMES = new Set([...TOOLS.map((t) => t.function.name), "use_plugin"]);
 
-/** 写进系统提示词：后来加的本事（能力目录里的），以及怎么再加 */
+/** 插件多到不能全给的时候才出现：先取用，再用 */
+const USE_PLUGIN_TOOL = {
+  type: "function",
+  function: {
+    name: "use_plugin",
+    description: "取用一件后来学会的本事：目录里写着你有哪些，要用哪件先调这个，它的工具这一轮就到你手上了。",
+    parameters: { type: "object", properties: { id: { type: "string", description: "目录里括号中的那个 id" } }, required: ["id"] },
+  },
+};
+
+/** 写进系统提示词：后来学会的本事的目录，以及三条路怎么分 */
 export function extraCapabilities(): string {
-  const lines = capPromptLines(BUILTIN_NAMES);
   return [
-    lines ? `- 后来学会的本事（都是工具，该用就用）：\n${lines.replace(/^/gm, "  ")}` : "",
-    `- 学新本事：他让你学会一件现在不会的事（查天气、接某个服务、控制某个应用…）时，用 dispatch_task 派活，任务里写明「按 ${CAP_DIR}/SPEC.md 的规范，在 ${CAP_DIR} 下新建一个能力文件夹，写完自己试跑通过」，并把要学的本事说具体。写好不用重启，过几秒你手里就多一件工具。接外面现成的 MCP 服务同理，让后台去改 ~/.config/dongni/mcp.json。`,
+    pluginCatalog(BUILTIN_NAMES),
+    "- 三条路别走错：他让你学会一件现在不会的事（查什么、接哪个服务）→ learn_skill，不改代码；给自己加衣服 → add_outfit，不改代码；改你的说话方式、界面、已有功能的毛病 → repair_self；只办这一次的活 → dispatch_task。",
+    "- 新学的本事要他点头才启用：状态里写着哪件在等他点头，把它是什么、要什么权限照实告诉他；他同意了用 plugin_manage 启用。缺 key 就跟他要，他给了用 plugin_secret 存。",
     "- 做不到的事：他让你做、你手里确实没有能办成的工具，先照实说做不到，再用 note_gap 记一笔；别硬编结果，也别自己去加。",
   ]
     .filter(Boolean)
     .join("\n");
 }
 
-/** 扩展出来的工具名（核对「说了没做」时要认得它们） */
+/** 给「本事」面板用 */
+export const listPluginsForPage = () => listPlugins(BUILTIN_NAMES);
+export const managePluginFromPage = (action: "enable" | "disable" | "remove" | "rollback", id: string) => managePlugin(BUILTIN_NAMES, action, id);
+
+/** 插件的工具名（核对「说了没做」时要认得它们） */
 export function extraToolNames(): string[] {
-  return [...capTools(BUILTIN_NAMES), ...mcpTools()].map((t) => (t as { function: { name: string } }).function.name);
+  return listPlugins(BUILTIN_NAMES)
+    .filter((p) => p.status === "enabled")
+    .flatMap((p) => p.tools);
 }
 
-/** 给她看的状态：后来加的本事、外接服务里现在用不了的 */
+/** 给她看的状态：后来学的本事里现在用不了的、等他点头的 */
 export function extraStateLines(): string {
   const gaps = openGaps().length;
-  return [capStateLine(), mcpStateLine(), gaps ? `做不到清单上有 ${gaps} 条（他问起再说）。` : ""].filter(Boolean).join("\n");
+  return [pluginStateLine(BUILTIN_NAMES), gaps ? `做不到清单上有 ${gaps} 条（他问起再说）。` : ""].filter(Boolean).join("\n");
 }
 
 /** 工具调用过程不上屏：界面上只出现最终回复，所以这里不再提供「正在做什么」的文案 */
@@ -860,6 +946,8 @@ const TASK_TITLE: Record<string, (a: Record<string, unknown>) => string> = {
   cancel_reminder: () => "取消提醒",
   humanize_text: () => "润色文字",
   set_city: (a) => `换城市：${short(a.city)}`,
+  plugin_manage: (a) => (a.action === "list" || !a.action ? "看学会的本事" : `本事：${short(a.action)} ${short(a.id)}`),
+  plugin_secret: (a) => `存 key：${short(a.name)}`,
   add_outfit: (a) => `加衣服：${short(a.name)}`,
   show_image: (a) => `打开图片 ${short(path.basename(String(a.path ?? "")))}`,
   set_voice_key: () => "配语音 key",
@@ -889,7 +977,7 @@ export async function runToolSoon(name: string, rawArgs: string, ctx: ToolCtx): 
   try {
     args = JSON.parse(rawArgs || "{}");
   } catch {}
-  const what = TASK_TITLE[name]?.(args) ?? capTitle(name) ?? mcpTitle(name) ?? name;
+  const what = TASK_TITLE[name]?.(args) ?? pluginToolTitle(name) ?? name;
   console.log(`[dongni] 「${what}」超过 ${SOON_MS / 1000} 秒，转后台接着做`);
   void work.then(async (out) => {
     const cards = lateAttach.join("\n\n");
@@ -906,11 +994,11 @@ export async function runToolSoon(name: string, rawArgs: string, ctx: ToolCtx): 
 /** register=false：她自己后台顺手调的（不进任务栏，免得刷屏） */
 export async function runTool(name: string, rawArgs: string, ctx?: ToolCtx, opts: { register?: boolean } = {}): Promise<string> {
   const builtin = IMPL[name] as ((a: never, ctx?: ToolCtx) => Promise<string>) | undefined;
-  const extraTitle = builtin ? null : (capTitle(name) ?? mcpTitle(name));
+  const extraTitle = builtin ? null : pluginToolTitle(name);
   if (!builtin && extraTitle === null) return `没有这个工具：${name}`;
   // 后来加的本事：能力目录里的脚本，或者外接的 MCP 服务
   const fn: (a: never, ctx?: ToolCtx) => Promise<string> =
-    builtin ?? (async () => (await runCap(name, rawArgs)) ?? (await runMcp(name, rawArgs)) ?? `没有这个工具：${name}`);
+    builtin ?? (async (_a: never, c?: ToolCtx) => (await runPluginTool(name, rawArgs, c?.attach)) ?? `没有这个工具：${name}`);
   let taskId = 0;
   try {
     const args = rawArgs ? JSON.parse(rawArgs) : {};

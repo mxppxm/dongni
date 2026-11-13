@@ -245,6 +245,33 @@ function ReminderCard({ spec }: { spec: Spec }) {
   );
 }
 
+/** 信息卡片：一个标题、几行「名目 · 内容」，插件查回来的结果（天气、歌曲…）用它；带链接的整张可点 */
+function InfoCard({ spec }: { spec: Spec }) {
+  const rows = (Array.isArray(spec.rows) ? spec.rows : []).filter((r): r is unknown[] => Array.isArray(r) && r.length >= 2).slice(0, 12);
+  const url = str(spec.url);
+  const body = (
+    <span className="min-w-0 flex-1">
+      <span className="card-title">{str(spec.title)}</span>
+      <span className="card-rows">
+        {rows.map((r, i) => (
+          <span key={i} className="card-row">
+            <span className="card-row-k">{String(r[0])}</span>
+            <span className="card-row-v">{String(r[1])}</span>
+          </span>
+        ))}
+      </span>
+    </span>
+  );
+  return /^https?:\/\//i.test(url) ? (
+    <a className="card card-info" href={url} target="_blank" rel="noreferrer noopener">
+      {body}
+      <ExternalLink size={14} strokeWidth={1.7} className="card-tail" />
+    </a>
+  ) : (
+    <div className="card card-info">{body}</div>
+  );
+}
+
 export default function CardBlock({ items }: { items: Spec[] }) {
   if (!items.length) return null;
   return (
@@ -254,6 +281,7 @@ export default function CardBlock({ items }: { items: Spec[] }) {
         if (type === "link") return <LinkCard key={i} spec={spec} />;
         if (type === "file") return <FileCard key={i} spec={spec} />;
         if (type === "reminder") return <ReminderCard key={i} spec={spec} />;
+        if (type === "info") return <InfoCard key={i} spec={spec} />;
         return null;
       })}
     </div>

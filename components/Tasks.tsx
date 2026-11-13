@@ -4,6 +4,7 @@ import { AnimatePresence, motion } from "motion/react";
 import { Check, ListTodo, LoaderCircle, X } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import Balance from "./Balance";
+import Plugins from "./Plugins";
 
 type Task = {
   id: number;
@@ -214,6 +215,7 @@ export default function Tasks() {
             {list}
           </>
         )}
+        <Plugins />
       </aside>
 
       {/* 窄屏：左上角一个按钮，点开抽屉 */}
@@ -247,6 +249,7 @@ export default function Tasks() {
               <Balance />
               <div className="mb-2 shrink-0 px-2 text-xs tracking-wide text-[var(--faint)] select-none">任务</div>
               {list}
+              <Plugins />
             </motion.aside>
           </>
         )}

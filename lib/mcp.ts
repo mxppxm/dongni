@@ -1,23 +1,20 @@
 import "server-only";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 
 /**
  * MCP 客户端（stdio）：把现成的 MCP 服务接进来当她的工具，不用为每个服务单写代码。
  *
- * 配置在 ~/.config/dongni/mcp.json（不进仓库）：
- *   { "servers": { "名字": { "command": "npx", "args": ["-y", "某个-mcp-server"], "env": { "KEY": "…" } } } }
- * 服务启动时连一遍；配置文件改了会自动重连，不用重启她。每个服务的工具以 mcp_<服务名>_<工具名> 交到她手上。
+ * 哪些服务要起，由插件说了算（lib/plugins.ts：清单里写了 mcp 的插件，启用着就起，停用、卸载就停）。
+ * 这里只管连接：起进程、握手、列工具、调工具、断了重连。
  * 协议：每行一条 JSON-RPC 消息（initialize → notifications/initialized → tools/list → tools/call）。
  */
-const CONFIG = process.env.DONGNI_MCP_CONFIG || path.join(os.homedir(), ".config", "dongni", "mcp.json");
 const PROTOCOL = "2025-06-18";
 const CALL_MS = 120_000;
 const INIT_MS = 30_000;
+const RETRY_MS = 60_000;
 
-type ServerConfig = { command: string; args?: string[]; env?: Record<string, string>; disabled?: boolean };
+export type McpServerConfig = { name: string; command: string; args?: string[]; env?: Record<string, string> };
+type ServerConfig = { command: string; args?: string[]; env?: Record<string, string> };
 type McpTool = { name: string; description?: string; inputSchema?: Record<string, unknown> };
 type Pending = { ok: (v: unknown) => void; no: (e: Error) => void; timer: NodeJS.Timeout };
 type Server = {
@@ -28,17 +25,10 @@ type Server = {
   nextId: number;
   error: string;
 };
+/** sig：这份配置的指纹，变了就重连；connecting：正在连；triedAt：上次连的时间（连不上隔一阵再试） */
+type Slot = { sig: string; server: Server | null; connecting: boolean; triedAt: number };
 
-const state = ((globalThis as unknown as { __dongniMcp?: { servers: Map<string, Server>; mtime: number; loading: boolean; checkedAt: number; loadedAt: number } }).__dongniMcp ??= {
-  servers: new Map<string, Server>(),
-  mtime: -1,
-  loading: false,
-  checkedAt: 0,
-  loadedAt: 0,
-});
-
-const safe = (s: string) => s.replace(/[^a-zA-Z0-9_]/g, "_");
-const toolName = (server: string, tool: string) => `mcp_${safe(server)}_${safe(tool)}`.slice(0, 64);
+const state = ((globalThis as unknown as { __dongniMcpSlots?: Map<string, Slot> }).__dongniMcpSlots ??= new Map<string, Slot>());
 
 function request(s: Server, method: string, params: unknown, timeoutMs: number): Promise<unknown> {
   return new Promise((ok, no) => {
@@ -126,79 +116,66 @@ async function connect(name: string, cfg: ServerConfig): Promise<Server> {
   return s;
 }
 
-/** 按配置文件（重新）连一遍。配置没变、或者正在连，就什么都不做 */
-export async function loadMcp(force = false) {
-  if (state.loading) return;
-  let mtime = 0;
-  try {
-    mtime = fs.statSync(CONFIG).mtimeMs;
-  } catch {}
-  if (!force && mtime === state.mtime) return;
-  state.loading = true;
-  state.mtime = mtime;
-  state.loadedAt = Date.now();
-  try {
-    for (const s of state.servers.values()) stop(s, "配置变了，重连");
-    state.servers.clear();
-    if (!mtime) return;
-    const cfg = JSON.parse(fs.readFileSync(CONFIG, "utf8")) as { servers?: Record<string, ServerConfig> };
-    const entries = Object.entries(cfg.servers ?? {}).filter(([, c]) => c && !c.disabled && typeof c.command === "string");
-    const servers = await Promise.all(entries.map(([name, c]) => connect(name, c)));
-    for (const s of servers) state.servers.set(s.name, s);
-  } catch (e) {
-    console.warn(`[dongni][mcp] 配置读不了：${e instanceof Error ? e.message : e}`);
-  } finally {
-    state.loading = false;
+/**
+ * 现在该起着的服务就是这一份名单：名单里新出现的、配置变了的连上，不在名单里的停掉，断了的隔一阵重连。
+ * 调用很便宜（插件每次扫描都会调），连接在后台做。
+ */
+export function syncMcpServers(want: McpServerConfig[]) {
+  const names = new Set(want.map((w) => w.name));
+  for (const [name, slot] of state) {
+    if (names.has(name)) continue;
+    if (slot.server) stop(slot.server, "停用了");
+    state.delete(name);
+  }
+  for (const w of want) {
+    const sig = JSON.stringify([w.command, w.args ?? [], w.env ?? {}]);
+    let slot = state.get(w.name);
+    if (slot && slot.sig !== sig) {
+      if (slot.server) stop(slot.server, "配置变了，重连");
+      slot = undefined;
+    }
+    if (!slot) {
+      slot = { sig, server: null, connecting: false, triedAt: 0 };
+      state.set(w.name, slot);
+    }
+    const alive = !!slot.server?.child;
+    if (alive || slot.connecting || Date.now() - slot.triedAt < RETRY_MS) continue;
+    slot.connecting = true;
+    slot.triedAt = Date.now();
+    const mine = slot;
+    void connect(w.name, { command: w.command, args: w.args, env: w.env })
+      .then((s) => {
+        // 连的这会儿它被停用或者换了配置：这条连接不要了
+        if (state.get(w.name) !== mine) return stop(s, "不需要了");
+        mine.server = s;
+      })
+      .finally(() => (mine.connecting = false));
   }
 }
 
-/** 顺手看一眼配置改没改（几秒看一次），改了就在后台重连；断了的服务也在这里重连 */
-function refresh() {
-  if (Date.now() - state.checkedAt < 5_000) return;
-  state.checkedAt = Date.now();
-  // 有服务断了：隔一分钟重连一遍；否则只在配置文件改过时重连
-  const dead = [...state.servers.values()].some((s) => !s.child);
-  void loadMcp(dead && Date.now() - state.loadedAt > 60_000);
+/** 这个服务报上来的工具；还没连上返回 null */
+export function mcpServerTools(name: string): { name: string; description: string; parameters: Record<string, unknown> }[] | null {
+  const s = state.get(name)?.server;
+  if (!s?.child) return null;
+  return s.tools.map((t) => ({
+    name: t.name,
+    description: (t.description ?? t.name).slice(0, 900),
+    parameters: t.inputSchema && (t.inputSchema as { type?: string }).type === "object" ? t.inputSchema : { type: "object", properties: {} },
+  }));
 }
 
-export function mcpTools() {
-  refresh();
-  const out: unknown[] = [];
-  for (const s of state.servers.values())
-    for (const t of s.child ? s.tools : [])
-      out.push({
-        type: "function",
-        function: {
-          name: toolName(s.name, t.name),
-          description: `（来自 ${s.name}）${(t.description ?? t.name).slice(0, 900)}`,
-          parameters: t.inputSchema && (t.inputSchema as { type?: string }).type === "object" ? t.inputSchema : { type: "object", properties: {} },
-        },
-      });
-  return out;
+/** 这个服务没连上的原因；连着、或者还没试过，返回空串 */
+export function mcpServerError(name: string): string {
+  const slot = state.get(name);
+  if (!slot || slot.connecting || slot.server?.child) return "";
+  return slot.server?.error || "";
 }
 
-function find(name: string): { s: Server; tool: McpTool } | null {
-  for (const s of state.servers.values()) for (const tool of s.tools) if (toolName(s.name, tool.name) === name) return { s, tool };
-  return null;
-}
-
-export function mcpTitle(name: string): string | null {
-  const hit = find(name);
-  return hit ? `${hit.s.name}：${hit.tool.name}` : null;
-}
-
-/** 调一个 MCP 工具；不是 MCP 的名字返回 null */
-export async function runMcp(name: string, rawArgs: string): Promise<string | null> {
-  const hit = find(name);
-  if (!hit) return null;
-  let args: unknown = {};
+export async function runMcpTool(server: string, tool: string, args: unknown): Promise<{ ok: boolean; out: string }> {
+  const s = state.get(server)?.server;
+  if (!s?.child) return { ok: false, out: `${server} 这个服务没连上` };
   try {
-    args = rawArgs ? JSON.parse(rawArgs) : {};
-  } catch {
-    return "出错了：参数不是合法 JSON。";
-  }
-  try {
-    const r = (await request(hit.s, "tools/call", { name: hit.tool.name, arguments: args }, CALL_MS)) as {
+    const r = (await request(s, "tools/call", { name: tool, arguments: args ?? {} }, CALL_MS)) as {
       content?: { type?: string; text?: string }[];
       isError?: boolean;
       structuredContent?: unknown;
@@ -208,14 +185,8 @@ export async function runMcp(name: string, rawArgs: string): Promise<string | nu
         .map((c) => (c.type === "text" ? (c.text ?? "") : `[${c.type ?? "内容"}]`))
         .join("\n")
         .trim() || (r.structuredContent ? JSON.stringify(r.structuredContent) : "（没有返回内容）");
-    return r.isError ? `出错了：${text.slice(0, 2000)}` : text;
+    return { ok: !r.isError, out: text.slice(0, 20_000) };
   } catch (e) {
-    return `出错了：${hit.s.name} 没调通——${e instanceof Error ? e.message : e}`;
+    return { ok: false, out: `${server} 没调通——${e instanceof Error ? e.message : e}` };
   }
-}
-
-/** 给她看的状态：哪些外接服务没接上 */
-export function mcpStateLine(): string {
-  const bad = [...state.servers.values()].filter((s) => !s.child).map((s) => `「${s.name}」（${s.error.slice(0, 60) || "断了"}）`);
-  return bad.length ? `外接的服务里现在没接上的：${bad.join("；")}。` : "";
 }

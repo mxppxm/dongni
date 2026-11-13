@@ -572,6 +572,33 @@ a.card:hover,
   color: var(--text-strong);
 }
 
+/* 信息卡片：标题下面几行「名目 · 内容」 */
+.card-info {
+  align-items: flex-start;
+}
+.card-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 6px;
+}
+.card-row {
+  display: flex;
+  gap: 10px;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.card-row-k {
+  flex: none;
+  min-width: 3em;
+  color: var(--faint);
+}
+.card-row-v {
+  min-width: 0;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
 /* 文件卡片：整块就是一张纸——图标、文件名、小字、右下角一个小动作，没有第二层壳 */
 .filecard {
   display: flex;

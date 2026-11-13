@@ -12,8 +12,10 @@ export async function register() {
   // 派出去的活：superagent 那边的接着盯，跟着进程没了的照实告诉他
   (await import("./lib/superagent")).recoverJobs();
   reportRebuild();
-  // 外接的 MCP 服务：有配置才连，连不上不影响别的
-  void (await import("./lib/mcp")).loadMcp().catch(() => {});
+  // 后来学会的本事（插件）：启动时扫一遍，启用着的试跑、MCP 型的把服务连上
+  try {
+    (await import("./lib/tools")).extraStateLines();
+  } catch {}
   // 打电话：本机 3940 端口的中转
   (await import("./lib/callserver")).startCallServer();
   // 排队中的自我修改：重启 20 秒后接着做（体检一般十几秒就做完）
