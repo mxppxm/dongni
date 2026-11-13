@@ -80,6 +80,8 @@ pnpm start          # 打开 http://localhost:3939，电话服务在 3940（网�
 - 回复时带上：人设 + 画像 + 相关记忆 + 最近 40 条消息 + 当前时间和她今天的状态。
 - 所有入口（打字、语音消息、电话）共用一条回复队列；生成的每个字都广播出去，对话框显示，电话在听就念。中枢在 `lib/presence.ts`。
 - 电话：页面 ⇄ 本机电话中转（藏 key、声纹把关、分句送去念）⇄ 豆包实时语音。豆包只当耳朵和嘴，它自己生成的回复不播。
+- 派活：重活交给后台，账记在本机库的 `tasks` 表里（原话、目录、谁在干、走到哪一步、完整结果），重启不丢。干活的后端有两个，接口在 `lib/backend/`：先找 [DSH superagent](https://github.com/deepseek-ai/deepseek-harness)（往它的本地收件箱投任务文件，读它写回的回复），它不在线就用内置执行器（`lib/worker.ts`），都接不了就排队。接单、提问、做完、没做成会说进对话并弹通知，产物挂成文件卡片。
+- 学新本事不用改代码：在 `~/.config/dongni/capabilities/` 下加一个文件夹（一份 `capability.json` 加一个脚本），几秒后她手里就多一件工具，规范见同目录自动生成的 `SPEC.md`；现成的 MCP 服务写进 `~/.config/dongni/mcp.json`（`{ "servers": { "名字": { "command": "…", "args": ["…"] } } }`）就能接上，改完自动重连。她做不到的事会记进做不到清单，加不加由你定。
 - 后台定时：整理记忆、主动找你、提醒、相册和日记、每天整库备份到 `data/backups/`（留 30 份）。删除记忆是软删除，库里留底。
 
 ## 常用环境变量
@@ -88,6 +90,11 @@ pnpm start          # 打开 http://localhost:3939，电话服务在 3940（网�
 |---|---|
 | `DONGNI_DATA_DIR` | 数据目录，默认 `./data` |
 | `DONGNI_CALL_PORT` | 电话中转端口，默认 3940（页面按「网页端口 + 1」去连） |
+| `DONGNI_DSH_URL` | DSH superagent 面板地址，默认 `http://127.0.0.1:3082` |
+| `DONGNI_DSH_INBOX` | superagent 本地收件箱目录，默认 `~/.dsh/state/superagent/inbox` |
+| `DONGNI_DSH` | 写 `off` 就不找 superagent，后台的活全走内置执行器 |
+| `DONGNI_DSH_AUTOSTART` | 写 `off` 就不自动拉起 superagent。默认启动时、以及派活发现它没在线时，用它自带的 `scripts/dsh-superagent start` 拉起（跑在 tmux 里，懂你重启不影响它；你手动 `stop` 过就不会再拉） |
+| `DONGNI_DSH_SCRIPT` | superagent 管理脚本的位置，默认 `~/src/dsh-superagent-prototype/scripts/dsh-superagent` |
 | `DONGNI_MODEL` / `DONGNI_CHAT_MODEL` | 换模型 / 只换聊天用的模型 |
 | `DONGNI_HUMANIZE_MODEL` | 去 AI 味改写用的模型，默认跟主线同一个；名字不被接口认会自动换主线模型，并在日志里说一声 |
 | `DONGNI_VOICEPRINT_MIN` | 声纹及格线，默认 0.45；0.30～0.45 算「听着像你」，下限用 `DONGNI_VOICEPRINT_MAYBE` 调；日志里有每句的分数 |

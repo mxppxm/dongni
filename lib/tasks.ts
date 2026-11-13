@@ -30,7 +30,26 @@ function table() {
       started_at INTEGER NOT NULL,
       ended_at INTEGER
     );
+    CREATE TABLE IF NOT EXISTS task_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      task_id INTEGER NOT NULL,
+      at INTEGER NOT NULL,
+      type TEXT NOT NULL,
+      text TEXT NOT NULL DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS idx_task_events_task ON task_events(task_id, id);
   `);
+  // 派出去的活要抗重启、能追问：原话、目录、谁在干、对方那边的编号、走到哪一步、完整结果都记在这一行上
+  const cols = new Set((db().prepare("PRAGMA table_info(tasks)").all() as { name: string }[]).map((c) => c.name));
+  for (const [name, type] of [
+    ["request", "TEXT NOT NULL DEFAULT ''"],
+    ["dir", "TEXT NOT NULL DEFAULT ''"],
+    ["backend", "TEXT NOT NULL DEFAULT ''"],
+    ["ext_id", "TEXT NOT NULL DEFAULT ''"],
+    ["stage", "TEXT NOT NULL DEFAULT ''"],
+    ["detail", "TEXT NOT NULL DEFAULT ''"],
+  ])
+    if (!cols.has(name)) db().exec(`ALTER TABLE tasks ADD COLUMN ${name} ${type}`);
   g.__dongniTasksReady = true;
 }
 
@@ -68,12 +87,77 @@ export function listTasks(limit = 40): TaskRow[] {
   return db().prepare("SELECT * FROM tasks ORDER BY id DESC LIMIT ?").all(limit) as TaskRow[];
 }
 
-/** 重启时：上次没跑完的（进程没了）记成中断；改自己那件由重启后的结果来收尾，不在这里动 */
+/** 重启时：上次没跑完的（进程没了）记成中断；改自己那件由重启后的结果来收尾，派出去的活由 superagent.ts 的 recoverJobs 按后端各自收尾 */
 export function markInterrupted() {
   table();
   db()
-    .prepare("UPDATE tasks SET status = 'error', result = '中途重启，没跑完', ended_at = ? WHERE status = 'running' AND kind != 'repair'")
+    .prepare("UPDATE tasks SET status = 'error', result = '中途重启，没跑完', ended_at = ? WHERE status = 'running' AND kind NOT IN ('repair', 'super')")
     .run(Date.now());
+}
+
+/* ─────────── 派出去的活（kind = super）：这张表就是它们的账，内存里只留叫停用的句柄 ─────────── */
+
+/** 走到哪一步：handed 刚交出去 / queued 排队 / working 在干 / asking 在等他回答 / done / failed / stopped */
+export type JobStage = "handed" | "queued" | "working" | "asking" | "done" | "failed" | "stopped";
+export type JobRow = TaskRow & { request: string; dir: string; backend: string; ext_id: string; stage: JobStage; detail: string };
+export type JobEvent = { id: number; task_id: number; at: number; type: string; text: string };
+
+export function createJob(input: { title: string; request: string; dir: string }): number {
+  table();
+  const id = Number(
+    db()
+      .prepare("INSERT INTO tasks(kind, title, started_at, request, dir, stage) VALUES('super', ?, ?, ?, ?, 'handed')")
+      .run(input.title.slice(0, 80), Date.now(), input.request, input.dir).lastInsertRowid,
+  );
+  addJobEvent(id, "handed", "交出去了");
+  return id;
+}
+
+export function updateJob(id: number, patch: Partial<Pick<JobRow, "backend" | "ext_id" | "stage">>) {
+  table();
+  for (const [k, v] of Object.entries(patch)) db().prepare(`UPDATE tasks SET ${k} = ? WHERE id = ? AND status = 'running'`).run(v, id);
+}
+
+/** 还在干的时候，任务栏上那一行写它最近报的进展 */
+export function setJobProgress(id: number, text: string) {
+  table();
+  db().prepare("UPDATE tasks SET result = ? WHERE id = ? AND status = 'running'").run(text.slice(0, 2000), id);
+}
+
+export function addJobEvent(taskId: number, type: string, text = "") {
+  table();
+  db().prepare("INSERT INTO task_events(task_id, at, type, text) VALUES(?, ?, ?, ?)").run(taskId, Date.now(), type, text.slice(0, 4000));
+}
+
+/** 收尾：result 是任务栏上那段（可以带文件卡片），detail 是完整回报，留着给他事后追问。已经收过尾的不再动，返回 false */
+export function endJob(id: number, stage: "done" | "failed" | "stopped", result: string, detail: string): boolean {
+  table();
+  const r = db()
+    .prepare("UPDATE tasks SET status = ?, stage = ?, result = ?, detail = ?, ended_at = ? WHERE id = ? AND status = 'running'")
+    .run(stage === "done" ? "done" : "error", stage, result.slice(0, 2000), detail.slice(0, 60_000), Date.now(), id);
+  if (r.changes) addJobEvent(id, stage, detail.slice(0, 600));
+  return r.changes > 0;
+}
+
+export function getJob(id: number): JobRow | undefined {
+  table();
+  return db().prepare("SELECT * FROM tasks WHERE id = ? AND kind = 'super'").get(id) as JobRow | undefined;
+}
+
+/** 还没收尾的活，从早到晚 */
+export function openJobs(): JobRow[] {
+  table();
+  return db().prepare("SELECT * FROM tasks WHERE kind = 'super' AND status = 'running' ORDER BY id").all() as JobRow[];
+}
+
+export function recentJobs(limit = 8): JobRow[] {
+  table();
+  return db().prepare("SELECT * FROM tasks WHERE kind = 'super' ORDER BY id DESC LIMIT ?").all(limit) as JobRow[];
+}
+
+export function jobEvents(taskId: number, limit = 30): JobEvent[] {
+  table();
+  return (db().prepare("SELECT * FROM task_events WHERE task_id = ? ORDER BY id DESC LIMIT ?").all(taskId, limit) as JobEvent[]).reverse();
 }
 
 /**

@@ -5,7 +5,15 @@ export async function register() {
   const { resumePending } = await import("./lib/chat");
   const { reportRebuild, drainRepairQueue } = await import("./lib/selfrepair");
   (await import("./lib/tasks")).markInterrupted();
+  // 后台干活的 superagent：没在跑就顺手拉起来（已经在跑不会起第二个；他手动停过就不拉）
+  void (await import("./lib/backend/dsh")).dshBackend.unavailable().then((why) => {
+    if (why) console.log(`[dongni][dsh] 启动时：${why}`);
+  });
+  // 派出去的活：superagent 那边的接着盯，跟着进程没了的照实告诉他
+  (await import("./lib/superagent")).recoverJobs();
   reportRebuild();
+  // 外接的 MCP 服务：有配置才连，连不上不影响别的
+  void (await import("./lib/mcp")).loadMcp().catch(() => {});
   // 打电话：本机 3940 端口的中转
   (await import("./lib/callserver")).startCallServer();
   // 排队中的自我修改：重启 20 秒后接着做（体检一般十几秒就做完）

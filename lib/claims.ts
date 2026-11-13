@@ -1,5 +1,6 @@
 import "server-only";
 import { completeJson } from "./llm";
+import { extraToolNames } from "./tools";
 
 /**
  * 说了没做的核对：她一句话说完，如果里面有「做了 / 在弄 / 停了 / 设好了 / 派出去了」这类说法，
@@ -37,7 +38,14 @@ export type Verdict = { unbacked: boolean; claim: string; fix: string };
 export async function checkClaims(input: { reply: string; asked: string; tools: string[]; state: string }): Promise<Verdict | null> {
   const prompt = `你在核对一个 AI 伙伴刚说的话，有没有「说了没做」：嘴上说自己做了、正在做、马上去做、已经停了某件需要真实操作的事，但实际上什么操作都没发生。
 
-需要真实操作才算数的事（括号里是对应的工具）：设/取消提醒（set_reminder / cancel_reminder）、改自己的代码（repair_self）、派活给后台执行器（dispatch_task）、停掉派出去的活（cancel_task）、写文件（write_file）、画图（generate_image）、拍照（take_photo）、查电脑上的文件或状态（list_dir / read_file / search_files / system_info）、换城市（set_city）。
+需要真实操作才算数的事（括号里是对应的工具）：设/取消提醒（set_reminder / cancel_reminder）、改自己的代码（repair_self）、派活给后台执行器（dispatch_task）、给后台的活补话（task_append）、停掉派出去的活（cancel_task）、写文件（write_file）、画图（generate_image）、拍照（take_photo）、查电脑上的文件或状态（list_dir / read_file / search_files / system_info）、换城市（set_city）、记做不到的事（note_gap）。${(() => {
+    try {
+      const extra = extraToolNames();
+      return extra.length ? `另外她还有这些后来加的工具，调了也算真做了：${extra.join("、")}。` : "";
+    } catch {
+      return "";
+    }
+  })()}
 能证明「真做了」的只有两样：这一轮真实调用过的工具（下面列出），或者后台实时状态里写着的事（比如状态里有个派出去在跑的活，说「还在跑」就是真的）。
 不算问题的：
 - 跟后台实时状态对得上的：报的时间、日期和状态里的准确时间一致；说某件事「在做 / 做完了 / 没做成」，状态里正好写着；

@@ -12,10 +12,13 @@ import { setCity, takeDailyPhoto, today, wardrobeFile } from "./wardrobe";
 import { addLocalImage, IMAGE_EXT, imageMarkdown } from "./images";
 import { postAssistant, startRepair } from "./selfrepair";
 import { speakAsHer } from "./speak";
-import { cancelDispatch, dispatch, judge, runningJobs } from "./superagent";
-import { db } from "./db";
+import { appendDispatch, cancelDispatch, dispatch, dispatchStatus, jobReport } from "./superagent";
+import { db, getKv, setKv } from "./db";
 import { finishTask, startTask } from "./tasks";
 import { saveVoiceConfig, voiceReady } from "./voiceconfig";
+import { CAP_DIR, capPromptLines, capStateLine, capTitle, capTools, runCap } from "./capdir";
+import { mcpStateLine, mcpTitle, mcpTools, runMcp } from "./mcp";
+import { closeGap, noteGap, openGaps } from "./gaps";
 
 /**
  * 查电脑的工具：全部只读，不能改、删、执行任意命令（repair_self 除外，它只改本项目，见 selfrepair.ts）。
@@ -428,13 +431,12 @@ export const TOOLS = [
     function: {
       name: "dispatch_task",
       description:
-        "把重活交给后台那个能跑命令的执行器：它能在项目里跑命令、装依赖、写多个文件、自己调试到自己跑通——这些你在这轮对话里做不到。所以活里只要出现「跑一遍/验证/装/批量/多个文件/部署/做一整套东西」，先用它。",
+        "把活交给后台：那边能跑命令、装依赖、写多个文件、上网查资料、自己调试到跑通——这些你在这轮对话里做不到。活里只要出现「跑一遍/验证/装/批量/多个文件/查资料/部署/做一整套东西」就用它；一两步就能办完的小事（读个文件、写一小段）自己动手。交出去马上返回，接单、做完、没做成、要他拿主意时会单独告诉他。",
       parameters: {
         type: "object",
         properties: {
           task: { type: "string", description: "要干什么，完整可独立看懂：目标、在哪做（目录/项目）、做成什么样算完成" },
-          dir: { type: "string", description: "在哪个目录里干，默认他的主目录" },
-          force: { type: "boolean", description: "他明确说「一定要派出去」时才写 true" },
+          dir: { type: "string", description: "在哪个目录里干，默认他的主目录；活属于某个项目就写那个项目的目录" },
         },
         required: ["task"],
       },
@@ -444,8 +446,30 @@ export const TOOLS = [
     type: "function",
     function: {
       name: "dispatch_status",
-      description: "看后台还有几件活在跑（他问「那事怎么样了」「还在跑吗」时用）。",
+      description: "看后台还没收尾的活各自走到哪一步了（他问「那事怎么样了」「还在跑吗」时用）。",
       parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "task_result",
+      description:
+        "翻一件派出去的活的完整记录：他当时要的是什么、中途发生了什么、完整结果原文。他事后追问细节（「刚才那份报告里怎么说的」「东西放哪了」「为什么没做成」）时用，别凭印象答。不写 id 就列出最近几件。",
+      parameters: { type: "object", properties: { id: { type: "string", description: "那件活的编号，如 12" } } },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "task_append",
+      description:
+        "给一件还在后台干着的活补一句话：他中途改要求、加条件，或者回答那件活问他的问题时用。只有一件在跑时 id 可以不写。工具说没补上，就照实告诉他。",
+      parameters: {
+        type: "object",
+        properties: { id: { type: "string", description: "那件活的编号，只有一件时可省" }, text: { type: "string", description: "要补的话，写完整" } },
+        required: ["text"],
+      },
     },
   },
   {
@@ -457,6 +481,23 @@ export const TOOLS = [
         type: "object",
         properties: { id: { type: "string", description: "要停的那件的编号（dispatch_status 里看得到），只有一件在跑时可省" } },
       },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "note_gap",
+      description:
+        "记一笔「这件事我现在做不到」。他让你做一件事，你手里确实没有能办成它的工具（也不是派活能解决的）时用：先照实告诉他做不到，再记下来。只是记账，不会自己去加这件本事——加不加由他定。",
+      parameters: { type: "object", properties: { what: { type: "string", description: "做不到的是什么，一句话，写具体" } }, required: ["what"] },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_gaps",
+      description: "看做不到清单（他问「你还有什么做不了」「之前哪些没办成」时用）。done_id 写上编号可以把一条划掉（那件本事已经加上了）。",
+      parameters: { type: "object", properties: { done_id: { type: "number" } } },
     },
   },
   {
@@ -559,6 +600,19 @@ export const TOOLS = [
 /** 他让她改东西的说法 */
 const ASK_TO_CHANGE = /改|修|调|优化|加个|加上|去掉|删掉|换成|换个|别再|不要再|关掉|打开|弄成|重做|实现|支持|fix/i;
 
+/** 她提过、等他点头的改动：半小时内有效 */
+const PROPOSAL_KEY = "repair_proposal";
+const APPROVE = /^(好|行|可以|嗯|对|是的|要|改|弄|做|来|去|同意|没问题|就这么|就这样|按你说的|听你的|ok|okay|yes|go|sure)/i;
+const REFUSE = /不用|不要|别|先不|算了|不改|不行|等等|再说|no\b/i;
+function pendingProposal(): { request: string; at: number } | null {
+  try {
+    const p = JSON.parse(getKv(PROPOSAL_KEY) || "null") as { request: string; at: number } | null;
+    return p && Date.now() - p.at < 30 * 60_000 ? p : null;
+  } catch {
+    return null;
+  }
+}
+
 /** 这条回复对应的、他最近说的那句话（通话里 turnId 不是数字时取最新一句） */
 function lastUserText(assistantId: number): string {
   const row = (
@@ -570,35 +624,33 @@ function lastUserText(assistantId: number): string {
 }
 
 const IMPL: Record<string, (a: never, ctx?: ToolCtx) => Promise<string>> = {
-  dispatch_task: (async ({ task, dir, force }: { task: string; dir?: string; force?: boolean }) => {
-    const j = judge(task, { force });
-    const why = j.reasons.length ? j.reasons.join("；") : "没命中任何信号，按闲聊量级算";
-    if (j.target !== "super")
-      return `这件不用派（判断：${j.level}，分数 ${j.score}；依据：${why}）。${
-        j.target === "pi"
-          ? "如果是要改你自己，用 repair_self；其他就在这边自己动手做完。"
-          : "你自己几秒钟就能办完，别往外交。"
-      }回复里别念这段判断，直接给他结果。`;
+  dispatch_task: (async ({ task, dir }: { task: string; dir?: string }) => {
     try {
-      const out = dispatch(task, dir);
-      return `${out}\n（判断依据：${why}。回复时按你自己平常说话，别提工具名和目录，就说「我自己上手了，正在弄，弄完告我」这一类意思。）`;
+      return `${dispatch(task, dir)}\n（回复时按你自己平常说话，别提工具名、编号和目录。）`;
     } catch (e) {
-      return `派不出去：${e instanceof Error ? e.message : e}`;
+      return `出错了：派不出去——${e instanceof Error ? e.message : e}`;
     }
   }) as (a: never, ctx?: ToolCtx) => Promise<string>,
-  dispatch_status: (async () => {
-    const jobs = runningJobs();
-    if (!jobs.length) return "现在没有跑着的外活，都清空了。";
-    return (
-      `有 ${jobs.length} 件在跑：\n` +
-      jobs
-        .map((j) => `${j.id}｜${j.task.slice(0, 50)}｜在 ${j.dir.replace(HOME, "~")}｜已经跑了 ${Math.round((Date.now() - j.since) / 60000)} 分钟`)
-        .join("\n")
-    );
-  }) as (a: never, ctx?: ToolCtx) => Promise<string>,
+  dispatch_status: (async () => dispatchStatus()) as (a: never, ctx?: ToolCtx) => Promise<string>,
+  task_result: (async ({ id }: { id?: string }) => jobReport(id)) as (a: never, ctx?: ToolCtx) => Promise<string>,
+  task_append: (async ({ id, text }: { id?: string; text: string }) => appendDispatch(id, text)) as (a: never, ctx?: ToolCtx) => Promise<string>,
   cancel_task: (async ({ id }: { id?: string }) => {
-    const r = cancelDispatch(id?.trim() || undefined);
+    const r = await cancelDispatch(id?.trim() || undefined);
     return r.ok ? `已经停掉了：${r.cancelled.join("、")}。可以跟他说停了。` : `出错了：没停成——${r.why}。别说停了，照实告诉他。`;
+  }) as (a: never, ctx?: ToolCtx) => Promise<string>,
+  note_gap: (async ({ what }: { what: string }) => {
+    if (!what?.trim()) return "没写做不到的是什么。";
+    const g = noteGap(what);
+    return `记下了（第 ${g.id} 条${g.times > 1 ? `，这是第 ${g.times} 次碰到` : ""}）。照实告诉他这件现在做不到；他要是想让你学会，可以让你去加这件本事。别说你已经在加了。`;
+  }) as (a: never, ctx?: ToolCtx) => Promise<string>,
+  list_gaps: (async ({ done_id }: { done_id?: number }) => {
+    if (Number.isFinite(Number(done_id)) && done_id) {
+      const g = closeGap(Number(done_id));
+      return g ? `划掉了：${g.what}` : `没有编号 ${done_id} 的未划掉条目。`;
+    }
+    const list = openGaps();
+    if (!list.length) return "做不到清单是空的。";
+    return `做不到清单（${list.length} 条）：\n` + list.map((g) => `#${g.id}｜${g.what}${g.times > 1 ? `｜碰到 ${g.times} 次` : ""}｜最近 ${fmtWhen(g.at)}`).join("\n");
   }) as (a: never, ctx?: ToolCtx) => Promise<string>,
   humanize_text: (async ({ text, genre }: { text: string; genre?: string }) => {
     if (!text?.trim()) return "没给要改的文字。";
@@ -634,10 +686,16 @@ const IMPL: Record<string, (a: never, ctx?: ToolCtx) => Promise<string>> = {
       : "存了一部分，但还缺：旧版控制台要 APP ID 和 Access Token 一起给，新版控制台给 API Key 就行。";
   }) as (a: never, ctx?: ToolCtx) => Promise<string>,
   repair_self: (async ({ request }: { request: string }, ctx?: ToolCtx) => {
-    // 只改他让改的：这一轮他说的话里得真有让她改的意思，不然是她自己想改，不交出去
+    // 只改他让改的。两条路放行：这一轮他的话里真有让她改的意思；或者上一回她把想法提了出来、这一轮他点头了。
+    // 之前只认关键词：她提议、他说「行，就这么弄」反而过不了。
     const asked = lastUserText(Number(ctx?.turnId) || 0);
-    if (!ASK_TO_CHANGE.test(asked))
-      return "他这一轮没让你改自己，改自己只改他让你改的。没有交出去，别说在改；你的想法可以照实跟他说，问他要不要改。";
+    const proposal = pendingProposal();
+    const approved = !!proposal && APPROVE.test(asked.trim()) && !REFUSE.test(asked);
+    if (!ASK_TO_CHANGE.test(asked) && !approved) {
+      setKv(PROPOSAL_KEY, JSON.stringify({ request: String(request ?? "").slice(0, 2000), at: Date.now() }));
+      return "他这一轮没让你改自己，所以还没交出去，别说在改。你想改的这件事已经记成一条提议：用一句话把想法照实告诉他，问他要不要改；他同意了，你再调一次 repair_self 就会放行。";
+    }
+    setKv(PROPOSAL_KEY, "");
     return startRepair(request);
   }) as (a: never, ctx?: ToolCtx) => Promise<string>,
   set_reminder: setReminder as (a: never, ctx?: ToolCtx) => Promise<string>,
@@ -676,7 +734,33 @@ const TOOL_GROUPS: { names: string[]; hint: RegExp }[] = [
 export function toolsFor(_query: string) {
   // 按关键词挑工具会让她「手里突然没工具」：他说「无聊」时没带画图，她就真画不了。
   // 工具全给，描述走缓存，几乎不影响首字速度。
-  return TOOLS;
+  return [...TOOLS, ...capTools(BUILTIN_NAMES), ...mcpTools()];
+}
+
+/** 内置工具的名字：后来加的本事不许和它们重名 */
+const BUILTIN_NAMES = new Set(TOOLS.map((t) => t.function.name));
+
+/** 写进系统提示词：后来加的本事（能力目录里的），以及怎么再加 */
+export function extraCapabilities(): string {
+  const lines = capPromptLines(BUILTIN_NAMES);
+  return [
+    lines ? `- 后来学会的本事（都是工具，该用就用）：\n${lines.replace(/^/gm, "  ")}` : "",
+    `- 学新本事：他让你学会一件现在不会的事（查天气、接某个服务、控制某个应用…）时，用 dispatch_task 派活，任务里写明「按 ${CAP_DIR}/SPEC.md 的规范，在 ${CAP_DIR} 下新建一个能力文件夹，写完自己试跑通过」，并把要学的本事说具体。写好不用重启，过几秒你手里就多一件工具。接外面现成的 MCP 服务同理，让后台去改 ~/.config/dongni/mcp.json。`,
+    "- 做不到的事：他让你做、你手里确实没有能办成的工具，先照实说做不到，再用 note_gap 记一笔；别硬编结果，也别自己去加。",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+/** 扩展出来的工具名（核对「说了没做」时要认得它们） */
+export function extraToolNames(): string[] {
+  return [...capTools(BUILTIN_NAMES), ...mcpTools()].map((t) => (t as { function: { name: string } }).function.name);
+}
+
+/** 给她看的状态：后来加的本事、外接服务里现在用不了的 */
+export function extraStateLines(): string {
+  const gaps = openGaps().length;
+  return [capStateLine(), mcpStateLine(), gaps ? `做不到清单上有 ${gaps} 条（他问起再说）。` : ""].filter(Boolean).join("\n");
 }
 
 /** 工具调用过程不上屏：界面上只出现最终回复，所以这里不再提供「正在做什么」的文案 */
@@ -699,8 +783,9 @@ const TASK_TITLE: Record<string, (a: Record<string, unknown>) => string> = {
   set_city: (a) => `换城市：${short(a.city)}`,
   show_image: (a) => `打开图片 ${short(path.basename(String(a.path ?? "")))}`,
   set_voice_key: () => "配语音 key",
-  dispatch_task: (a) => `派活：${short(a.task)}`,
   dispatch_status: () => "看派出去的活",
+  task_result: (a) => `翻派出去的活${a.id ? ` ${short(a.id)}` : ""}`,
+  task_append: (a) => `给后台的活补话：${short(a.text)}`,
   cancel_task: (a) => `叫停派出去的活${a.id ? ` ${short(a.id)}` : ""}`,
   write_file: (a) => `写文件 ${short(a.name)}`,
 };
@@ -724,7 +809,7 @@ export async function runToolSoon(name: string, rawArgs: string, ctx: ToolCtx): 
   try {
     args = JSON.parse(rawArgs || "{}");
   } catch {}
-  const what = TASK_TITLE[name]?.(args) ?? name;
+  const what = TASK_TITLE[name]?.(args) ?? capTitle(name) ?? mcpTitle(name) ?? name;
   console.log(`[dongni] 「${what}」超过 ${SOON_MS / 1000} 秒，转后台接着做`);
   void work.then(async (out) => {
     const cards = lateAttach.join("\n\n");
@@ -740,12 +825,16 @@ export async function runToolSoon(name: string, rawArgs: string, ctx: ToolCtx): 
 
 /** register=false：她自己后台顺手调的（不进任务栏，免得刷屏） */
 export async function runTool(name: string, rawArgs: string, ctx?: ToolCtx, opts: { register?: boolean } = {}): Promise<string> {
-  const fn = IMPL[name];
-  if (!fn) return `没有这个工具：${name}`;
+  const builtin = IMPL[name] as ((a: never, ctx?: ToolCtx) => Promise<string>) | undefined;
+  const extraTitle = builtin ? null : (capTitle(name) ?? mcpTitle(name));
+  if (!builtin && extraTitle === null) return `没有这个工具：${name}`;
+  // 后来加的本事：能力目录里的脚本，或者外接的 MCP 服务
+  const fn: (a: never, ctx?: ToolCtx) => Promise<string> =
+    builtin ?? (async () => (await runCap(name, rawArgs)) ?? (await runMcp(name, rawArgs)) ?? `没有这个工具：${name}`);
   let taskId = 0;
   try {
     const args = rawArgs ? JSON.parse(rawArgs) : {};
-    const title = TASK_TITLE[name];
+    const title = TASK_TITLE[name] ?? (extraTitle ? () => extraTitle : undefined);
     // 挂到回复里的东西（图片、文件卡片）也记到任务上，任务栏点开能直接看到
     const attached: string[] = [];
     const tctx = ctx && { ...ctx, attach: (md: string) => (attached.push(md), ctx.attach(md)) };

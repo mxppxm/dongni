@@ -332,9 +332,10 @@ export default function Chat() {
     };
     const loop = async () => {
       if (stop) return;
-      if (document.visibilityState === "visible" || callingRef.current) await sync();
+      // 页面切到后台也照样同步（慢一点）：后台的活做完了，得靠这里拿到新消息才弹得出浏览器通知
+      await sync();
       // 通话中勤快点，电话里说的话几乎实时出现在对话框
-      timer = window.setTimeout(loop, callingRef.current ? 1000 : 4000);
+      timer = window.setTimeout(loop, callingRef.current ? 1000 : document.visibilityState === "visible" ? 4000 : 10000);
     };
     void loop();
     return () => {
@@ -353,14 +354,20 @@ export default function Chat() {
       const granted = typeof Notification !== "undefined" && Notification.permission === "granted";
       try {
         const r = await (
-          await fetch("/api/presence", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ granted }) })
+          await fetch("/api/presence", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ granted, visible: document.visibilityState === "visible" }) })
         ).json();
         if (r.name) myName = r.name;
       } catch {}
     };
     void ping();
     const t = setInterval(ping, 45_000);
-    return () => clearInterval(t);
+    // 切回来马上报到：他不在时攒着的话，回来就该说了
+    const onVis = () => document.visibilityState === "visible" && void ping();
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      clearInterval(t);
+      document.removeEventListener("visibilitychange", onVis);
+    };
   }, []);
 
   const att = useAttachments();

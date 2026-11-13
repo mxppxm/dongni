@@ -10,6 +10,7 @@ import { listDispatches } from "./superagent";
 import { taskStateLines } from "./tasks";
 import { photoState } from "./wardrobe";
 import { voiceReady } from "./voiceconfig";
+import { extraStateLines } from "./tools";
 
 /**
  * 她后台那些事的真实状态。她说「我在做 / 我做了」之前，以这里为准——
@@ -23,7 +24,7 @@ export function selfState(): string {
   const jobs = listDispatches();
   lines.push(
     jobs.length
-      ? `派出去的活：${jobs.map((j) => `${j.id}「${j.title.slice(0, 24)}」${j.running ? `在跑（${Math.max(1, Math.round((Date.now() - j.startedAt) / 60000))} 分钟了）` : "正在停下"}`).join("；")}。`
+      ? `派出去的活：${jobs.map((j) => `#${j.id}「${j.title.slice(0, 24)}」${j.stageText}（${Math.max(1, Math.round((Date.now() - j.startedAt) / 60000))} 分钟了）`).join("；")}。`
       : "现在没有派出去在跑的活。",
   );
   lines.push(imagegenStatus());
@@ -40,6 +41,10 @@ export function selfState(): string {
   lines.push(`关于他你记下了 ${n} 件事；聊过的话会在聊完几秒后自动整理进记忆，所以可以说「记住了」，但别说你把它「写进」了什么地方。`);
   try {
     lines.push(voiceReady().configured ? "声音（豆包语音）已经接上了：能发语音、也能听懂他发的语音。" : "声音（豆包语音）还没接上：缺 APP ID / Access Token（或新版控制台的 API Key），要说实话，别装作能听会说。");
+  } catch {}
+  try {
+    const extra = extraStateLines();
+    if (extra) lines.push(extra);
   } catch {}
   return lines.join("\n");
 }

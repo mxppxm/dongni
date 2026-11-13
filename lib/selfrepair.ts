@@ -301,6 +301,9 @@ function similar(a: string, b: string) {
   return both / Math.min(x.size, y.size);
 }
 
+/** 已经提交、等重启体检出结果的那次改动 */
+const COMMITTED_KEY = "repair_committed_request";
+
 /** 这件事最近是不是已经改不成好几次了，或者刚刚改好过 */
 function repeatOf(request: string): string | null {
   const near = attempts().filter((a) => similar(a.req, request) >= 0.6);
@@ -418,7 +421,9 @@ export function startRepair(request: string): string {
       await git("commit", "-q", "-m", `自我修复：${request.slice(0, 60)}`);
       const fix = await head();
       setKv(INFLIGHT_KEY, "");
-      noteAttempt(request, true);
+      // 成没成等重启体检回来再记（reportRebuild）：这里只是提交了，体检不过会被退回。
+      // 以前提交时就记成「改好了」，退回之后同一件事 24 小时内再提会被「今天刚改好过」挡掉
+      setKv(COMMITTED_KEY, request.slice(0, 300));
       setKv("repair_summary", summary);
       log("提交完成，后台重新编译并重启");
       // 正在打电话就先别重启（重启会把电话挂断），挂了再重启；但不能一直等——挂了电话这件事本身也可能正是这次改的内容
@@ -458,7 +463,7 @@ export function startRepair(request: string): string {
     } finally {
       state.running = null;
       setKv("repair_last_at", String(Date.now()));
-      setKv("repair_last_result", `${restarting ? "改好了" : "没改成或没改动"}（${request.slice(0, 30)}…）`);
+      setKv("repair_last_result", `${restarting ? "改完提交了，正在重启体检，结果还没出来" : "没改成或没改动"}（${request.slice(0, 30)}…）`);
       if (!restarting) finishTask(taskId, taskOk, taskOk ? "看过了，没动代码" : "没改成，已退回原样");
       // 要重启的话交给重启后的新进程接着改，否则这里直接接着改下一个
       if (!restarting) setTimeout(drainRepairQueue, 1000);
@@ -474,7 +479,7 @@ export function startRepair(request: string): string {
 async function waitIdle() {
   const busy = () => {
     const why: string[] = [];
-    if (listDispatches().some((d) => d.running)) why.push("派出去的活");
+    if (listDispatches().some((d) => d.backend === "builtin")) why.push("派出去的活");
     const cur = (globalThis as unknown as { __dongniRunning?: { cur: unknown } }).__dongniRunning?.cur;
     if (cur) why.push("正在说的回复");
     return why;
@@ -520,6 +525,12 @@ export function reportRebuild() {
     // 这是状态播报，不能被「跟刚才那句太像」的闸门吞掉
     void say(what[0], what[1], { fresh: true });
     finishTask(Number(getKv("repair_task_id") ?? 0), r.ok, r.ok ? "改好了，已生效" : "新改的没通过，已退回");
+    const committed = getKv(COMMITTED_KEY);
+    if (committed) {
+      noteAttempt(committed, r.ok);
+      setKv(COMMITTED_KEY, "");
+    }
+    setKv("repair_last_result", r.ok ? "改好了，已经生效" : "新改的没通过体检，已经退回原样");
     log(`重启完成 ok=${r.ok}`);
   } finally {
     fs.rmSync(RESULT, { force: true });

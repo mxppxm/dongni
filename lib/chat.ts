@@ -11,15 +11,15 @@ import { HONESTY, selfState } from "./selfstate";
 import { addUploadedImage, getImage, imageDataUrl, imageIdsIn, imageMarkdown, stripImageMarkdown } from "./images";
 import { checkClaims, correction, maybeClaims } from "./claims";
 import { markWrong, noteDispute, wrongNotes, wrongSuffix } from "./wrongs";
-import { BACKGROUND_PREFIX, runToolSoon, toolsFor } from "./tools";
+import { BACKGROUND_PREFIX, extraCapabilities, runToolSoon, toolsFor } from "./tools";
 import { formatMemories, getProfile, nowText, relevantMemories, scheduleExtraction } from "./memory";
 import { INTRO, PERSONA, SPEAKING } from "./persona";
 import { attachVoiceReply, voiceIdsIn } from "./voicemsg";
 import { startReminders } from "./reminders";
 import { clearOutbox } from "./outbox";
-import { startProgressTick } from "./progress";
 import { clearStop, onCall, publishReply, stopReply, stoppedReply } from "./presence";
 import { cleanReply, stripCards } from "./textclean";
+import { inLane } from "./lane";
 
 const HISTORY = 40;
 /**
@@ -73,8 +73,9 @@ function systemPrompt(query: string, myself = "", voice = false) {
 - 查他这台 Mac（只读）：列文件夹、读文件、搜文件、看最近改过的文件、看电脑状态。他问到电脑、文件、最近在忙什么时就去查；没问就别翻。
 - 定时提醒：他说「提醒我……」就用 set_reminder 设好（delay_seconds 是多少秒后，at 写本地时间如 2025-11-01 21:30）；查看、取消用 list_reminders / cancel_reminder。时间必须是将来。
 - 改你自己（这个聊天应用的代码）：他明确让你改功能、修毛病、改样子时用 repair_self，把要求写具体。工具说暂停或排队，就照实告诉他。
-- 派活：你手里只有「看、读、写」这几件轻工具——你不能跑命令、不能装依赖、不能一次改一堆文件、不能上网查。所以只要活里出现「跑一遍/验证/装/批量/多个文件/查资料/部署/做一整套东西」，就**先**用 dispatch_task 把它交给后台那个能跑命令的 agent，别自己一段段硬写、更别说「我做不到」。判断交给工具，它说不用派，你再自己动手。交出去之后接着聊别的，跑完它会回来跟你说结果。
+- 派活：你手里只有「看、读、写」这几件轻工具——你不能跑命令、不能装依赖、不能一次改一堆文件、不能上网查。所以只要活里出现「跑一遍/验证/装/批量/多个文件/查资料/部署/做一整套东西」，就**先**用 dispatch_task 把它交给后台，别自己一段段硬写、更别说「我做不到」；一两步能办完的小事自己动手。交出去之后接着聊别的：接单、做完、没做成、要他拿主意，后台都会单独告诉他。他中途改要求或回答后台的问题用 task_append；事后追问细节用 task_result 翻记录，别凭印象答。
 ${CAPABILITIES}
+${extraCapabilities()}
 - 回复按 Markdown 显示：代码放代码块，命令、路径用反引号。
 
 - 衣橱和相册：你有几套固定的衣服，穿哪套跟着时间、季节、天气自动换；相册按天攒着你自己的照片，以前的日子一张都不会被盖掉，能按日期翻回去看。他想看你今天的样子、让你拍张照时用 take_photo（会先自动跟他说一声再拍）。天气默认按北京查，他说自己在别处就用 set_city 记下。
@@ -184,17 +185,6 @@ export type ChatEvent =
 
 // 正在生成的回复：同一条不会被生成两次
 const active = ((globalThis as unknown as { __dongniActive?: Set<number> }).__dongniActive ??= new Set<number>());
-
-/**
- * 一条路：不管从哪个口子进来（打字、语音消息、电话），回复都在这一条队里一句一句来。
- * 前一句说完、写进库，下一句才开始想——她永远看得见自己刚说过什么，不会两张嘴各说各的。
- */
-const lane = ((globalThis as unknown as { __dongniLane?: { tail: Promise<void> } }).__dongniLane ??= { tail: Promise.resolve() });
-function inLane(job: () => Promise<void>) {
-  const run = lane.tail.then(job, job);
-  lane.tail = run.catch(() => {});
-  return run;
-}
 
 /**
  * 合成一句回：他连着说了几句（或者电话里说着、手上又打了字），她不该一句一句分开回、显得割裂。
@@ -308,9 +298,8 @@ export function cutReply(assistantId: number, spoken: string) {
 /** 服务启动时把没写完、出过错的回复接着生成，不用手动重试；顺带把定时提醒重新上表 */
 export function resumePending() {
   startReminders();
-  // 主动打扰关掉以后，以前排队没发出去的主动消息直接清掉（不再补发）；改自己的时候每两三分钟贴一句进度
+  // 主动打扰关掉以后，以前排队没发出去的主动消息直接清掉（不再补发）
   clearOutbox();
-  startProgressTick();
   const rows = db()
     .prepare("SELECT * FROM messages WHERE role = 'assistant' AND status IN ('streaming', 'error') ORDER BY id")
     .all() as MessageRow[];

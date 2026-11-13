@@ -2,273 +2,384 @@ import "server-only";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { getKv, setKv } from "./db";
+import { builtinBackend } from "./backend/builtin";
+import { dshBackend } from "./backend/dsh";
+import type { Backend, Job, JobHooks } from "./backend/types";
+import { inLane } from "./lane";
+import { notify, onBack, pageVisible } from "./notify";
+import { onCall } from "./presence";
 import { postAssistant } from "./selfrepair";
 import { speakAsHer } from "./speak";
-import { NO_ACTION_PREFIX, runWorker } from "./worker";
-import { finishTask, startTask } from "./tasks";
+import { addJobEvent, createJob, endJob, getJob, jobEvents, openJobs, recentJobs, setJobProgress, updateJob, type JobRow, type JobStage } from "./tasks";
 
 /**
- * 派活：把一件「大到一次对话里干不完」的事交给内置执行器（lib/worker.ts：DeepSeek 跑 agent
- * 循环，自己读写文件、跑命令），不再外挂 clacky CLI。
- * 小活不派——她自己去查、去写、去改（repair_self 走 pi），派出去反而慢、反而贵。
+ * 派活：把一件「一次对话里干不完」的事交给后台。
  *
- * 判断在 judge() 里，是打分的：命中越多越复杂。派不派由分数决定，不由心情决定。
+ * 派不派由她自己判断（以前这里有一张关键词打分表，4 分以上才真派，结果「把测试跑一遍」这种活 0 分被挡回前台，
+ * 而前台根本没有跑命令的工具）。这里只管三件事：
+ * - 记账：每件活一行，记在 tasks 表里（lib/tasks.ts），重启不丢，事后能追问；
+ * - 找人干：先找 DSH superagent（lib/backend/dsh.ts），它不在线就用内置执行器（lib/backend/builtin.ts），都接不了就排队；
+ * - 回话：接单、提问、做完、没做成，用她的口吻说进对话；他不在页面跟前就弹通知；产物挂成文件卡片。
  */
 const HOME = os.homedir();
 const ROOT = process.cwd();
 const LOGDIR = path.join(ROOT, "logs", "super");
-const MAX_RUNNING = 5;
-const TIMEOUT_MS = 25 * 60_000;
+/** 先问谁：排前面的不在线，才轮到后面的 */
+const BACKENDS: Backend[] = [dshBackend, builtinBackend];
+const byName = (name: string) => BACKENDS.find((b) => b.name === name);
+const QUEUE_RETRY_MS = 30_000;
 
-// ─────────────────────────── 判断：这活该谁干 ───────────────────────────
-
-export type Level = "simple" | "medium" | "complex";
-export type Target = "self" | "pi" | "super";
-export type Judgement = { level: Level; target: Target; score: number; reasons: string[] };
-
-/** 复杂的信号：一旦命中就是「一个人边聊边干不完」的活 */
-const COMPLEX_HINTS: { re: RegExp; w: number; why: string }[] = [
-  { re: /重构|架构|迁移|升级依赖|换掉|大改/, w: 2, why: "要动整体结构" },
-  { re: /部署|上线|发版|打包|服务器|域名|CI|流水线/, w: 2, why: "涉及部署链路" },
-  { re: /调研|对比|选型|评估|写份报告|出个方案|市场|竞品/, w: 2, why: "要查资料、要多轮取证" },
-  { re: /批量|所有文件|整个项目|整个仓库|全站|全量|从头搭|从零/, w: 2, why: "面铺得很大" },
-  { re: /爬|抓取|脚本化|自动化|定时任务流|监控/, w: 1, why: "要写能跑起来的程序" },
-  { re: /端到端|联调|调试一遍|排查|复现|压测|性能优化/, w: 2, why: "要多轮试错" },
-  { re: /多个文件|好几个文件|三个页面|一套|系统|平台|后台管理|小程序|网站|App/i, w: 2, why: "产物不是一个文件" },
-  { re: /然后|接着|再帮我|顺便|另外|第一步|第二步|1[.、]|2[.、]/, w: 1, why: "一句话里塞了好几件事" },
-];
-
-/** 简单的信号：命中就往下压 */
-const SIMPLE_HINTS: { re: RegExp; w: number; why: string }[] = [
-  { re: /^(查一下|看看|打开|念一下|翻译|算一下|几点了|提醒我)/, w: 2, why: "一句话就能办完" },
-  { re: /光看|只问|随便聊|讲个|说个/, w: 2, why: "只是聊天" },
-  { re: /这个文件|这段话|这张图|这一句/, w: 1, why: "对象就一个" },
-];
-
-/** 中等：改她自己、修她自己的毛病——这条路走 pi，不占 super agent */
-const PI_HINTS = /你自己|改自己|你的界面|你的样式|你说话|你的语气|你回复|app里|这个应用|加个功能|去个功能|按钮|颜色/;
-
-export function judge(task: string, opts: { force?: boolean } = {}): Judgement {
-  const t = (task || "").trim();
-  const reasons: string[] = [];
-  let score = 0;
-  for (const h of COMPLEX_HINTS) {
-    if (h.re.test(t)) {
-      score += h.w;
-      reasons.push(`+${h.w} ${h.why}`);
-    }
-  }
-  for (const h of SIMPLE_HINTS) {
-    if (h.re.test(t)) {
-      score -= h.w;
-      reasons.push(`-${h.w} ${h.why}`);
-    }
-  }
-  const items = t.split(/[，。;；、]|\band\b/).filter((s) => s.trim().length > 3).length;
-  if (t.length > 120) {
-    score += 1;
-    reasons.push("+1 一句话说不完，得展开");
-  }
-  if (items >= 3) {
-    score += 1;
-    reasons.push(`+1 拆出 ${items} 件事`);
-  }
-  if (/https?:\/\//.test(t)) {
-    score += 1;
-    reasons.push("+1 要上网看东西");
-  }
-  const piish = PI_HINTS.test(t) && !/部署|上线|调研|整个项目/.test(t);
-  if (piish) {
-    score -= 1;
-    reasons.push("-1 改的是我自己，交给 pi 更稳");
-  }
-
-  let level: Level = score >= 4 ? "complex" : score >= 1 ? "medium" : "simple";
-  if (piish && level === "medium") level = "medium";
-  let target: Target = level === "complex" ? "super" : piish ? "pi" : level === "medium" ? "pi" : "self";
-  if (opts.force) {
-    level = "complex";
-    target = "super";
-    reasons.push("他明确要求派出去（force）");
-  }
-  return { level, target, score, reasons };
-}
-
-// ─────────────────────────── 派出去 ───────────────────────────
-
-/** ac：叫停这件活的开关（超期、他喊停都走它）；taskId：任务面板里那一行 */
-type Job = { id: string; task: string; dir: string; since: number; taskId: number; ac: AbortController };
-const state = ((globalThis as unknown as { __dongniSuper?: { jobs: Map<string, Job> } }).__dongniSuper ??= {
-  jobs: new Map<string, Job>(),
+/** away：他不在跟前时有了结果的那些活，回来时带一句；hooked：回来的钩子挂过没有 */
+const state = ((globalThis as unknown as { __dongniDispatch?: { retry: NodeJS.Timeout | null; away: string[]; hooked: boolean } }).__dongniDispatch ??= {
+  retry: null,
+  away: [],
+  hooked: false,
 });
 
+/** 他现在在不在跟前：在打电话，或者聊天页就在眼前 */
+const present = () => onCall() || pageVisible();
+
 function log(line: string) {
-  fs.mkdirSync(LOGDIR, { recursive: true });
-  fs.appendFileSync(path.join(LOGDIR, "dispatch.log"), `[${new Date().toLocaleString("zh-CN", { hour12: false })}] ${line}\n`);
+  try {
+    fs.mkdirSync(LOGDIR, { recursive: true });
+    fs.appendFileSync(path.join(LOGDIR, "dispatch.log"), `[${new Date().toLocaleString("zh-CN", { hour12: false })}] ${line}\n`);
+  } catch {}
 }
 
-function saveJobs() {
-  setKv(
-    "super_jobs",
-    JSON.stringify([...state.jobs.values()].map((j) => ({ id: j.id, task: j.task.slice(0, 60), dir: j.dir, since: j.since }))),
-  );
-}
+const STAGE_TEXT: Record<JobStage, string> = {
+  handed: "刚交出去",
+  queued: "排队等着",
+  working: "在干",
+  asking: "在等他回答一个问题",
+  done: "做完了",
+  failed: "没做成",
+  stopped: "被停下了",
+};
+const BACKEND_TEXT: Record<string, string> = { dsh: "superagent", builtin: "内置执行器", "": "还没人接" };
 
-export function runningJobs(): Job[] {
-  // 进程被重启、runJob 半路炸掉，都可能留下永远「在跑」的僵尸条目；超时的清掉，
-  // 不然 MAX_RUNNING 被它们占满，后面每件都只能回「先排队」，他那边看到的就是「说了派人但啥也没动」。
-  // 清之前先真叫停：只删名单不停执行器，名额空出来了，真正在跑的却比 MAX_RUNNING 多。
-  for (const [id, j] of state.jobs) {
-    if (Date.now() - j.since > TIMEOUT_MS + 5 * 60_000) {
-      try {
-        j.ac?.abort(new Error("超期没收尾，强制停下"));
-      } catch {}
-      state.jobs.delete(id);
-      if (j.taskId) finishTask(j.taskId, false, "超期没收尾，强制停下");
-      log(`${id} 超期没动静，叫停并从在跑名单里清掉`);
-    }
-  }
-  return [...state.jobs.values()];
-}
+const asJob = (r: JobRow): Job => ({ id: r.id, request: r.request, dir: r.dir, extId: r.ext_id });
+const clean = (s: string) => s.replace(/\s+/g, " ").trim();
+const mins = (from: number) => Math.max(1, Math.round((Date.now() - from) / 60_000));
 
-/** 给聊天工具看：现在后台有哪些活。running=false 表示已经喊停、正在收尾 */
-export function listDispatches(): { id: string; title: string; startedAt: number; running: boolean }[] {
-  return runningJobs().map((j) => ({
-    id: j.id,
-    title: j.task.replace(/\s+/g, " ").slice(0, 60),
-    startedAt: j.since,
-    running: !j.ac?.signal.aborted,
-  }));
-}
-
-/** 叫停一件后台活：真停执行器（等模型的那步立刻退出、命令连进程组掐掉），不是只删名单 */
-export function cancelDispatch(id?: string): { ok: boolean; cancelled: string[]; why?: string } {
-  const live = runningJobs().filter((j) => !j.ac?.signal.aborted);
-  if (!live.length) return { ok: false, cancelled: [], why: "后台现在没有在跑的活。" };
-  let job: Job | undefined;
-  if (id?.trim()) {
-    const want = id.trim().toUpperCase();
-    job = live.find((j) => j.id.toUpperCase() === want);
-    if (!job) return { ok: false, cancelled: [], why: `没找到在跑的 ${id.trim()}，现在在跑的是：${live.map((j) => j.id).join("、")}。` };
-  } else if (live.length > 1) {
-    return {
-      ok: false,
-      cancelled: [],
-      why: `现在有 ${live.length} 件在跑，得说停哪件：${live.map((j) => `${j.id}（${j.task.slice(0, 20)}）`).join("、")}。`,
-    };
-  } else job = live[0];
-
-  job.ac?.abort(new Error("他叫停了"));
-  finishTask(job.taskId, false, "他叫停了，没做完");
-  log(`${job.id} 被叫停`);
-  return { ok: true, cancelled: [job.id] };
-}
-
-/** 工作目录：默认主目录；给了就以给了的为准，但不许出主目录，也不许进凭证目录 */
+/** 工作目录：默认主目录；给了就以给了的为准，但不许出主目录、不许进凭证目录，也不许进她自己的代码目录 */
 function safeDir(dir?: string): string {
   if (!dir?.trim()) return HOME;
-  const abs = path.resolve(dir.replace(/^~/, HOME));
-  if (!abs.startsWith(HOME)) throw new Error("只能在他自己的主目录里干活。");
-  if (/\/\.(ssh|gnupg|aws|kube|pi|clacky)(\/|$)/.test(abs)) throw new Error("这个目录里是密钥/配置，不进去。");
+  const abs = path.resolve(dir.trim().replace(/^~(?=\/|$)/, HOME));
+  if (abs !== HOME && !abs.startsWith(HOME + path.sep)) throw new Error("只能在他自己的主目录里干活。");
+  if (/\/\.(ssh|gnupg|aws|kube|pi|clacky|dsh)(\/|$)/.test(abs)) throw new Error("这个目录里是密钥/配置，不进去。");
+  if (abs === ROOT || abs.startsWith(ROOT + path.sep)) throw new Error("这是你自己的代码目录，后台的活不进来改；要改自己用 repair_self。");
   if (!fs.existsSync(abs)) throw new Error(`这个目录不存在：${abs}`);
   return abs;
 }
 
-/** 后台把它跑掉：跑完用她自己的口吻把结果说进对话里 */
+/** 回报里提到的、真实存在的文件：挂成文件卡片，他点一下就能看到东西在哪 */
+function artifactCards(text: string, dir: string): string {
+  const found = new Set<string>();
+  for (const m of text.matchAll(/(?:~\/|\/Users\/|\.\/)?[^\s`'"“”‘’（）()，。；：<>\[\]]+\.[A-Za-z0-9]{1,8}/g)) {
+    const raw = m[0].replace(/[.,;:]+$/, "");
+    const abs = raw.startsWith("~/") ? path.join(HOME, raw.slice(2)) : path.isAbsolute(raw) ? raw : path.resolve(dir, raw);
+    if (found.size >= 4) break;
+    if (!abs.startsWith(HOME + path.sep) || /\/\.(ssh|gnupg|aws|kube)(\/|$)|\/node_modules\//.test(abs)) continue;
+    try {
+      if (fs.statSync(abs).isFile()) found.add(abs);
+    } catch {}
+  }
+  return [...found].map((p) => "```card\n" + JSON.stringify({ type: "file", path: p }) + "\n```").join("\n\n");
+}
+
+/**
+ * 必须送到的话（做完、没做成、被停、要他拿主意）：用她的口吻说进对话，说不出来就原样贴兜底。
+ * - 排进回复那条队里再写进对话，不会插在她正说到一半的回复中间；
+ * - 在打电话：直接写进对话，电话那头看到新消息会等她嘴空了念出来（电话里的出声顺序归电话那边管）；
+ * - 他不在跟前：弹通知，并记一笔，等他回来带一句。
+ */
+async function tell(brief: string, fallback: string, cards = "", title = "") {
+  let said = "";
+  try {
+    said = (await speakAsHer(brief, fallback, { fresh: true })).trim();
+  } catch {}
+  const text = said || fallback;
+  const post = async () => {
+    try {
+      postAssistant(cards ? `${text}\n\n${cards}` : text);
+    } catch (e) {
+      log(`话没能写进对话：${e instanceof Error ? e.message : e}`);
+    }
+  };
+  if (onCall()) await post();
+  else await inLane(post);
+  if (!present()) {
+    if (title) state.away.push(title);
+    notify(text);
+  }
+}
+
+/** 顺带一提的事（接单了、它发来的通知）：他在跟前才贴一行淡淡的系统消息，原话照贴；不在就只记在这件活的记录里 */
+function mention(text: string) {
+  if (!present() || !text.trim()) return;
+  void inLane(async () => {
+    try {
+      postAssistant(text.trim().slice(0, 400), "system");
+    } catch {}
+  });
+}
+
+/** 他回到跟前：不在的这段时间有好几件活有了结果，带一句，别让他自己往上翻着数 */
+function whenBack() {
+  const done = state.away.splice(0);
+  if (done.length < 2) return; // 就一件：那条消息和通知已经够了
+  const names = done.map((t) => `「${t}」`).join("、");
+  void (async () => {
+    let said = "";
+    try {
+      said = (
+        await speakAsHer(
+          `他刚回到电脑前。他不在的这段时间，后台有 ${done.length} 件事有了结果：${names}，每件的结果你前面已经单独说过了。用一句话告诉他这几件都有结果了、往上翻就能看到，别重复细节。`,
+          `你不在的时候有 ${done.length} 件事有了结果：${names}，都在上面。`,
+          { fresh: true },
+        )
+      ).trim();
+    } catch {}
+    await inLane(async () => postAssistant(said || `你不在的时候有 ${done.length} 件事有了结果：${names}，都在上面。`));
+  })();
+}
+
+function ensureBackHook() {
+  if (state.hooked) return;
+  state.hooked = true;
+  onBack(whenBack);
+}
+
+function hooksFor(id: number): JobHooks {
+  return {
+    ext: (extId) => updateJob(id, { ext_id: extId }),
+    event: (type, text, stage) => {
+      const job = getJob(id);
+      if (!job || job.status !== "running") return;
+      if (stage && stage !== job.stage) updateJob(id, { stage });
+      if (type === "stage") return; // 只是阶段变了，不算一件事
+      addJobEvent(id, type, text);
+      log(`#${id} ${type}｜${clean(text).slice(0, 200)}`);
+      const what = clean(job.request).slice(0, 40);
+      // 进展：记下来、任务栏上能看到；不主动说，他问起来（dispatch_status）才讲
+      if (type === "progress") setJobProgress(id, text);
+      else if (type === "ack") mention(`后台接单了：${clean(text)}`);
+      else if (type === "notice") mention(clean(text));
+      else if (type === "ask")
+        void tell(
+          `你后台在做的那件事（${what}）干到一半，停下来等他拿个主意。问题原文是：\n${text.slice(0, 800)}\n把这个问题用你的话问他，问清楚，别替他答。他回答之后你要用 task_append 把回答转给后台。`,
+          `那件事（${what}）要你拿个主意：\n\n${text.slice(0, 800)}`,
+          "",
+          what,
+        );
+    },
+    finish: (stage, text) => void finish(id, stage, text),
+  };
+}
+
+async function finish(id: number, stage: "done" | "failed" | "stopped", text: string) {
+  const job = getJob(id);
+  if (!job) return;
+  const cards = stage === "done" ? artifactCards(text, job.dir) : "";
+  const short = text.length > 700 ? text.slice(0, 700) + "\n……（后面还有）" : text;
+  // 收尾只生效一次：叫停之后执行器又交了卷、重复的回复，都到此为止
+  if (!endJob(id, stage, cards ? `${short.slice(0, 1200)}\n\n${cards}` : short, text)) return;
+  log(`#${id} 结束｜${STAGE_TEXT[stage]}｜${BACKEND_TEXT[job.backend] ?? job.backend}｜用时 ${Math.round((Date.now() - job.started_at) / 1000)} 秒｜${clean(text).slice(0, 300)}`);
+  const what = job.request.slice(0, 60);
+  if (stage === "stopped")
+    await tell(
+      `你后台干的那件事（${what}）被停下了，没做完，别说成办完了。停下时的情况：\n${short}`,
+      `那件事停下了，没做完：\n\n${short}`,
+      "",
+      clean(what).slice(0, 30),
+    );
+  else if (stage === "done")
+    await tell(
+      `你后台干的那件事（${what}）做完了，结果原文是：\n${short}\n${cards ? "产物的文件卡片会自动贴在你这句话后面，你不用说路径。" : ""}`,
+      `那件事办完了：\n\n${short}`,
+      cards,
+      clean(what).slice(0, 30),
+    );
+  else await tell(`你后台干的那件事（${what}）没做成，原因原文是：\n${short}\n照实告诉他卡在哪。`, `那件事没办成：\n\n${short}`, "", clean(what).slice(0, 30));
+  void drainQueue();
+}
+
+/** 找个能接的后端把这件活交出去；都接不了就排着，过一阵再问 */
+async function place(id: number): Promise<void> {
+  const row = getJob(id);
+  if (!row || row.status !== "running" || row.backend) return;
+  const why: string[] = [];
+  for (const b of BACKENDS) {
+    const no = await b.unavailable().catch((e) => String(e));
+    if (no) {
+      why.push(no);
+      continue;
+    }
+    // 问的这一会儿可能已经被叫停了
+    if (getJob(id)?.status !== "running") return;
+    updateJob(id, { backend: b.name });
+    log(`#${id} 交给 ${BACKEND_TEXT[b.name]}${why.length ? `（${why.join("；")}）` : ""}`);
+    b.start(asJob(row), hooksFor(id));
+    return;
+  }
+  if (row.stage !== "queued") {
+    updateJob(id, { stage: "queued" });
+    addJobEvent(id, "queued", `暂时没人能接：${why.join("；")}`);
+    log(`#${id} 排队｜${why.join("；")}`);
+  }
+  if (!state.retry) {
+    state.retry = setTimeout(() => {
+      state.retry = null;
+      void drainQueue();
+    }, QUEUE_RETRY_MS);
+    state.retry.unref?.();
+  }
+}
+
+/** 排着队、还没人接的活，按先后顺序再找一遍后端 */
+async function drainQueue() {
+  for (const j of openJobs()) if (!j.backend) await place(j.id);
+}
+
+// ─────────────────────────── 给聊天工具用 ───────────────────────────
+
+/** 派一件活：登记、找后端，马上返回 */
 export function dispatch(task: string, dir?: string): string {
   const t = (task || "").trim();
   if (!t) return "要派什么活得说清楚。";
-  const running = runningJobs().length;
-  if (running >= MAX_RUNNING) return `现在已经有 ${running} 件在后台跑着（最多 5 件同时跑），这件先排队，等他问起来再说。`;
-
   const cwd = safeDir(dir);
-  const id = `S${Date.now().toString().slice(-6)}`;
-  const taskId = startTask("super", `后台执行：${t.replace(/\s+/g, " ").slice(0, 26)}`);
-  const job: Job = { id, task: t, dir: cwd, since: Date.now(), taskId, ac: new AbortController() };
-  state.jobs.set(id, job);
-  saveJobs();
-  log(`==== ${id} 开始｜目录 ${cwd}｜${t}`);
-
-  void runJob(job, taskId).catch((e) => {
-    // runJob 自己不该抛；真抛了也得把名额还出来、把执行器停掉
-    const msg = e instanceof Error ? e.message : String(e);
-    job.ac.abort(new Error("半路炸了"));
-    state.jobs.delete(job.id);
-    saveJobs();
-    log(`${id} 半路炸了：${msg}`);
-    finishTask(taskId, false, msg.slice(0, 400));
-    try {
-      postAssistant(`那件事没跑起来（${id}）：${msg}`);
-    } catch {}
-  });
-  // 措辞要诚实：这一步只知道「活登记上了」，还没证明它真干成。以前一律回「派出去了」，
-  // 结果执行器一启动就崩，她还照着这句话跟他说「已经交出去了」。
-  return `接下来我自己干（${id}），在 ${cwd.replace(HOME, "~")} 里，一步一步来，跑完把结果说给你。${
-    dir?.trim() ? "" : "（他没给目录，我默认在主目录里干；要是这活属于某个项目，把 dir 传进来。）"
-  }这活要几分钟，不用一直等，也别用「已经交出去了」这种说法，就说「我自己上手了，正在弄」。`;
+  const request = `${t}\n\n（约束：一、不要修改 ${ROOT} 这个目录里的任何文件。二、删目录、强推、改写 git 历史、对外发布、花钱这类收不回来的动作，做之前先停下来向他提问，他同意了再做。三、需求有两种理解、猜错代价大的时候先问，别硬猜。）`;
+  ensureBackHook();
+  const id = createJob({ title: `后台执行：${clean(t).slice(0, 26)}`, request, dir: cwd });
+  log(`==== #${id} 登记｜目录 ${cwd}｜${clean(t).slice(0, 400)}`);
+  void place(id).catch((e) => void finish(id, "failed", `没能交出去：${e instanceof Error ? e.message : e}`));
+  // 措辞要诚实：这一步只知道「活登记上了」，还没证明有人接、更没证明干成
+  return `登记上了（#${id}），在 ${cwd.replace(HOME, "~")} 里干，后台正在找人接。${
+    dir?.trim() ? "" : "（他没给目录，默认在主目录里干；这活要是属于某个项目，下次把 dir 传进来。）"
+  }接单、做完、没做成、或者中途要他拿主意，都会单独告诉他。现在只跟他说一句交出去了，别说已经在做、更别说做完了，然后接着聊。`;
 }
 
-async function runJob(job: Job, taskId: number) {
-  const trace = path.join(LOGDIR, `${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`);
-  const t0 = Date.now();
-  let failed = false;
-  let text = "";
-  // 硬截止：budgetMs 只是让它自己收尾，到 TIMEOUT_MS 还没收就真停
-  const hard = setTimeout(() => job.ac.abort(new Error(`超过 ${TIMEOUT_MS / 60_000} 分钟没收尾，强制停下`)), TIMEOUT_MS);
-  try {
-    text = await runWorker({
-      task: job.task,
-      dir: job.dir,
-      budgetMs: TIMEOUT_MS - 60_000,
-      signal: job.ac.signal,
-      log: (entry) => {
-        try {
-          fs.appendFileSync(trace, JSON.stringify(entry) + "\n");
-        } catch {}
-      },
-    });
-    if (/^(没做成|步数用完了|那件事没跑起来)/.test(text) || text.startsWith(NO_ACTION_PREFIX)) failed = true;
-  } catch (e) {
-    failed = true;
-    const msg = e instanceof Error ? e.message : String(e);
-    text = job.ac.signal.aborted ? `中途停下了：${msg}` : `执行器半路出错：${msg}`;
-    log(`${job.id} 抛错：${msg}`);
-  } finally {
-    clearTimeout(hard);
-    state.jobs.delete(job.id); // 跑完就把名额还出来，别等超期清理
-    saveJobs();
-  }
-  // 叫停/超期强停：哪怕执行器刚好在这时交了卷，也按「停下了」报，不说办完了
-  const stopped = job.ac.signal.aborted;
-  if (stopped) failed = true;
-  const ok = !failed;
-  setKv("super_last", JSON.stringify({ id: job.id, at: Date.now(), ok, stopped, text: text.slice(0, 2000) }));
-  log(`${job.id} 结束｜${stopped ? "被停下" : ok ? "ok" : "失败"}｜用时 ${Math.round((Date.now() - t0) / 1000)} 秒｜${text.slice(0, 300)}`);
-  finishTask(taskId, ok, text.slice(0, 400));
+/** 给她看的后台真实状态（lib/selfstate.ts），也给改自己时判断能不能重启（lib/selfrepair.ts） */
+export function listDispatches(): { id: number; title: string; startedAt: number; stage: JobStage; stageText: string; backend: string }[] {
+  return openJobs().map((j) => ({
+    id: j.id,
+    title: clean(j.title).slice(0, 60),
+    startedAt: j.started_at,
+    stage: j.stage,
+    stageText: STAGE_TEXT[j.stage] ?? j.stage,
+    backend: j.backend,
+  }));
+}
 
-  const short = text.length > 700 ? text.slice(0, 700) + "\n……（后面还有，日志里有）" : text;
-  // 兜底句必须自带正文：说不上话的时候，用户至少能看到到底做成了什么
-  const fallback = stopped
-    ? `那件事（${job.id}）停下了，没做完：\n\n${short}`
-    : ok
-      ? `那件事办完了，它是这么说的：\n\n${short}`
-      : `那件事没办成，它是这么说的：\n\n${short}`;
-  const brief = stopped
-    ? `你让后台执行器干的那件事（${job.task.slice(0, 40)}）被停下了，没做完，别说成办完了。停下的原因和进度：\n${short}`
-    : `你让后台执行器干的那件事（${job.task.slice(0, 40)}）回来了，结果原文是：\n${short}`;
-  try {
-    const said = await speakAsHer(brief, fallback, {
-      fresh: true,
-    });
-    postAssistant(said && said.trim() ? said : fallback);
-  } catch (e) {
-    log(`${job.id} 结果没能说进对话：${e instanceof Error ? e.message : e}`);
-    // 兜嘴说不了话，也得把结果原样贴进对话，不能凭空消失
-    try {
-      postAssistant(fallback);
-    } catch (e2) {
-      log(`${job.id} 兜底也没贴进去：${e2 instanceof Error ? e2.message : e2}`);
-    }
+function pick(id: string | undefined, rows: JobRow[]): { job?: JobRow; why?: string } {
+  const want = Number(String(id ?? "").replace(/[^0-9]/g, ""));
+  if (want) {
+    const job = rows.find((j) => j.id === want);
+    return job ? { job } : { why: `没找到 #${want}，现在有的是：${rows.map((j) => `#${j.id}`).join("、") || "（没有）"}。` };
   }
+  if (rows.length === 1) return { job: rows[0] };
+  if (!rows.length) return { why: "后台现在没有在跑的活。" };
+  return { why: `现在有 ${rows.length} 件，得说是哪件：${rows.map((j) => `#${j.id}（${clean(j.title).slice(0, 20)}）`).join("、")}。` };
+}
+
+/** 现在后台有哪些活、各自走到哪一步 */
+export function dispatchStatus(): string {
+  const jobs = openJobs();
+  if (!jobs.length) return "现在没有跑着的外活，都清空了。要看以前做完的，用 task_result。";
+  return (
+    `有 ${jobs.length} 件没收尾：\n` +
+    jobs
+      .map((j) => {
+        const last = jobEvents(j.id, 1)[0];
+        return `#${j.id}｜${clean(j.request).slice(0, 50)}｜${STAGE_TEXT[j.stage] ?? j.stage}（${BACKEND_TEXT[j.backend] ?? j.backend}）｜在 ${j.dir.replace(HOME, "~")}｜${mins(j.started_at)} 分钟了${
+          last?.text ? `｜最近：${clean(last.text).slice(0, 80)}` : ""
+        }`;
+      })
+      .join("\n")
+  );
+}
+
+/** 叫停一件后台活：真停执行那边，不是只改账 */
+export async function cancelDispatch(id?: string): Promise<{ ok: boolean; cancelled: string[]; why?: string }> {
+  const { job, why } = pick(id, openJobs());
+  if (!job) return { ok: false, cancelled: [], why };
+  // 还没人接：直接销账
+  if (!job.backend) {
+    endJob(job.id, "stopped", "他叫停了，还没开始做", "他叫停了，还没开始做");
+    log(`#${job.id} 排队中被叫停`);
+    return { ok: true, cancelled: [`#${job.id}`] };
+  }
+  const no = await byName(job.backend)?.cancel(asJob(job));
+  if (no) return { ok: false, cancelled: [], why: no };
+  // 账先收掉；执行那边随后交回来的话不会再报一遍
+  endJob(job.id, "stopped", "他叫停了，没做完", "他叫停了，没做完");
+  log(`#${job.id} 被叫停`);
+  void drainQueue();
+  return { ok: true, cancelled: [`#${job.id}`] };
+}
+
+/** 给正在干的活补一句要求，或者回答它的提问 */
+export async function appendDispatch(id: string | undefined, text: string): Promise<string> {
+  if (!text?.trim()) return "要补什么得说清楚。";
+  const { job, why } = pick(id, openJobs());
+  if (!job) return `出错了：没补上——${why}`;
+  if (!job.backend) return "出错了：这件还在排队没人接，补不进去；先叫停，带上新要求重新派。";
+  const no = await byName(job.backend)?.append(asJob(job), text.trim());
+  if (no) return `出错了：没补上——${no}。照实告诉他，别说已经转达了。`;
+  addJobEvent(job.id, "append", text.trim());
+  if (job.stage === "asking") updateJob(job.id, { stage: "working" });
+  return `补上了（#${job.id}），那边下一步就能看到。`;
+}
+
+/** 一件活的完整记录：原话、走到哪、中途的事、完整结果。他事后追问时用 */
+export function jobReport(id?: string): string {
+  const rows = recentJobs(8);
+  if (!rows.length) return "还没有派出去过的活。";
+  const want = Number(String(id ?? "").replace(/[^0-9]/g, ""));
+  const job = want ? getJob(want) : rows.length === 1 ? rows[0] : undefined;
+  if (!job)
+    return (
+      `${want ? `没找到 #${want}。` : ""}最近的几件（要看哪件就带上编号再调一次）：\n` +
+      rows.map((j) => `#${j.id}｜${clean(j.request).slice(0, 50)}｜${STAGE_TEXT[j.stage] ?? j.stage}｜${mins(j.ended_at ?? j.started_at)} 分钟前`).join("\n")
+    );
+  const events = jobEvents(job.id)
+    .filter((e) => e.text)
+    .map((e) => `- ${new Date(e.at).toLocaleTimeString("zh-CN", { hour12: false })} ${e.type}：${clean(e.text).slice(0, 300)}`)
+    .join("\n");
+  return [
+    `#${job.id}｜${STAGE_TEXT[job.stage] ?? job.stage}｜${BACKEND_TEXT[job.backend] ?? job.backend}｜在 ${job.dir.replace(HOME, "~")}`,
+    `他要的：${job.request.slice(0, 1500)}`,
+    events ? `中途：\n${events}` : "",
+    job.detail ? `完整结果：\n${job.detail.slice(0, 8000)}` : "还没有结果。",
+    "（回复里别念编号和目录；文件在哪他点之前那张卡片就能看到。）",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+/**
+ * 服务启动时把没收尾的活接回来：superagent 那边的照常在跑，接着盯；
+ * 内置执行器的跟着进程一起没了，记成没做完并照实告诉他；还没人接的重新找后端。
+ */
+export function recoverJobs() {
+  ensureBackHook();
+  const lost: JobRow[] = [];
+  for (const j of openJobs()) {
+    if (!j.backend) continue;
+    const ok = byName(j.backend)?.resume(asJob(j), hooksFor(j.id)) ?? false;
+    if (ok) {
+      log(`#${j.id} 重启后接回来了（${BACKEND_TEXT[j.backend] ?? j.backend}）`);
+      continue;
+    }
+    if (endJob(j.id, "failed", "服务中途重启，这件没跑完", "服务中途重启，这件没跑完")) lost.push(j);
+    log(`#${j.id} 重启时被打断，没跑完`);
+  }
+  if (lost.length) {
+    const names = lost.map((j) => `「${clean(j.request).slice(0, 40)}」`).join("、");
+    void tell(
+      `服务刚才重启过，你后台的这${lost.length > 1 ? "几" : ""}件活被打断了、没做完：${names}。照实告诉他，问他要不要重新来。`,
+      `刚才重启了一下，后台这${lost.length > 1 ? "几" : ""}件被打断了、没做完：${names}。要重新来吗？`,
+    );
+  }
+  void drainQueue();
 }

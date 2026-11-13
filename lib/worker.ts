@@ -39,9 +39,13 @@ function shellEnv(): NodeJS.ProcessEnv {
 const clip = (s: string, max = OUT_CLIP) =>
   s.length > max ? `${s.slice(0, max - 2_000)}\n……（中间省略 ${s.length - max} 字）……\n${s.slice(-2_000)}` : s;
 
-function inHome(dir: string, p: string): string {
+/** 她自己的代码目录：后台的活不进来改（改自己走 repair_self，那边有内核保护、类型检查和回滚） */
+const SELF_ROOT = process.cwd();
+
+function inHome(dir: string, p: string, write = false): string {
   const abs = path.resolve(dir, (p || ".").replace(/^~(?=\/|$)/, HOME));
-  if (!abs.startsWith(HOME)) throw new Error(`只能在他的主目录里干活：${abs}`);
+  if (abs !== HOME && !abs.startsWith(HOME + path.sep)) throw new Error(`只能在他的主目录里干活：${abs}`);
+  if (write && (abs === SELF_ROOT || abs.startsWith(SELF_ROOT + path.sep))) throw new Error("这个目录是聊天应用自己的代码，不许改。");
   if (/\/\.(ssh|gnupg|aws|kube|config\/gcloud)(\/|$)/.test(abs)) throw new Error("这个路径里是密钥/凭证，不碰。");
   return abs;
 }
@@ -58,10 +62,53 @@ function killTree(pid: number | undefined) {
   setTimeout(() => hit("SIGKILL"), 3_000).unref?.();
 }
 
-function runShell(dir: string, cmd: string, timeoutMs = SHELL_MS, signal?: AbortSignal): Promise<string> {
-  const banned = /(^|\s)(sudo|mkfs|shutdown|reboot|halt)\b|\brm\s+-rf\s+\/(\s|$)|\bdd\s+if=|:\(\)\s*\{|>\s*\/dev\/(sd|disk)/;
-  if (banned.test(cmd)) return Promise.resolve("[拒绝] 这条命令会动系统或删根目录，不执行。换个做法。");
-  if (signal?.aborted) return Promise.resolve("[已叫停] 没执行。");
+/** 跑之前要他点头的命令：删东西、改写历史、强推、发布、动系统服务——做了就收不回来 */
+const RISKY: { re: RegExp; why: string }[] = [
+  { re: /\bgit\s+push\b[^\n;|&]*(\s--force\b|\s--force-with-lease\b|\s-f\b|\s\+\S)/, why: "强推会覆盖远端的历史" },
+  { re: /\bgit\s+reset\s+--hard\b|\bgit\s+clean\s+-[a-zA-Z]*f|\bgit\s+checkout\s+(--\s+)?\.(\s|$)|\bgit\s+restore\s+(--\S+\s+)*\.(\s|$)/, why: "会丢掉没提交的改动" },
+  { re: /\bgit\s+branch\s+-D\b|\bgit\s+push\b[^\n;|&]*\s--delete\b/, why: "会删分支" },
+  { re: /\b(npm|pnpm|yarn)\s+publish\b|\bgh\s+release\s+create\b/, why: "会对外发布" },
+  { re: /\b(chmod|chown)\s+-R\b|\blaunchctl\s+(bootout|remove|unload|disable)\b|\bkillall\b|\bdiskutil\b|\bdefaults\s+(write|delete)\b/, why: "会动系统或别的程序" },
+  { re: /\b(brew|npm|pnpm)\s+(uninstall|remove|rm)\s+(-g|--global)\b|\bbrew\s+uninstall\b/, why: "会卸掉装在全局的东西" },
+  { re: /\bfind\b[^\n;|&]*\s-delete\b|\bxargs\s+(-\S+\s+)*rm\b|\btruncate\b|\bshred\b/, why: "会批量删东西" },
+];
+
+/** rm：只删工作目录里面、写明了名字的东西就放行（清 node_modules、dist 这类）；带通配、往上跳、绝对路径、主目录的都要问 */
+function riskyRm(cmd: string, dir: string): boolean {
+  for (const m of cmd.matchAll(/(?:^|[;&|(]\s*|\s)rm\s+([^;&|\n]*)/g)) {
+    const args = m[1].trim().split(/\s+/).filter(Boolean);
+    const targets = args.filter((a) => !a.startsWith("-"));
+    const recursive = args.some((a) => /^-[a-zA-Z]*[rR]/.test(a) || a === "--recursive");
+    if (!targets.length) continue;
+    const inside = targets.every((t) => !/[~$*?`]|\.\.|^\//.test(t.replace(/^["']|["']$/g, "")));
+    if (!inside || (recursive && dir === HOME)) return true;
+  }
+  return false;
+}
+
+function riskOf(cmd: string, dir: string): string | null {
+  if (riskyRm(cmd, dir)) return "会删掉工作目录以外、或者没写明名字的东西";
+  return RISKY.find((r) => r.re.test(cmd))?.why ?? null;
+}
+
+const YES = /好的?|行|可以|同意|没问题|批准|跑吧|执行吧|删吧|ok|okay|yes|sure/i;
+const NO = /不用|不要|别|先不|算了|不行|不可以|等等|no\b/i;
+
+async function runShell(dir: string, cmd: string, timeoutMs = SHELL_MS, signal?: AbortSignal, ask?: WorkerAsk): Promise<string> {
+  const banned = /(^|\s)(sudo|mkfs|shutdown|reboot|halt)\b|\brm\s+-[a-zA-Z]*[rR][a-zA-Z]*\s+(\/|~\/?)(\s|$)|\bdd\s+if=|:\(\)\s*\{|>\s*\/dev\/(sd|disk)/;
+  if (banned.test(cmd)) return "[拒绝] 这条命令会动系统或删根目录/主目录，不执行。换个做法。";
+  // 她自己的代码目录：命令里也不许改（改自己走 repair_self）
+  if (cmd.includes(SELF_ROOT) && /(>|\brm\b|\bmv\b|\bcp\b|\bsed\s+-i|\btee\b|\bpatch\b|\bgit\s+(commit|checkout|reset|apply|stash|restore|clean)\b)/.test(cmd))
+    return "[拒绝] 这条命令会改聊天应用自己的代码目录，不执行。";
+  if (signal?.aborted) return "[已叫停] 没执行。";
+  const risk = riskOf(cmd, dir);
+  if (risk) {
+    if (!ask) return `[拒绝] 这条命令${risk}，现在没法问他，不执行。换个不可逆程度低的做法，或者收尾说清楚。`;
+    const answer = (await ask(`要跑一条收不回来的命令（${risk}）：\n${cmd.slice(0, 600)}\n可以跑吗？`)).trim();
+    if (signal?.aborted) return "[已叫停] 没执行。";
+    if (!answer || NO.test(answer) || !YES.test(answer))
+      return `[没批准] 他的回答是：「${answer || "（一直没回）"}」。这条命令没执行。按他的意思换个做法，或者收尾说清楚。`;
+  }
 
   return new Promise((resolve) => {
     // detached：自成一个进程组，超时/叫停时才能连孙子进程一起掐掉
@@ -187,6 +234,23 @@ const TOOLS = [
   {
     type: "function",
     function: {
+      name: "report_progress",
+      description: "报一个真实的阶段性进展（一句话）：比如「依赖装好了，开始跑测试」「十个文件生成了六个」。只在真走完一段时报，别为了报而报。",
+      parameters: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "ask_user",
+      description:
+        "停下来问他一个问题，等他回答再继续。只在真拿不准、而且猜错代价大的时候用：需求有两种理解、要在几个方案里选、要花钱或对外发东西。能自己判断的别问。",
+      parameters: { type: "object", properties: { question: { type: "string", description: "问题写完整，他不看上下文也能答" } }, required: ["question"] },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "finish",
       description: "活干完了（或确定干不下去）就调它，把结果说清楚：做了什么、产物在哪、有没有遗留问题。这是唯一能让任务结束的方式。",
       parameters: {
@@ -201,7 +265,12 @@ const TOOLS = [
   },
 ];
 
-async function execTool(dir: string, call: ToolCall, signal?: AbortSignal): Promise<string> {
+/** 问他一句，等到回答；一直没回就返回空串 */
+export type WorkerAsk = (question: string) => Promise<string>;
+type ToolEnv = { signal?: AbortSignal; ask?: WorkerAsk; progress?: (text: string) => void };
+
+async function execTool(dir: string, call: ToolCall, env: ToolEnv = {}): Promise<string> {
+  const { signal } = env;
   const name = call.function.name;
   let a: Args = {};
   try {
@@ -214,7 +283,7 @@ async function execTool(dir: string, call: ToolCall, signal?: AbortSignal): Prom
       case "run_shell": {
         const cmd = str(a.cmd).trim();
         if (!cmd) return "[cmd 是空的]";
-        return await runShell(dir, cmd, Math.min(num(a.timeout_ms, SHELL_MS), 600_000), signal);
+        return await runShell(dir, cmd, Math.min(num(a.timeout_ms, SHELL_MS), 600_000), signal, env.ask);
       }
       case "read_file": {
         const abs = inHome(dir, str(a.path));
@@ -226,14 +295,14 @@ async function execTool(dir: string, call: ToolCall, signal?: AbortSignal): Prom
         return clip(part.map((l, i) => `${offset + i}\t${l}`).join("\n") + more);
       }
       case "write_file": {
-        const abs = inHome(dir, str(a.path));
+        const abs = inHome(dir, str(a.path), true);
         fs.mkdirSync(path.dirname(abs), { recursive: true });
         const body = str(a.content);
         fs.writeFileSync(abs, body, "utf8");
         return `写好了：${abs}（${body.length} 字）`;
       }
       case "edit_file": {
-        const abs = inHome(dir, str(a.path));
+        const abs = inHome(dir, str(a.path), true);
         const old = str(a.old);
         const neu = str(a.new);
         if (!old) return "[old 不能为空；要整份重写就用 write_file]";
@@ -280,6 +349,18 @@ async function execTool(dir: string, call: ToolCall, signal?: AbortSignal): Prom
         walk(base, 0);
         return hits.length ? hits.join("\n") : "（没找到）";
       }
+      case "report_progress": {
+        const text = str(a.text).trim();
+        if (text) env.progress?.(text);
+        return "记下了，接着干。";
+      }
+      case "ask_user": {
+        const q = str(a.question).trim();
+        if (!q) return "[question 是空的]";
+        if (!env.ask) return "[现在问不到他] 自己判断，宁可保守。";
+        const answer = (await env.ask(q)).trim();
+        return answer ? `他的回答：${answer}` : "他一直没回。自己判断，宁可保守；拿不准的那部分就不做，收尾时说清楚。";
+      }
       case "finish":
         return "OK";
       default:
@@ -309,8 +390,9 @@ ${task}
 2. 一次一步：先看（ls/read/grep），再改，改完验证（跑起来、跑测试、cat 出来看）。
 3. 改代码用 edit_file 精确替换，只有新建文件或整份重写才用 write_file。
 4. 命令输出很长时不要反复全量读，用 head/grep 收窄。
-5. 别问人——联系不上他，你自己判断，宁可保守。
-6. 只碰这个任务需要的东西，别顺手重构别人没让你动的地方。
+5. 能自己判断的自己判断，宁可保守。真拿不准、猜错代价又大的（需求有两种理解、要花钱、要对外发东西），用 ask_user 问他一句再继续。删东西、强推、改写 git 历史这类收不回来的命令，跑的时候会自动先问他，他不同意就换做法。
+5b. 走完一段真实的阶段就用 report_progress 报一句（装好了、跑通了、生成到第几个）；他中途补的话会以「他刚补了一句」的形式出现，以最新的为准。
+6. 只碰这个任务需要的东西，别顺手重构别人没让你动的地方。${SELF_ROOT} 这个目录里的文件一律不许改（命令里也不许）。
 7. 撞到死路上（连续两次同样的失败）就换方案；换不动就收尾说清楚卡在哪。
 8. 干完必须调 finish：ok 表示真做成了，summary 里写清做了什么、产物在哪（给绝对路径或相对工作目录的路径）、遗留什么。他不会看你的中间过程，只会看 summary。
 
@@ -389,6 +471,12 @@ export async function runWorker(opts: {
   budgetMs?: number;
   /** 硬停：超期或他叫停 */
   signal?: AbortSignal;
+  /** 问他一句并等回答 */
+  ask?: WorkerAsk;
+  /** 它报的阶段性进展 */
+  progress?: (text: string) => void;
+  /** 取走他中途补的话（取一次清一次） */
+  notes?: () => string[];
 }): Promise<string> {
   const { task, dir, log, signal } = opts;
   const deadline = Date.now() + (opts.budgetMs ?? 20 * 60_000);
@@ -415,6 +503,13 @@ export async function runWorker(opts: {
       messages.push({ role: "user", content: "时间到了，别再开新活，立刻调 finish 说清现在做到哪、产物在哪、还剩什么。" });
     }
 
+    // 他中途补的话：下一步之前塞给它
+    const notes = opts.notes?.() ?? [];
+    if (notes.length) {
+      messages.push({ role: "user", content: `他刚补了一句（以这个为准，和前面冲突的按这个改）：\n${notes.join("\n")}` });
+      say({ type: "note", step, text: notes.join("\n").slice(0, 800) });
+    }
+
     const { text, calls } = await stepWithRetry(messages, step, say, signal);
     if (text.trim()) lastText = text.trim();
     say({ type: "assistant", step, text: text.slice(0, 2_000) });
@@ -434,7 +529,7 @@ export async function runWorker(opts: {
 
     for (const call of calls) {
       if (signal?.aborted) throw abortError(signal);
-      const result = await execTool(dir, call, signal);
+      const result = await execTool(dir, call, { signal, ask: opts.ask, progress: opts.progress });
       if (SIDE_EFFECT_TOOLS.has(call.function.name)) acted++;
       say({ type: "tool", step, name: call.function.name, args: call.function.arguments.slice(0, 800), result: result.slice(0, 1_500) });
       if (call.function.name === "finish") {
