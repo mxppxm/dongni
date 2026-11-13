@@ -5,8 +5,8 @@ import path from "node:path";
  * 衣橱的造型清单。
  *
  * 以前整份清单写死在代码里（模块加载时读进内存），加一件衣服就得重新构建、重启才认。
- * 现在清单以 data/wardrobe/outfits.json 为准，每次读衣橱都看一眼文件的修改时间，
- * 变了才重新解析，没变就用上一次的结果——往文件里加一件、改一件，下一次读就生效，不用重启。
+ * 现在清单以 data/wardrobe/outfits.json 为准，每次读衣橱都重新读一遍文件，不缓存旧数据——
+ * 往文件里加一件、改一件，下一次读就生效，不用重启。
  *
  * 文件格式：一个数组（也可以写成 {"outfits": [...]}），每一项：
  *   { "key": "snow", "name": "雪天那身", "when": "下雪的日子", "wear": "英文描述她穿什么",
@@ -61,6 +61,14 @@ export const BUILTIN_OUTFITS: Outfit[] = [
   { key: "indoor", name: "窝着的下午", when: "白天 10°C 以下的室内日子", wear: "杏色粗针织开衫配白圆领T，深棕格纹A字裙，厚羊毛连裤袜，米白软底家居拖鞋", real: true },
   { key: "leaf", name: "出门踩叶子", when: "冷天出门 3–8°C 晴或多云", wear: "奶白短羽绒服、灰蓝连帽卫衣、直筒牛仔裤、燕麦色粗针织围巾、白色帆布鞋", real: true },
   { key: "evening", name: "晚上有点讲究", when: "18 点以后出门", wear: "墨绿丝绒连衣裙、黑色薄开衫、细金项链、黑色短靴", real: true },
+  {
+    key: "library",
+    name: "阴天的图书馆",
+    when: "秋季阴天、5~12°C 的白天到傍晚",
+    wear: "深灰色高领薄毛衣，外搭卡其色长风衣（敞开穿），深蓝色直筒牛仔裤，棕色短靴",
+    real: true,
+    rule: { hours: [8, 19], tempMin: 5, tempMax: 12, kinds: ["cloud"], months: [9, 12], priority: 5 },
+  },
 ];
 
 /** key 同时是定妆照文件名，统一成安全的短名 */
@@ -120,15 +128,6 @@ function parseEntry(raw: unknown): Partial<Outfit> | null {
   return out;
 }
 
-function stampOf(file: string) {
-  try {
-    const st = fs.statSync(file);
-    return `${st.mtimeMs}:${st.size}`;
-  } catch {
-    return "";
-  }
-}
-
 /** 文件里的项：同 key 覆盖内置的，新 key 排在后面；缺字段的沿用内置那份 */
 function merge(entries: Partial<Outfit>[]): Outfit[] {
   const list = BUILTIN_OUTFITS.map((o) => ({ ...o }));
@@ -147,7 +146,8 @@ function merge(entries: Partial<Outfit>[]): Outfit[] {
   return list;
 }
 
-let cache: { stamp: string; list: Outfit[] } | null = null;
+/** 上一次读到的文件内容；内容没变就直接返回上次那份，变了就马上重新解析，不留旧数据 */
+let cache: { file: string; exists: boolean; text: string; list: Outfit[] } | null = null;
 /** 清单每换一次内容加一：用来判断「是不是新加了衣服，该补定妆照了」 */
 let version = 0;
 
@@ -156,16 +156,23 @@ export function outfitsVersion() {
   return version;
 }
 
-/** 读衣橱清单：文件变了就重新读，没变就用缓存的，所以加衣服不用重启 */
+/** 读衣橱清单：每次都重新读文件（文件很小），所以加衣服、改衣服下一次读就生效，不用重启 */
 export function outfits(): Outfit[] {
   const file = OUTFITS_FILE();
-  const stamp = stampOf(file);
-  if (cache && cache.stamp === stamp) return cache.list;
+  let exists = false;
+  let text = "";
+  try {
+    text = fs.readFileSync(file, "utf8");
+    exists = true;
+  } catch {
+    /* 文件还没建（或读不了）：只用内置那几套 */
+  }
+  if (cache && cache.file === file && cache.exists === exists && cache.text === text) return cache.list;
   const first = !cache;
   const entries: Partial<Outfit>[] = [];
-  if (stamp) {
+  if (exists) {
     try {
-      const raw = JSON.parse(fs.readFileSync(file, "utf8")) as unknown;
+      const raw = JSON.parse(text) as unknown;
       const arr = Array.isArray(raw)
         ? raw
         : Array.isArray((raw as { outfits?: unknown })?.outfits)
@@ -183,7 +190,7 @@ export function outfits(): Outfit[] {
   }
   const list = merge(entries);
   if (cache) version += 1;
-  cache = { stamp, list };
+  cache = { file, exists, text, list };
   if (!first) console.log(`[dongni] 衣橱清单更新了：${list.length} 套（${list.map((o) => o.name).join("、")}）`);
   return list;
 }
