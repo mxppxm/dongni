@@ -8,7 +8,6 @@ import Dock from "./Dock";
 import Markdown from "./Markdown";
 import Mood from "./Mood";
 import Starfield, { type Theme } from "./Starfield";
-import { useRunningTasks } from "./Tasks";
 import { AttachmentStrip, flushAttachments, useAttachments } from "./useAttachments";
 import useAutoReload from "./useAutoReload";
 import MicButton, { type VoiceSendResult } from "./VoiceRecorder";
@@ -184,23 +183,6 @@ export default function Chat() {
   const [memCount, setMemCount] = useState<number | null>(null);
   const [pulse, setPulse] = useState(0);
   const [theme, setTheme] = useState<Theme>("light");
-  // 有后台的活在跑（派出去的、改自己的、排队的）：输入框顶部一条光带慢慢扫；
-  // 活干完先停住动画、所有光缓缓淡掉（1.4 秒）再撤掉这层，回到完全静止的普通输入框
-  const runningTasks = useRunningTasks();
-  const [sweep, setSweep] = useState({ shown: false, on: false });
-  // 输入框「正在用」：光标在里面或有事在跑时，一圈暖白流光沿边框绕一圈；
-  // 松手离开且没事在跑就整个撤掉，回到平时干净的边框。
-  const [typing, setTyping] = useState(false);
-  useEffect(() => {
-    if (runningTasks > 0) {
-      setSweep({ shown: true, on: true });
-      return;
-    }
-    setSweep((s) => (s.shown ? { ...s, on: false } : s));
-    const t = setTimeout(() => setSweep({ shown: false, on: false }), 1420);
-    return () => clearTimeout(t);
-  }, [runningTasks]);
-
   useEffect(() => {
     setTheme(document.documentElement.dataset.theme === "dark" ? "dark" : "light");
   }, []);
@@ -725,9 +707,6 @@ export default function Chat() {
     send();
   };
 
-
-  const flow = typing || sweep.shown;
-
   return (
     <div
       className="relative flex h-dvh flex-col overflow-hidden"
@@ -811,16 +790,11 @@ export default function Chat() {
           {att.hint && <div className="mb-2 text-center text-xs text-[var(--faint)]">{att.hint}</div>}
           {micHint && <div className="mb-2 text-center text-xs text-[var(--faint)]">{micHint}</div>}
           <div
-            className={`${flow ? "flow" : ""} relative isolate flex items-end gap-2 rounded-[26px] border bg-[var(--panel)] py-2 pr-2 pl-5 shadow-[var(--shadow)] backdrop-blur-xl transition-colors ${
+            className={`composer relative isolate flex items-end gap-2 rounded-[26px] border bg-[var(--panel)] py-2 pr-2 pl-5 shadow-[var(--shadow)] backdrop-blur-xl transition-colors ${
               att.dragging ? "border-[var(--dot)]" : "border-[var(--border)]"
             }`}
           >
-            {flow && (
-              <>
-                <span className="flow-ring" aria-hidden />
-                <span className="flow-halo" aria-hidden />
-              </>
-            )}
+            <span className="composer-halo" aria-hidden />
             <div className="min-w-0 flex-1 pt-1">
             <AttachmentStrip items={att.items} onRemove={att.remove} />
             <textarea
@@ -833,8 +807,6 @@ export default function Chat() {
                 localStorage.setItem(DRAFT_KEY, e.target.value);
               }}
               onKeyDown={onKeyDown}
-              onFocus={() => setTyping(true)}
-              onBlur={() => setTyping(false)}
               onCompositionStart={() => (composing.current = true)}
               onCompositionEnd={() => (composing.current = false)}
               placeholder="说点什么…"

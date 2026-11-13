@@ -353,64 +353,49 @@ ol.md-list {
   animation: breathe 1.6s ease-in-out infinite;
 }
 
-/* 输入框「正在用」：一圈暖白流光沿边框慢慢绕一圈（这是他一开始就提给输入框的那效果）。
-    光标在输入框里、或者后台有活在跑时才出现；离开输入框、活也干完了，这层直接不在 DOM 里，
-    输入框就是平时那圈干净的边框，不会一直亮。
-    构成：贴着边框一道 2px 的流光（透明 0–52% → 暖白 70% → 近白 #fffaf3 84% → 暖白 92% → 透明），
-    外面再透一层同色柔光（模糊 8px）；颜色跟明暗主题走（--flow-a / --flow-b），浅色主题用偏暖的蜜桃白。
-    光带是 conic-gradient，从边框上方正中起步，4.2 秒匀速绕一整圈，不闪、不来回晃。
-    mask 只留边框那一圈 2px，光始终贴着边框走，不盖住里面的字；
-    所有层都 pointer-events: none，不碰输入、光标和点击。减动效时去掉外圈柔光，只留一道静止的暖白边框。 */
-.flow {
-  --flow-a: rgba(255, 228, 190, 0.9);
-  --flow-b: #fffaf3;
+/* 输入框「正在用」：光标在输入框里时才亮的一圈外发光（box-shadow，不进边框、不动边框）。
+    边框本身仍是下面那圈静止的普通边框，粗细和颜色不变，也不跑动、不旋转、不扫过。
+    光晕：贴近边框一层暖白细光 + 外面一层大一点的柔光（模糊 22px），从背景色里慢慢透出来；
+    亮起来之后明暗在 2.5 秒里轻缓起伏一次（呼吸），只在明暗上变，不跑动、不绕圈。
+    光标离开：光晕和起伏一起平滑淡出（0.9 秒），回到完全静止。
+    颜色跟明暗主题走（--halo-a / --halo-b），浅色主题用偏暖的蜜桃白。
+    所有层都 pointer-events: none，不碰输入、光标和点击。减动效时没有起伏，只留一层静止的柔光。 */
+.composer {
+  --halo-a: rgba(255, 234, 206, 0.42);
+  --halo-b: rgba(255, 226, 192, 0.16);
 }
-:root[data-theme="light"] .flow {
-  --flow-a: rgba(255, 170, 120, 0.85);
-  --flow-b: #fff6ea;
+:root[data-theme="light"] .composer {
+  --halo-a: rgba(255, 214, 178, 0.5);
+  --halo-b: rgba(255, 224, 196, 0.22);
 }
-.flow-ring,
-.flow-halo {
+.composer-halo {
   position: absolute;
   inset: -4px;
-  padding: 2px;
-  border-radius: 28px;
+  border-radius: 30px;
   pointer-events: none;
-  background: conic-gradient(
-    from 0deg,
-    transparent 0 52%,
-    var(--flow-a) 70%,
-    var(--flow-b) 84%,
-    var(--flow-a) 92%,
-    transparent 100%
-  );
-  -webkit-mask:
-    linear-gradient(#000 0 0) content-box,
-    linear-gradient(#000 0 0);
-  -webkit-mask-composite: xor;
-  mask:
-    linear-gradient(#000 0 0) content-box,
-    linear-gradient(#000 0 0);
-  mask-composite: exclude;
-  animation: flow-orbit 4.2s linear infinite;
+  opacity: 0;
+  box-shadow:
+    0 0 0 1px var(--halo-a),
+    0 0 14px 1px var(--halo-b),
+    0 0 26px 4px var(--halo-b);
+  transition: opacity 0.9s ease;
 }
-.flow-halo {
-  filter: blur(8px);
-  opacity: 0.55;
+.composer:focus-within .composer-halo {
+  opacity: 1;
+  transition: opacity 0.35s ease;
+  animation: halo-breathe 2.5s ease-in-out 0.35s infinite;
 }
-@keyframes flow-orbit {
-  from {
-    transform: rotate(0deg);
+@keyframes halo-breathe {
+  0%,
+  100% {
+    opacity: 1;
   }
-  to {
-    transform: rotate(360deg);
+  50% {
+    opacity: 0.5;
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .flow-halo {
-    display: none;
-  }
-  .flow-ring {
+  .composer:focus-within .composer-halo {
     animation: none;
   }
 }
