@@ -188,6 +188,9 @@ export default function Chat() {
   // 活干完先停住动画、所有光缓缓淡掉（1.4 秒）再撤掉这层，回到完全静止的普通输入框
   const runningTasks = useRunningTasks();
   const [sweep, setSweep] = useState({ shown: false, on: false });
+  // 输入框「正在用」：光标在里面或有事在跑时，一圈暖白流光沿边框绕一圈；
+  // 松手离开且没事在跑就整个撤掉，回到平时干净的边框。
+  const [typing, setTyping] = useState(false);
   useEffect(() => {
     if (runningTasks > 0) {
       setSweep({ shown: true, on: true });
@@ -723,6 +726,8 @@ export default function Chat() {
   };
 
 
+  const flow = typing || sweep.shown;
+
   return (
     <div
       className="relative flex h-dvh flex-col overflow-hidden"
@@ -806,16 +811,14 @@ export default function Chat() {
           {att.hint && <div className="mb-2 text-center text-xs text-[var(--faint)]">{att.hint}</div>}
           {micHint && <div className="mb-2 text-center text-xs text-[var(--faint)]">{micHint}</div>}
           <div
-            className={`${sweep.shown ? `sweep ${sweep.on ? "sweep-on" : ""}` : ""} flex items-end gap-2 rounded-[26px] border bg-[var(--panel)] py-2 pr-2 pl-5 shadow-[var(--shadow)] backdrop-blur-xl transition-colors ${
+            className={`${flow ? "flow" : ""} relative isolate flex items-end gap-2 rounded-[26px] border bg-[var(--panel)] py-2 pr-2 pl-5 shadow-[var(--shadow)] backdrop-blur-xl transition-colors ${
               att.dragging ? "border-[var(--dot)]" : "border-[var(--border)]"
             }`}
           >
-            {sweep.shown && (
+            {flow && (
               <>
-                <span className="sweep-inner" aria-hidden />
-                <span className="sweep-rim" aria-hidden />
-                <span className="sweep-band" aria-hidden />
-                <span className="sweep-outer" aria-hidden />
+                <span className="flow-ring" aria-hidden />
+                <span className="flow-halo" aria-hidden />
               </>
             )}
             <div className="min-w-0 flex-1 pt-1">
@@ -830,6 +833,8 @@ export default function Chat() {
                 localStorage.setItem(DRAFT_KEY, e.target.value);
               }}
               onKeyDown={onKeyDown}
+              onFocus={() => setTyping(true)}
+              onBlur={() => setTyping(false)}
               onCompositionStart={() => (composing.current = true)}
               onCompositionEnd={() => (composing.current = false)}
               placeholder="说点什么…"

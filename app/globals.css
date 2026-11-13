@@ -353,124 +353,65 @@ ol.md-list {
   animation: breathe 1.6s ease-in-out infinite;
 }
 
-/* 有任务在跑时：任务输入框顶部边缘一条暖白流光，从左往右扫过。
-    只贴顶部一条；不沿边框绕圈（那会显得张扬）。：
-    高 3px、两端渐隐，核心到接近全白；单程约 3.1 秒匀速，扫到右端立刻从左边接着出来；
-    光在盒外晕开一圈柔和的暖橙余辉（position: absolute，不算进滚动区，不会多出滚动条），
-    扫光经过的地方顶部内缘再起一层暖白通透的光晕；卡片主体只贴极淡一层同色内晕，边框其余部分不亮。
-    没有活在跑时这层不在 DOM 里（Chat.tsx 按 runningTasks 才挂），卡片就是完全静止的普通样子；
-    活干完时动画停住、所有光在 1.4 秒里缓缓淡掉再卸载，不会「啪」地断掉。
-    所有层都 pointer-events: none，不碰输入、光标和点击。减动效时只留一条静止的顶光。 */
-.sweep {
-  position: relative;
+/* 输入框「正在用」：一圈暖白流光沿边框慢慢绕一圈（这是他一开始就提给输入框的那效果）。
+    光标在输入框里、或者后台有活在跑时才出现；离开输入框、活也干完了，这层直接不在 DOM 里，
+    输入框就是平时那圈干净的边框，不会一直亮。
+    构成：贴着边框一道 2px 的流光（透明 0–52% → 暖白 70% → 近白 #fffaf3 84% → 暖白 92% → 透明），
+    外面再透一层同色柔光（模糊 8px）；颜色跟明暗主题走（--flow-a / --flow-b），浅色主题用偏暖的蜜桃白。
+    光带是 conic-gradient，从边框上方正中起步，4.2 秒匀速绕一整圈，不闪、不来回晃。
+    mask 只留边框那一圈 2px，光始终贴着边框走，不盖住里面的字；
+    所有层都 pointer-events: none，不碰输入、光标和点击。减动效时去掉外圈柔光，只留一道静止的暖白边框。 */
+.flow {
+  --flow-a: rgba(255, 228, 190, 0.9);
+  --flow-b: #fffaf3;
 }
-.sweep-band {
+:root[data-theme="light"] .flow {
+  --flow-a: rgba(255, 170, 120, 0.85);
+  --flow-b: #fff6ea;
+}
+.flow-ring,
+.flow-halo {
   position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 3px;
+  inset: -4px;
+  padding: 2px;
+  border-radius: 28px;
   pointer-events: none;
-  border-radius: inherit;
-  overflow: hidden;
-  transition: opacity 1.4s ease-out;
-}
-.sweep-band::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(
-    90deg,
-    rgba(255, 232, 204, 0) 0%,
-    rgba(255, 236, 210, 0.5) 22%,
-    rgba(255, 246, 232, 0.98) 44%,
-    #fffaf3 52%,
-    rgba(255, 246, 232, 0.98) 60%,
-    rgba(255, 236, 210, 0.5) 78%,
-    rgba(255, 232, 204, 0) 100%
+  background: conic-gradient(
+    from 0deg,
+    transparent 0 52%,
+    var(--flow-a) 70%,
+    var(--flow-b) 84%,
+    var(--flow-a) 92%,
+    transparent 100%
   );
-  transform: translateX(-100%);
-  animation: sweep-run 3.1s linear infinite;
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  animation: flow-orbit 4.2s linear infinite;
 }
-/* 盒外柔和的余辉：跟着光带一起走，两端渐隐，不描边、不绕圈 */
-.sweep-outer {
-  position: absolute;
-  top: -10px;
-  left: 0;
-  right: 0;
-  height: 22px;
-  pointer-events: none;
-  overflow: hidden;
-  filter: blur(6px);
-  opacity: 0.7;
-  transition: opacity 1.4s ease-out;
+.flow-halo {
+  filter: blur(8px);
+  opacity: 0.55;
 }
-.sweep-outer::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(
-    90deg,
-    rgba(255, 206, 156, 0) 0%,
-    rgba(255, 214, 168, 0.4) 24%,
-    rgba(255, 234, 208, 0.92) 50%,
-    rgba(255, 214, 168, 0.4) 76%,
-    rgba(255, 206, 156, 0) 100%
-  );
-  transform: translateX(-100%);
-  animation: sweep-run 3.1s linear infinite;
-}
-/* 扫光经过的顶部内缘：一层更快淡入淡出的暖白光晕 */
-.sweep-rim {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 72px;
-  pointer-events: none;
-  border-radius: inherit;
-  overflow: hidden;
-  mix-blend-mode: screen;
-  transition: opacity 1.4s ease-out;
-}
-.sweep-rim::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: radial-gradient(58% 100% at 50% 0%, rgba(255, 238, 214, 0.5) 0%, rgba(255, 226, 194, 0.14) 45%, rgba(255, 226, 194, 0) 78%);
-  transform: translateX(-100%);
-  animation: sweep-run 3.1s linear infinite;
-}
-@keyframes sweep-run {
+@keyframes flow-orbit {
   from {
-    transform: translateX(-100%);
+    transform: rotate(0deg);
   }
   to {
-    transform: translateX(100%);
+    transform: rotate(360deg);
   }
-}
-/* 活干完那一小会儿：动画先停住，光缓缓淡掉 */
-.sweep:not(.sweep-on) .sweep-band,
-.sweep:not(.sweep-on) .sweep-rim {
-  opacity: 0;
-}
-.sweep:not(.sweep-on) .sweep-band::before,
-.sweep:not(.sweep-on) .sweep-outer::before,
-.sweep:not(.sweep-on) .sweep-rim::before {
-  animation-play-state: paused;
-}
-.sweep:not(.sweep-on) .sweep-outer {
-  opacity: 0;
 }
 @media (prefers-reduced-motion: reduce) {
-  .sweep-band::before {
-    animation: none;
-    transform: translateX(0);
-    opacity: 0.5;
-  }
-  .sweep-outer,
-  .sweep-rim {
+  .flow-halo {
     display: none;
+  }
+  .flow-ring {
+    animation: none;
   }
 }
 
