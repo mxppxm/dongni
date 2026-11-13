@@ -3,7 +3,6 @@
 import { AnimatePresence, motion } from "motion/react";
 import { Check, ListTodo, LoaderCircle, X } from "lucide-react";
 import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
-import { flushSync } from "react-dom";
 import Balance from "./Balance";
 
 type Task = {
@@ -142,44 +141,38 @@ function Detail({ t, now, onClose }: { t: Task; now: number; onClose: () => void
   );
 }
 
-/** 卡片一圈 1.5px 的光所在的位置：外面那层只铺光，里面照常是原来的样子，没光时露出来还是原来的边框 */
-const RING_PAD = "[padding:1.5px;border-radius:calc(var(--radius-md)+1.5px)!important]";
-const RING_OFF = "[border-color:transparent]";
-
-function Row({ t, now, open, onToggle, ring }: { t: Task; now: number; open: boolean; onToggle: () => void; ring: boolean }) {
+function Row({ t, now, open, onToggle }: { t: Task; now: number; open: boolean; onToggle: () => void }) {
   return (
     <motion.li layout initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} transition={{ duration: 0.3 }}>
-      <div className={`${ring ? "ring ring-on" : ""} ${RING_PAD}`}>
-        <button
-          type="button"
-          onClick={onToggle}
-          aria-expanded={open}
-          className={`flex w-full items-start gap-2 rounded-xl border px-2 py-1.5 text-left transition-colors ${ring ? RING_OFF : "border-transparent"} ${open ? "bg-[var(--hover)]" : "hover:bg-[var(--hover)]"}`}
-        >
-          <span className="mt-[3px] flex h-3.5 w-3.5 shrink-0 items-center justify-center">
-            {t.status === "running" ? (
-              <LoaderCircle size={13} className="animate-spin text-[var(--dot)]" />
-            ) : t.status === "done" ? (
-              <Check size={13} className="text-[var(--faint)]" />
-            ) : (
-              <X size={13} className="text-[#f05252]/70" />
-            )}
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={open}
+        className={`flex w-full items-start gap-2 rounded-xl px-2 py-1.5 text-left transition-colors ${open ? "bg-[var(--hover)]" : "hover:bg-[var(--hover)]"}`}
+      >
+        <span className="mt-[3px] flex h-3.5 w-3.5 shrink-0 items-center justify-center">
+          {t.status === "running" ? (
+            <LoaderCircle size={13} className="animate-spin text-[var(--dot)]" />
+          ) : t.status === "done" ? (
+            <Check size={13} className="text-[var(--faint)]" />
+          ) : (
+            <X size={13} className="text-[#f05252]/70" />
+          )}
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className={`block truncate text-[13px] ${t.status === "running" ? "text-[var(--text)]" : "text-[var(--dim)]"}`} title={t.title}>
+            {t.title}
           </span>
-          <span className="min-w-0 flex-1">
-            <span className={`block truncate text-[13px] ${t.status === "running" ? "text-[var(--text)]" : "text-[var(--dim)]"}`} title={t.title}>
-              {t.title}
-            </span>
-            <span className="block text-[11px] text-[var(--faint)] tabular-nums">
-              {t.status === "running" ? `已 ${took(now - t.startedAt)}` : ago(t.endedAt ?? t.startedAt, now)}
-            </span>
-            {t.status === "running" && liveLine(t) && (
-              <span className={`block truncate text-[11px] ${stalled(t) ? "text-[#f05252]/80" : "text-[var(--dim)]"}`} title={liveLine(t)}>
-                {liveLine(t)}
-              </span>
-            )}
+          <span className="block text-[11px] text-[var(--faint)] tabular-nums">
+            {t.status === "running" ? `已 ${took(now - t.startedAt)}` : ago(t.endedAt ?? t.startedAt, now)}
           </span>
-        </button>
-      </div>
+          {t.status === "running" && liveLine(t) && (
+            <span className={`block truncate text-[11px] ${stalled(t) ? "text-[#f05252]/80" : "text-[var(--dim)]"}`} title={liveLine(t)}>
+              {liveLine(t)}
+            </span>
+          )}
+        </span>
+      </button>
       <AnimatePresence initial={false}>
         {open && (
           <motion.div
@@ -187,11 +180,9 @@ function Row({ t, now, open, onToggle, ring }: { t: Task; now: number; open: boo
             animate={{ height: "auto", opacity: 1 }}
             exit={{ height: 0, opacity: 0 }}
             transition={{ duration: 0.25 }}
-            className={`${ring ? "ring ring-on" : ""} ${RING_PAD} overflow-hidden`}
+            className="overflow-hidden pl-5 pr-0.5"
           >
-            <div className="pl-5 pr-0.5">
-              <Detail t={t} now={now} onClose={onToggle} />
-            </div>
+            <Detail t={t} now={now} onClose={onToggle} />
           </motion.div>
         )}
       </AnimatePresence>
@@ -199,8 +190,8 @@ function Row({ t, now, open, onToggle, ring }: { t: Task; now: number; open: boo
   );
 }
 
-/* ---------- 在跑的活有几件：输入框的流光跟着它走 ---------- */
-// 0 件就是一件在跑的都没有
+/* ---------- 在跑的活有几件：输入框边框的流光跟着它走 ---------- */
+// 0 件就是在跑/在派/在改/排队的都没有；1~2 件算一档；3 件以上一档
 let runningCount = 0;
 const busyHooks = new Set<() => void>();
 const subscribeBusy = (fn: () => void) => {
@@ -209,18 +200,10 @@ const subscribeBusy = (fn: () => void) => {
     busyHooks.delete(fn);
   };
 };
-/** 一路活收尾、一件在跑的都没有了：等它的光淡掉再撤 */
-const ringOff = new Map<string, ReturnType<typeof setTimeout>>();
-/** 改了在跑的件数：先通知输入框，再让整套任务列表在 paint 之前跟着重画，光一出来不用等下一拍 */
 const setRunningCount = (n: number) => {
+  if (n === runningCount) return;
   runningCount = n;
-  flushSync(() => busyHooks.forEach((fn) => fn()));
-};
-const later = (k: string, ms: number, fn: () => void) => {
-  clearTimeout(ringOff.get(k));
-  const t = setTimeout(fn, ms);
-  t.unref?.();
-  ringOff.set(k, t);
+  busyHooks.forEach((fn) => fn());
 };
 /** 当前在跑的活有几件（0 表示闲着） */
 export function useRunningTasks() {
@@ -231,15 +214,9 @@ export function useRunningTasks() {
   );
 }
 
-/** 左边和抽屉里各画一份，各自记自己每张卡片的流动光开没开 */
-const SLOTS = ["left", "drawer"] as const;
-type Slot = (typeof SLOTS)[number];
-
 /** 左边的任务栏：她动手干的事一件件列着，跑着的转圈，点开能看细节和结果 */
 export default function Tasks() {
   const [tasks, setTasks] = useState<Task[]>([]);
-  // 哪些卡片的流动光还挂着：新开的活挂上（等它那一拍的大圈先转好再亮），收尾的留 1 秒淡掉再摘
-  const [ringed, setRinged] = useState<Record<Slot, number[]>>({ left: [], drawer: [] });
   const [now, setNow] = useState(() => Date.now());
   const [drawer, setDrawer] = useState(false);
   const [openId, setOpenId] = useState<number | null>(null);
@@ -269,33 +246,15 @@ export default function Tasks() {
 
   useEffect(() => setNow(Date.now()), [tasks]);
 
-  useEffect(() => {
-    const runningIds = tasks.filter((t) => t.status === "running").map((t) => t.id);
-    const past = new Set(tasks.filter((t) => t.status !== "running").map((t) => t.id));
-    setRinged((cur) => {
-      const next = {} as Record<Slot, number[]>;
-      for (const slot of SLOTS) {
-        const gone = new Set(cur[slot].filter((id) => past.has(id)));
-        for (const id of runningIds) if (!cur[slot].includes(id) && cur[slot].length > 0) gone.add(id);
-        gone.forEach((id) => later(`${slot}:${id}`, 1000, () => setRinged((c) => ({ ...c, [slot]: c[slot].filter((x) => x !== id) }))));
-        const list = cur[slot].filter((id) => !gone.has(id));
-        for (const id of runningIds) if (!list.includes(id)) list.push(id);
-        next[slot] = list;
-      }
-      const same = SLOTS.every((slot) => next[slot].length === cur[slot].length && next[slot].every((id, i) => id === cur[slot][i]));
-      return same ? cur : next;
-    });
-  }, [tasks]);
-
   const has = tasks.length > 0;
 
   const toggle = (id: number) => setOpenId((cur) => (cur === id ? null : id));
 
-  const list = (slot: Slot) => (
+  const list = () => (
     <ul className="scroll-thin min-h-0 flex-1 space-y-0.5 overflow-y-auto overscroll-contain pr-0.5">
       <AnimatePresence initial={false}>
         {tasks.map((t) => (
-          <Row key={t.id} t={t} now={now} open={openId === t.id} onToggle={() => toggle(t.id)} ring={ringed[slot].includes(t.id)} />
+          <Row key={t.id} t={t} now={now} open={openId === t.id} onToggle={() => toggle(t.id)} />
         ))}
       </AnimatePresence>
     </ul>
@@ -309,7 +268,7 @@ export default function Tasks() {
         {has && (
           <>
             <div className="mb-2 shrink-0 px-2 text-xs tracking-wide text-[var(--faint)] select-none">任务</div>
-            {list("left")}
+            {list()}
           </>
         )}
       </aside>
@@ -344,7 +303,7 @@ export default function Tasks() {
             >
               <Balance />
               <div className="mb-2 shrink-0 px-2 text-xs tracking-wide text-[var(--faint)] select-none">任务</div>
-              {list("drawer")}
+              {list()}
             </motion.aside>
           </>
         )}

@@ -474,61 +474,6 @@ ol.md-list {
   }
 }
 
-/* 任务卡片「运行中」：整圈边框跑一道流动光。
-     参数原样照搬他给过的示例（输入框的光那一段），不在上面自己调：
-     深底打底 → 一圈 1.5px 的光逐帧旋过（透明 0–55%、淡青 68%、青 #7dd3fc 82%、紫 #a78bfa 90%、97% 淡出，
-     头亮尾长），光带本身虚化 8px；3.4 秒匀速绕一圈，外面再一圈同色柔光透出来。
-     光的强度、粗细、颜色、速度、模糊都按示例；示例里线宽是外层 1.5px，卡片这块再让出同一圈 1.5px 给光。
-     平时卡片完全不发光；全部任务收尾后光停在原地，1 秒里慢慢淡掉，再撤掉这层。 */
-.ring {
-  position: relative;
-  overflow: hidden;
-  background: #181b20;
-}
-.ring::before,
-.ring::after {
-  content: "";
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  width: 260%;
-  aspect-ratio: 1;
-  transform: translate(-50%, -50%) rotate(0deg);
-  background: conic-gradient(from 0deg, transparent 0 55%, rgba(125, 211, 252, 0.05) 68%, #7dd3fc 82%, #a78bfa 90%, transparent 97%);
-  animation: ring-spin 3.4s linear infinite;
-  opacity: 1;
-  transition: opacity 1s linear;
-  pointer-events: none;
-}
-.ring::before {
-  filter: blur(8px);
-}
-.ring::after {
-  padding: 1.5px;
-  border-radius: calc(var(--radius-md) + 1.5px);
-  -webkit-mask:
-    linear-gradient(#000 0 0) content-box,
-    linear-gradient(#000 0 0);
-  -webkit-mask-composite: xor;
-  mask-composite: exclude;
-}
-@keyframes ring-spin {
-  to {
-    transform: translate(-50%, -50%) rotate(360deg);
-  }
-}
-.ring:not(.ring-on)::before,
-.ring:not(.ring-on)::after {
-  animation-play-state: paused;
-  opacity: 0;
-}
-@media (prefers-reduced-motion: reduce) {
-  .ring::before,
-  .ring::after {
-    animation: none;
-  }
-}
-
 /* ================= 图片、表格、图表、卡片、语音、附件 ================= */
 :root,
 :root[data-theme="dark"] {
