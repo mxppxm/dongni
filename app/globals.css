@@ -353,136 +353,105 @@ ol.md-list {
   animation: breathe 1.6s ease-in-out infinite;
 }
 
-/* 输入框聚焦时的流光边框 */
-@property --beam {
-  syntax: "<angle>";
-  initial-value: 0deg;
-  inherits: false;
-}
-@keyframes beam-spin {
-  to {
-    --beam: 360deg;
-  }
-}
-.beam {
+/* 有任务在跑时：任务输入框顶部边缘一条窄的暖白柔光带，从左往右慢慢扫过。
+   只贴顶部一条；不沿边框绕圈（那会显得张扬）。参数照他给的：
+   高 2px、两端渐隐；单程约 3.8 秒匀速，扫到右端立刻从左边接着出来；光在盒外再晕开一点点模糊；
+   颜色暖白偏一点橙、低饱和，核心不刺眼；卡片里只贴极淡一层同色内晕，边框其余部分不亮。
+   没有活在跑时这层不在 DOM 里（Chat.tsx 按 runningTasks 才挂），卡片就是完全静止的普通样子；
+   活干完时动画淡出 0.7 秒再卸载，不会「啪」地断掉。
+   所有层都 pointer-events: none，不碰输入、光标和点击。 */
+.sweep {
   position: relative;
 }
-.beam::before {
-  content: "";
+.sweep-band {
   position: absolute;
-  inset: -1px;
-  border-radius: inherit;
-  padding: 1px;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
   pointer-events: none;
-  background: conic-gradient(from var(--beam), transparent 0 65%, var(--beam-a) 78%, var(--beam-b) 88%, transparent 100%);
-  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
-  -webkit-mask-composite: xor;
-  mask-composite: exclude;
-  opacity: 0;
-  transition: opacity 0.4s;
-  animation: beam-spin 5s linear infinite;
+  border-radius: inherit;
+  overflow: hidden;
+  transition: opacity 0.7s ease-out;
 }
-.beam:focus-within::before {
-  opacity: 1;
-}
-
-/* 有活在跑时绕输入框流动的光。参数照他给的示例，不自己调：
-   边框 2px；光段占一圈约 30%，后面拖一条约 15% 长的渐隐尾巴；颜色 #eaf6ff → #7fd4ff；带 12px 模糊外发光；
-   匀速 2.5 秒绕一圈。没活时这层完全不画，边框是原来的静态灰；活全干完不「啪」地关掉，1.2 秒淡到透明再撤。
-   两层都 pointer-events: none，不碰输入、光标和点击。
-   这一节用 !important 压过同名的 Tailwind 工具类（比如拖文件时的 border-[var(--dot)]），
-   那类样式在本文件之后才生成，不压的话流光时边框仍是 1px、拖拽时还会变色。 */
-@property --flow {
-  syntax: "<angle>";
-  initial-value: 0deg;
-  inherits: false;
-}
-@keyframes flow-spin {
-  from {
-    --flow: 0deg;
-  }
-  to {
-    --flow: 360deg;
-  }
-}
-/* 光段从 0deg 起顺着 number 走（屏幕上就是顺时针），彩色的一截在前、尾巴在后面渐隐收干净 */
-.beam.flow-slow::after,
-.beam.flow-fast::after,
-.beam.flow-slow::before,
-.beam.flow-fast::before {
+.sweep-band::before {
   content: "";
   position: absolute;
   inset: 0;
-  border-radius: inherit;
-  pointer-events: none;
-  background: conic-gradient(
-    from var(--flow),
-    transparent 0deg 195deg,
-    rgba(127, 212, 255, 0) 195deg,
-    rgba(127, 212, 255, 0.18) 225deg,
-    rgba(127, 212, 255, 0.45) 258deg,
-    rgba(160, 224, 255, 0.75) 288deg,
-    rgba(202, 239, 255, 0.94) 312deg,
-    #eaf6ff 334deg,
-    #eaf6ff 352deg,
-    transparent 360deg
+  background: linear-gradient(
+    90deg,
+    rgba(255, 233, 206, 0) 0%,
+    rgba(255, 233, 206, 0.28) 22%,
+    rgba(255, 238, 217, 0.72) 42%,
+    rgba(255, 226, 194, 0.92) 52%,
+    rgba(255, 238, 217, 0.72) 62%,
+    rgba(255, 233, 206, 0.28) 78%,
+    rgba(255, 233, 206, 0) 100%
   );
-  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
-  -webkit-mask-composite: xor;
-  mask-composite: exclude;
-  animation: flow-spin 2.5s linear infinite;
-  transition: opacity 1.2s ease-out;
+  transform: translateX(-100%);
+  animation: sweep-run 3.8s linear infinite;
 }
-/* 芯：边框上整整 2px 的那道光 */
-.beam.flow-slow::after,
-.beam.flow-fast::after {
-  padding: 2px;
-  opacity: 1;
+.sweep-outer {
+  position: absolute;
+  top: -2px;
+  left: 0;
+  right: 0;
+  height: 6px;
+  pointer-events: none;
+  overflow: hidden;
+  filter: blur(3px);
+  opacity: 0.5;
 }
-/* 外发光：同一圈光做得更宽、糊 12px，往边框内外晕开一层 */
-.beam.flow-slow::before,
-.beam.flow-fast::before {
-  padding: 12px;
-  filter: blur(12px);
-  opacity: 0.85;
+.sweep-outer::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    rgba(255, 226, 190, 0) 0%,
+    rgba(255, 226, 190, 0.35) 22%,
+    rgba(255, 238, 217, 0.85) 50%,
+    rgba(255, 226, 190, 0.35) 78%,
+    rgba(255, 226, 190, 0) 100%
+  );
+  transform: translateX(-100%);
+  animation: sweep-run 3.8s linear infinite;
 }
-/* 没活：光看不见（边框还是原来的静态灰），这时不用再转，少占一份渲染 */
-.beam.flow-off::after,
-.beam.flow-off::before {
+.sweep-inner {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 40px;
+  pointer-events: none;
+  background: linear-gradient(180deg, rgba(255, 214, 170, 0.05) 0%, rgba(255, 214, 170, 0) 100%);
+  transition: opacity 0.7s ease-out;
+}
+@keyframes sweep-run {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+/* 活干完那一小会儿先停住再淡 */
+.sweep:not(.sweep-on) .sweep-band,
+.sweep:not(.sweep-on) .sweep-inner {
   opacity: 0;
+}
+.sweep:not(.sweep-on) .sweep-band::before,
+.sweep:not(.sweep-on) .sweep-outer::before {
   animation-play-state: paused;
 }
-
-/* 这几条带 !important：边框宽和色要压过 Chat.tsx 里的 Tailwind 工具类和拖文件时的 border-[var(--dot)]；
-   opacity 要压过这里的 .beam:focus-within::before（输入框一聚焦就会中）。 */
-.beam.flow-slow,
-.beam.flow-fast {
-  border-width: 2px !important;
-  border-color: transparent !important;
-}
-.beam.flow-slow::after,
-.beam.flow-fast::after,
-.beam.flow-slow::before,
-.beam.flow-fast::before {
-  opacity: 1 !important;
-  animation-play-state: running !important;
-}
-.beam.flow-off::after,
-.beam.flow-off::before {
-  opacity: 0 !important;
-}
-
 @media (prefers-reduced-motion: reduce) {
-  .beam.flow-slow::after,
-  .beam.flow-fast::after,
-  .beam.flow-slow::before,
-  .beam.flow-fast::before {
-    animation: none !important;
-    background: linear-gradient(135deg, #eaf6ff, #7fd4ff);
+  .sweep-band::before,
+  .sweep-outer::before {
+    animation: none;
+    transform: translateX(0);
   }
-  .beam.flow-off::after,
-  .beam.flow-off::before {
-    background: none;
+  .sweep-outer {
+    display: none;
   }
 }
 

@@ -184,9 +184,19 @@ export default function Chat() {
   const [memCount, setMemCount] = useState<number | null>(null);
   const [pulse, setPulse] = useState(0);
   const [theme, setTheme] = useState<Theme>("light");
-  // 有后台的活在跑（派出去的、改自己的、排队的）；两件以下一档，三件以上一档，闲着就灭
+  // 有后台的活在跑（派出去的、改自己的、排队的）：输入框顶部一条光带慢慢扫；
+  // 活干完先把动画淡掉（0.7 秒）再撤掉这层，回到完全静止的普通输入框
   const runningTasks = useRunningTasks();
-  const flow = runningTasks ? (runningTasks >= 3 ? "fast" : "slow") : "off";
+  const [sweep, setSweep] = useState({ shown: false, on: false });
+  useEffect(() => {
+    if (runningTasks > 0) {
+      setSweep({ shown: true, on: true });
+      return;
+    }
+    setSweep((s) => (s.shown ? { ...s, on: false } : s));
+    const t = setTimeout(() => setSweep({ shown: false, on: false }), 720);
+    return () => clearTimeout(t);
+  }, [runningTasks]);
 
   useEffect(() => {
     setTheme(document.documentElement.dataset.theme === "dark" ? "dark" : "light");
@@ -796,10 +806,17 @@ export default function Chat() {
           {att.hint && <div className="mb-2 text-center text-xs text-[var(--faint)]">{att.hint}</div>}
           {micHint && <div className="mb-2 text-center text-xs text-[var(--faint)]">{micHint}</div>}
           <div
-            className={`beam flow-${flow} flex items-end gap-2 rounded-[26px] border bg-[var(--panel)] py-2 pr-2 pl-5 shadow-[var(--shadow)] backdrop-blur-xl transition-colors ${
+            className={`${sweep.shown ? `sweep ${sweep.on ? "sweep-on" : ""}` : ""} flex items-end gap-2 rounded-[26px] border bg-[var(--panel)] py-2 pr-2 pl-5 shadow-[var(--shadow)] backdrop-blur-xl transition-colors ${
               att.dragging ? "border-[var(--dot)]" : "border-[var(--border)]"
             }`}
           >
+            {sweep.shown && (
+              <>
+                <span className="sweep-inner" aria-hidden />
+                <span className="sweep-band" aria-hidden />
+                <span className="sweep-outer" aria-hidden />
+              </>
+            )}
             <div className="min-w-0 flex-1 pt-1">
             <AttachmentStrip items={att.items} onRemove={att.remove} />
             <textarea
