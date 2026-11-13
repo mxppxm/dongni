@@ -19,6 +19,7 @@ import { saveVoiceConfig, voiceReady } from "./voiceconfig";
 import { CAP_DIR, capPromptLines, capStateLine, capTitle, capTools, runCap } from "./capdir";
 import { mcpStateLine, mcpTitle, mcpTools, runMcp } from "./mcp";
 import { closeGap, noteGap, openGaps } from "./gaps";
+import { inLane } from "./lane";
 
 /**
  * 查电脑的工具：全部只读，不能改、删、执行任意命令（repair_self 除外，它只改本项目，见 selfrepair.ts）。
@@ -229,7 +230,9 @@ function drawImage(args: { prompt: string; self?: boolean }) {
       finishTask(taskId, r.ok, r.ok ? r.markdown : r.message.slice(0, 200));
       const fact = r.ok ? `你刚才在后台画的「${short(args.prompt, 40)}」画好了，图会贴在你这句话后面。` : `你刚才在后台画的「${short(args.prompt, 40)}」没画出来，真实原因：${r.message}`;
       const said = await speakAsHer(`${fact}用一两句自然地告诉他，接得上刚才的话头。`, "").catch(() => "");
-      postAssistant([said.trim(), r.ok ? r.markdown : said.trim() ? "" : `没画出来：${r.message}`].filter(Boolean).join("\n\n"));
+      const text = [said.trim(), r.ok ? r.markdown : said.trim() ? "" : `没画出来：${r.message}`].filter(Boolean).join("\n\n");
+      // 排进回复那条队里再写进对话：不会插在她正说到一半的回复中间
+      await inLane(async () => postAssistant(text));
     })
     .catch((e) => {
       const msg = e instanceof Error ? e.message : String(e);
@@ -666,8 +669,8 @@ const IMPL: Record<string, (a: never, ctx?: ToolCtx) => Promise<string>> = {
     return `记下了：${city.trim()}。以后穿什么跟着那边的天气走。`;
   }) as (a: never, ctx?: ToolCtx) => Promise<string>,
   take_photo: (async () => {
-    void takeDailyPhoto(true);
-    return "开始拍了：会先在对话里跟他说一声，拍好（要一两分钟）自动发给他、放进相册。现在别说已经拍好。";
+    void takeDailyPhoto(true, true);
+    return "开始拍了（要一两分钟），拍好会自动发给他、放进相册。现在只用一句话跟他说你去拍了，别说已经拍好。";
   }) as (a: never, ctx?: ToolCtx) => Promise<string>,
   create_mood: (async ({ name, when, pose }: { name: string; when?: string; pose: string }) => {
     void createMood(name, when ?? "", pose);
@@ -818,7 +821,7 @@ export async function runToolSoon(name: string, rawArgs: string, ctx: ToolCtx): 
       `「${what}」做完了：${out.slice(0, 300)}`,
       { fresh: true },
     ).catch(() => `「${what}」做完了：${out.slice(0, 300)}`);
-    postAssistant(cards ? `${said}\n\n${cards}` : said);
+    await inLane(async () => postAssistant(cards ? `${said}\n\n${cards}` : said));
   });
   return `${BACKGROUND_PREFIX}（${what}）比较慢，已经转到后台接着做，做完会自动告诉他。现在别说做好了、也别编结果，就跟他说一句在弄，然后接着聊。`;
 }

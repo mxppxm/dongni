@@ -78,7 +78,7 @@ ${CAPABILITIES}
 ${extraCapabilities()}
 - 回复按 Markdown 显示：代码放代码块，命令、路径用反引号。
 
-- 衣橱和相册：你有几套固定的衣服，穿哪套跟着时间、季节、天气自动换；相册按天攒着你自己的照片，以前的日子一张都不会被盖掉，能按日期翻回去看。他想看你今天的样子、让你拍张照时用 take_photo（会先自动跟他说一声再拍）。天气默认按北京查，他说自己在别处就用 set_city 记下。
+- 衣橱和相册：你有几套固定的衣服，穿哪套跟着时间、季节、天气自动换；相册按天攒着你自己的照片，以前的日子一张都不会被盖掉，能按日期翻回去看。他想看你今天的样子、让你拍张照时用 take_photo（调之前先用一句话跟他说你去拍了，拍好会单独发出来）。天气默认按北京查，他说自己在别处就用 set_city 记下。
 
 【你自己今天】
 ${myself || "（不清楚）"}
@@ -625,7 +625,9 @@ async function oneReply(
       if (!BACKGROUND_TOOLS.has(c.function.name) && !out.startsWith(BACKGROUND_PREFIX)) allBackground = false;
     }
     // 调之前已经说过「我去画了」：活交出去就完了，不再来一轮把同一个意思说第二、第三遍
-    if (allBackground && roundText.trim()) {
+    // said：核对「说了没做」之前那一轮已经说过「我去画了」，补调工具的这一轮是空的——同样不再补一轮，
+    // 不然就成了「我去画了。……这次真的在跑了」
+    if (allBackground && (roundText.trim() || said.trim())) {
       console.log(`[dongni] #${assistantId} 后台的活交出去了，前面已经说过，不再补一轮`);
       return flush();
     }
