@@ -1,5 +1,5 @@
 import "server-only";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -33,6 +33,22 @@ const PROFILE = process.env.DSH_SUPERAGENT_PROFILE || "superagent";
 const START_EVERY_MS = 3 * 60_000;
 const boot = ((globalThis as unknown as { __dongniDshBoot?: { at: number; busy: boolean } }).__dongniDshBoot ??= { at: 0, busy: false });
 
+/**
+ * superagent 调模型要的 key 放在 ~/.dsh/env（一行一个 KEY=VALUE），只有他的终端会加载；
+ * 这个服务是 launchd 起的，环境里没有——不带上的话它能起来、能收任务，但主会话每次调模型都报缺凭据，活永远没人接单
+ *（2026-11-13 第一件派过去的活就这么卡在评估上）。
+ */
+function dshEnv(): Record<string, string> {
+  const out: Record<string, string> = {};
+  try {
+    for (const line of fs.readFileSync(path.join(os.homedir(), ".dsh", "env"), "utf8").split("\n")) {
+      const m = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+      if (m) out[m[1]] = m[2].trim().replace(/^(["'])(.*)\1$/, "$2");
+    }
+  } catch {}
+  return out;
+}
+
 export function ensureSuperagent(why: string) {
   if (process.env.DONGNI_DSH === "off" || process.env.DONGNI_DSH_AUTOSTART === "off") return;
   if (boot.busy || Date.now() - boot.at < START_EVERY_MS) return;
@@ -45,14 +61,20 @@ export function ensureSuperagent(why: string) {
   boot.at = Date.now();
   boot.busy = true;
   console.log(`[dongni][dsh] 拉起 superagent（${why}）`);
+  const keys = dshEnv();
+  // 这个服务是 launchd 起的，PATH 里没有 Homebrew：脚本要找 tmux
+  const env = { ...process.env, ...keys, PATH: `${process.env.PATH ?? ""}:/opt/homebrew/bin:/usr/local/bin`, LANG: process.env.LANG || "en_US.UTF-8" };
+  // 脚本把它放进 tmux：已经有 tmux 服务在跑的话，新窗口继承的是 tmux 服务自己的环境，不是这里传的——所以两边都放一份
+  for (const [k, v] of Object.entries(keys)) {
+    try {
+      execFileSync("tmux", ["set-environment", "-g", k, v], { env, stdio: "ignore", timeout: 5_000 });
+    } catch {}
+  }
+  if (!Object.keys(keys).length) console.warn("[dongni][dsh] ~/.dsh/env 里没读到 key，superagent 起来后可能调不了模型");
   execFile(
     "/usr/bin/python3",
     [SCRIPT, "start", "--profile", PROFILE, "--url", PANEL],
-    {
-      timeout: 150_000,
-      // 这个服务是 launchd 起的，PATH 里没有 Homebrew：脚本要找 tmux
-      env: { ...process.env, PATH: `${process.env.PATH ?? ""}:/opt/homebrew/bin:/usr/local/bin`, LANG: process.env.LANG || "en_US.UTF-8" },
-    },
+    { timeout: 150_000, env },
     (err, stdout, stderr) => {
       boot.busy = false;
       const said = `${stdout}${stderr}`.trim().split("\n").slice(-3).join(" ｜ ").slice(0, 300);
