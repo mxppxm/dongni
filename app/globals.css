@@ -386,64 +386,167 @@ ol.md-list {
   opacity: 1;
 }
 
-/* 有活在跑时绕输入框流动的一圈光：一圈 3.2 秒，活多时快一点、亮一点；活干完一秒内淡出，平时完全不画 */
-@keyframes flow-spin {
+/* 光走的一圈靠 --flow 转：状态一变就换一条新动画（名字不同），转速在三个状态间平滑接上去，不会一格一格跳。
+   --flow-speed 1 = 一整圈 3 秒；--flow-strength 0~1 = 光有多亮 */
+@property --flow {
+  syntax: "<angle>";
+  initial-value: 0deg;
+  inherits: false;
+}
+@property --flow-speed {
+  syntax: "<number>";
+  initial-value: 1;
+  inherits: false;
+}
+@property --flow-strength {
+  syntax: "<number>";
+  initial-value: 1;
+  inherits: false;
+}
+@keyframes flow-spin-1 {
   to {
-    --beam: 360deg;
+    --flow: 360deg;
   }
 }
-@keyframes flow-breathe {
-  0%,
-  100% {
-    opacity: 0.82;
-  }
-  50% {
-    opacity: 1;
+@keyframes flow-spin-2 {
+  to {
+    --flow: 360deg;
   }
 }
-/* 亮起来 */
-@keyframes flow-in {
+@keyframes flow-spin-3 {
+  to {
+    --flow: 360deg;
+  }
+}
+@keyframes flow-turn-1 {
   from {
-    opacity: 0;
+    --flow: 0deg;
   }
   to {
-    opacity: 1;
+    --flow: 360deg;
   }
+}
+@keyframes flow-turn-2 {
+  from {
+    --flow: 0deg;
+  }
+  to {
+    --flow: 360deg;
+  }
+}
+@keyframes flow-turn-3 {
+  from {
+    --flow: 0deg;
+  }
+  to {
+    --flow: 360deg;
+  }
+}
+
+/* 有活在跑时绕输入框流动的光，分两层：::after 是边框上那道清楚的芯（3px 宽，前面亮、后面渐隐成拖尾，头部一个白亮点），
+   ::before 是同一圈做得更宽、更糊的外发光。两层角度一起走，叠在一起就是一条带光晕的光沿边框跑。
+   活多时更快更亮；活干完 1.8 秒左右平滑淡光再撤掉，平时完全不画。
+   两层都 pointer-events: none，不碰输入、光标和点击。 */
+.beam.flow-slow,
+.beam.flow-fast {
+  --flow-strength: 1;
 }
 .beam.flow-slow::after,
-.beam.flow-fast::after {
+.beam.flow-fast::after,
+.beam.flow-slow::before,
+.beam.flow-fast::before {
   content: "";
   position: absolute;
-  inset: -1px;
+  inset: -1.5px;
   border-radius: inherit;
-  padding: 1px;
   pointer-events: none;
   background: conic-gradient(
-    from var(--beam),
-    transparent 0 55%,
-    color-mix(in srgb, var(--beam-a) 35%, transparent) 72%,
-    var(--beam-a) 84%,
-    var(--beam-b) 95%,
-    transparent 100%
+    from var(--flow),
+    transparent 0deg 120deg,
+    rgba(20, 210, 255, 0) 122deg,
+    rgba(20, 210, 255, 0.06) 150deg,
+    rgba(20, 210, 255, 0.95) 250deg,
+    #22d3ee 276deg,
+    #8b5cf6 306deg,
+    #f472b6 334deg,
+    #fff6fe 353deg,
+    transparent 360deg
   );
   -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
   -webkit-mask-composite: xor;
   mask-composite: exclude;
-  filter: drop-shadow(0 0 1.5px color-mix(in srgb, var(--beam-a) 45%, transparent));
-  transition: opacity 0.6s ease;
-  animation: flow-in 0.9s ease, flow-spin 3.2s linear infinite, flow-breathe 4.6s ease-in-out infinite;
+  opacity: calc(var(--flow-strength) * var(--beam-k, 1));
+  transition:
+    opacity 1.8s ease-out,
+    --flow-speed 1.2s ease,
+    --flow-strength 1.2s ease;
+}
+/* 芯：沿边框 3px 宽的一道亮光 */
+.beam.flow-slow::after,
+.beam.flow-fast::after {
+  padding: 3px;
+  filter: saturate(1.3) brightness(1.15);
+}
+/* 外发光：同一圈光变宽变糊，落在边框内外的柔光 */
+.beam.flow-slow::before,
+.beam.flow-fast::before {
+  --beam-k: 0.62;
+  padding: 9px;
+  filter: blur(7px);
+}
+.beam.flow-slow {
+  --flow-speed: 1;
+}
+.beam.flow-fast {
+  --flow-speed: 1.25;
+  --flow-strength: 1.12;
+  --beam-k: 1.06;
+}
+.beam.flow-off {
+  --flow-strength: 0;
+}
+
+/* 每个状态用自己的动画名：状态一变就换名从头接上，--flow 从 from 走到 360deg，接上时不会倒转。 */
+.beam.flow-slow::after {
+  animation:
+    flow-turn-1 1s ease-out,
+    flow-spin-1 calc(3s / var(--flow-speed)) linear infinite,
+    flow-breathe 4.6s ease-in-out infinite;
 }
 .beam.flow-fast::after {
-  filter: drop-shadow(0 0 1.5px color-mix(in srgb, var(--beam-a) 55%, transparent)) drop-shadow(0 0 3px color-mix(in srgb, var(--beam-b) 22%, transparent));
-  animation: flow-in 0.9s ease, flow-spin 2.6s linear infinite, flow-breathe 4.6s ease-in-out infinite;
+  animation:
+    flow-turn-2 1s ease-out,
+    flow-spin-2 calc(3s / var(--flow-speed)) linear infinite,
+    flow-breathe 4.6s ease-in-out infinite;
+}
+.beam.flow-slow::before {
+  animation:
+    flow-turn-1 1s ease-out,
+    flow-spin-1 calc(3s / var(--flow-speed)) linear infinite;
+}
+.beam.flow-fast::before {
+  animation:
+    flow-turn-2 1s ease-out,
+    flow-spin-2 calc(3s / var(--flow-speed)) linear infinite;
+}
+/* 光灭了这两层已经看不见，只顾着继续转，免得下一次亮起来从头起跑 */
+.beam.flow-off::after,
+.beam.flow-off::before {
+  animation: flow-spin-3 calc(3s / var(--flow-speed)) linear infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {
   .beam.flow-slow::after,
   .beam.flow-fast::after {
     animation: none;
-    opacity: 1;
-    background: linear-gradient(135deg, var(--beam-a), var(--beam-b));
+    padding: 2px;
+    opacity: var(--flow-strength);
+    background: linear-gradient(135deg, #22d3ee, #8b5cf6 55%, #f472b6);
+    filter: none;
+  }
+  .beam.flow-slow::before,
+  .beam.flow-fast::before {
+    display: none;
   }
 }
 
