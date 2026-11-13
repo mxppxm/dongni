@@ -29,8 +29,11 @@ const LOOK =
   "a cheerful 20-year-old East Asian girl with a high messy brown ponytail tied with an orange scrunchie, short wispy bangs, big bright eyes, rosy cheeks";
 const STYLE =
   "Stylized realistic 3D character render, like a modern animated feature film, soft global illumination, high detail, full body from head to shoes clearly visible, no text, no watermark";
+/** 新加的几套走「手机随手拍」的真照片感，跟相册里最近那些一个味道，不是 3D 动画渲染 */
+const PHOTO_STYLE =
+  "Casual phone snapshot taken by a friend, natural window light, real skin texture with pores and fine lines, no beauty retouching, no studio lighting, slightly imperfect framing, full body from head to shoes clearly visible, not a 3D render, not anime, not an illustration, no text, no watermark";
 
-export type Outfit = { key: string; name: string; when: string; wear: string };
+export type Outfit = { key: string; name: string; when: string; wear: string; /** 定妆照要真照片感，不用 3D 渲染那套 */ real?: boolean };
 
 /** 几套固定造型（衣服定死，每次都穿得一模一样） */
 export const OUTFITS: Outfit[] = [
@@ -39,6 +42,9 @@ export const OUTFITS: Outfit[] = [
   { key: "cold", name: "冷天外套", when: "气温低于 12°C", wear: "a camel wool duffle coat, a chunky cream scarf, a brown knit beanie, dark jeans, brown lace-up ankle boots" },
   { key: "run", name: "跑步那身", when: "清晨 6–8 点，天不下雨", wear: "an orange zip running jacket, black running leggings, a white cap, neon running shoes, a sports watch" },
   { key: "home", name: "夜里窝着", when: "晚上 10 点以后到早上 7 点", wear: "a loose oatmeal cardigan over lavender pajamas with tiny star prints, fluffy white slippers" },
+  { key: "indoor", name: "窝着的下午", when: "白天 10°C 以下的室内日子", wear: "杏色粗针织开衫配白圆领T，深棕格纹A字裙，厚羊毛连裤袜，米白软底家居拖鞋", real: true },
+  { key: "leaf", name: "出门踩叶子", when: "冷天出门 3–8°C 晴或多云", wear: "奶白短羽绒服、灰蓝连帽卫衣、直筒牛仔裤、燕麦色粗针织围巾、白色帆布鞋", real: true },
+  { key: "evening", name: "晚上有点讲究", when: "18 点以后出门", wear: "墨绿丝绒连衣裙、黑色薄开衫、细金项链、黑色短靴", real: true },
 ];
 
 /* ---------------- 天气 ---------------- */
@@ -427,7 +433,16 @@ export function pickOutfit(w: Weather | null, d = new Date()): Outfit {
   if (h < 8 && !wet) return byKey("run");
   if (h < 7) return byKey("home");
   if (wet) return byKey("rainy");
-  const cold = w ? (w.feels ?? w.temp) < 12 : season() === "冬";
+  // 体感优先：同样的温度，风一吹就不是一回事
+  const feels = w ? (w.feels ?? w.temp) : undefined;
+  // 18 点以后出门，穿得讲究一点
+  if (h >= 18) return byKey("evening");
+  const clear = !w || w.kind === "sun" || w.kind === "cloud";
+  // 冷天出门踩叶子：3–8°C 的晴或多云
+  if (clear && feels !== undefined && feels >= 3 && feels <= 8) return byKey("leaf");
+  // 冷天下午不出门：窝着那身
+  if (h >= 12 && feels !== undefined && feels <= 12) return byKey("indoor");
+  const cold = feels !== undefined ? feels < 12 : season() === "冬";
   if (cold) return byKey("cold");
   return byKey("sunny");
 }
@@ -516,7 +531,9 @@ export async function ensureWardrobe() {
         `做定妆照「${o.name}」`,
         () =>
           draw(
-            `Same girl as the reference (same face, hair, scrunchie, proportions, same rendering style). ${STYLE}. Fashion lookbook shot, she is wearing ${o.wear}. Standing pose full of energy, plain soft light-grey studio background.`,
+            o.real
+              ? `Same girl as the reference (same face, brown high messy ponytail with an orange scrunchie), but as a real photograph of ${LOOK}, a young adult woman, not the reference's rendering style. She is wearing ${o.wear}. ${PHOTO_STYLE}. Standing relaxed in a quiet room by the window, plain soft background.`
+              : `Same girl as the reference (same face, hair, scrunchie, proportions, same rendering style). ${STYLE}. Fashion lookbook shot, she is wearing ${o.wear}. Standing pose full of energy, plain soft light-grey studio background.`,
             [ANCHOR3D.replace(/\.png$/, ".jpg")],
             file,
           ),
