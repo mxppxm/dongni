@@ -9,7 +9,8 @@ import Markdown from "./Markdown";
 import Mood from "./Mood";
 import Starfield, { type Theme } from "./Starfield";
 import { useRunningTasks } from "./Tasks";
-import { AttachmentStrip, useAttachments } from "./useAttachments";
+import { AttachmentStrip, flushAttachments, useAttachments } from "./useAttachments";
+import useAutoReload from "./useAutoReload";
 import MicButton, { type VoiceSendResult } from "./VoiceRecorder";
 import { setPageQuiet } from "./Voice";
 
@@ -693,6 +694,16 @@ export default function Chat() {
   useEffect(() => {
     if (loaded && !showMap) input.current?.focus();
   }, [loaded, showMap]);
+
+  /* ---------- 后台重启了：自己刷新，草稿和图原样回来 ---------- */
+  const draftRef = useRef("");
+  draftRef.current = draft;
+  useAutoReload(() => {
+    try {
+      localStorage.setItem(DRAFT_KEY, draftRef.current);
+    } catch {}
+    flushAttachments();
+  });
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key !== "Enter" || e.shiftKey) return;

@@ -20,8 +20,33 @@ const readAsDataUrl = (file: File) =>
 
 const bytesOf = (dataUrl: string) => Math.round((dataUrl.length * 3) / 4);
 
+// 还没发出去的图也存住：后台重启页面自动刷新时，图上还挂着的话别丢
+const KEEP_KEY = "dongni:attach";
+const readKept = (): Attachment[] => {
+  try {
+    const list = JSON.parse(localStorage.getItem(KEEP_KEY) || "[]") as Attachment[];
+    return Array.isArray(list) ? list.filter((a) => a?.key && a?.dataUrl) : [];
+  } catch {
+    return [];
+  }
+};
+let kept: Attachment[] | null = null;
+export function keepAttachments(list: Attachment[]) {
+  kept = list;
+  try {
+    if (list.length) localStorage.setItem(KEEP_KEY, JSON.stringify(list));
+    else localStorage.removeItem(KEEP_KEY);
+  } catch {
+    // 图太大存不下就算了，别让输入框跟着出错
+  }
+}
+/** 刷新前把最新的图写进存储（state 的更新可能还没轮到 effect） */
+export function flushAttachments() {
+  if (kept) keepAttachments(kept);
+}
+
 export function useAttachments() {
-  const [items, setItems] = useState<Attachment[]>([]);
+  const [items, setItems] = useState<Attachment[]>(() => readKept());
   const [hint, setHint] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
   const listRef = useRef<Attachment[]>([]);
@@ -30,6 +55,7 @@ export function useAttachments() {
 
   useEffect(() => {
     listRef.current = items;
+    keepAttachments(items);
   }, [items]);
 
   const say = useCallback((text: string) => {
