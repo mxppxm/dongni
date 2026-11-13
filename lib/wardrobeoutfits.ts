@@ -399,6 +399,27 @@ function hits(rule: OutfitRule, ctx: WearContext) {
   return true;
 }
 
+/** 季节，按月份算：3–5 春、6–8 夏、9–11 秋、12–2 冬（和 lib/wardrobe.ts 一致） */
+export const SEASONS = ["春", "夏", "秋", "冬"] as const;
+export type Season = (typeof SEASONS)[number];
+const seasonOf = (month: number): Season => (month >= 3 && month <= 5 ? "春" : month >= 6 && month <= 8 ? "夏" : month >= 9 && month <= 11 ? "秋" : "冬");
+
+/**
+ * 一身衣服适合哪几个季节：看 rule.months；没写 months 的，再看 when 里点名的季节（「秋季阴天…」）；
+ * 都没有就不知道，返回空数组（衣橱里单独放在「其他」）。跨年的月份段（如 11–3）按整圈算。
+ */
+export function outfitSeasons(o: Outfit): Season[] {
+  const months = new Set<number>();
+  const [a, b] = o.rule?.months ?? [];
+  if (a !== undefined && b !== undefined) {
+    const [from, to] = a <= b ? [a, b] : [b, a];
+    for (let m = from; m <= to; m++) months.add(m);
+  } else if (!o.rule?.months) {
+    for (const s of SEASONS) if (o.when.includes(`${s}季`) || o.when.includes(`${s}天`)) months.add(SEASONS.indexOf(s) * 3 + 4);
+  }
+  return SEASONS.filter((s) => [...months].some((m) => seasonOf(m) === s));
+}
+
 /** 带条件的造型里挑一个穿：priority 大的先，同样大的后加的优先 */
 export function pickByRule(ctx: WearContext): Outfit | null {
   let best: Outfit | null = null;

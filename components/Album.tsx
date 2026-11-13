@@ -5,7 +5,11 @@ import { X } from "lucide-react";
 import { useEffect, useState } from "react";
 
 /** 相册（按日期攒，日期倒序，能翻回以前的每一天）和衣橱（几套固定造型，今天穿哪套） */
-type Outfit = { key: string; name: string; when: string; url: string | null };
+type Season = "春" | "夏" | "秋" | "冬";
+type Outfit = { key: string; name: string; when: string; seasons?: Season[]; url: string | null };
+
+/** 衣橱按季节分组，顺序固定；不知道适合哪季的放最后 */
+const SEASONS: (Season | "其他")[] = ["春", "夏", "秋", "冬", "其他"];
 type Photo = {
   id: number;
   date: string;
@@ -32,6 +36,8 @@ export default function Album({ onClose }: { onClose: () => void }) {
   const [data, setData] = useState<Data | null>(null);
   const [tab, setTab] = useState<"album" | "wardrobe">("album");
   const [zoom, setZoom] = useState<string | null>(null);
+  /** 衣橱目前只看哪一页（null = 全部，按季节分组；其余只出该季节的衣服，跨季的每组都会出现一次） */
+  const [season, setSeason] = useState<Season | "其他" | null>(null);
 
   useEffect(() => {
     fetch("/api/album")
@@ -51,6 +57,14 @@ export default function Album({ onClose }: { onClose: () => void }) {
       else out.push({ date: p.date, photos: [p] });
     }
     return out;
+  })();
+
+  const shelf = (() => {
+    const groups = SEASONS.map((s) => ({
+      season: s,
+      items: (data?.outfits ?? []).filter((o) => (s === "其他" ? !o.seasons?.length : o.seasons?.includes(s))),
+    })).filter((g) => g.items.length);
+    return season ? groups.filter((g) => g.season === season) : groups;
   })();
 
   return (
@@ -120,21 +134,44 @@ export default function Album({ onClose }: { onClose: () => void }) {
           ))}
 
         {data && tab === "wardrobe" && (
-          <div className="wardrobe-grid">
-            {data.outfits.map((o) => (
-              <div key={o.key} className={`outfit ${data.today.outfit === o.key ? "outfit-now" : ""}`} onClick={() => o.url && setZoom(o.url)}>
-                <div className="outfit-img">
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  {o.url ? <img src={o.url} alt="" loading="lazy" /> : <span className="breathe inline-block h-2 w-2 rounded-full bg-[var(--dot)]" />}
+          <>
+            <div className="mb-7 flex flex-wrap gap-1.5">
+              {([null, ...SEASONS] as const).map((s) => (
+                <button
+                  key={s ?? "all"}
+                  onClick={() => setSeason(s)}
+                  className={`rounded-full px-3.5 py-1 text-[13px] transition-colors ${
+                    season === s ? "bg-[var(--bubble)] text-[var(--text-strong)] shadow-[var(--bubble-shadow)]" : "text-[var(--dim)] hover:text-[var(--text)]"
+                  }`}
+                >
+                  {s ?? "全部"}
+                </button>
+              ))}
+            </div>
+            {shelf.map((g) => (
+              <section key={g.season} className="album-day">
+                <h3 className="album-day-title">
+                  {g.season}
+                  <span className="wardrobe-count">{g.items.length}</span>
+                </h3>
+                <div className="wardrobe-grid">
+                  {g.items.map((o) => (
+                    <div key={o.key} className={`outfit ${data.today.outfit === o.key ? "outfit-now" : ""}`} onClick={() => o.url && setZoom(o.url)}>
+                      <div className="outfit-img">
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        {o.url ? <img src={o.url} alt="" loading="lazy" /> : <span className="breathe inline-block h-2 w-2 rounded-full bg-[var(--dot)]" />}
+                      </div>
+                      <div className="outfit-name">
+                        {o.name}
+                        {data.today.outfit === o.key && <em>今天</em>}
+                      </div>
+                      <div className="outfit-when">{o.when}</div>
+                    </div>
+                  ))}
                 </div>
-                <div className="outfit-name">
-                  {o.name}
-                  {data.today.outfit === o.key && <em>今天</em>}
-                </div>
-                <div className="outfit-when">{o.when}</div>
-              </div>
+              </section>
             ))}
-          </div>
+          </>
         )}
       </div>
 
