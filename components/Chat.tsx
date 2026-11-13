@@ -25,6 +25,7 @@ const MemoryMap = dynamic(() => import("./MemoryMap"), { ssr: false });
 const Album = dynamic(() => import("./Album"), { ssr: false });
 const Call = dynamic(() => import("./Call"), { ssr: false });
 const Tasks = dynamic(() => import("./Tasks"), { ssr: false });
+const Weather = dynamic(() => import("./Weather"), { ssr: false });
 
 type Status = "done" | "streaming" | "error" | "sending" | "waiting";
 type Msg = {
@@ -100,6 +101,7 @@ export default function Chat() {
   const [micHint, setMicHint] = useState<string | null>(null);
   const [showMap, setShowMap] = useState(false);
   const [showAlbum, setShowAlbum] = useState(false);
+  const [showWeather, setShowWeather] = useState(false);
   const [calling, setCalling] = useState(false);
   const [callMini, setCallMini] = useState(false);
   const [memCount, setMemCount] = useState<number | null>(null);
@@ -502,14 +504,14 @@ export default function Chat() {
   useEffect(() => {
     // 在页面任何地方直接打字就进输入框
     const onKey = (e: KeyboardEvent) => {
-      if (showMap || showAlbum) return;
+      if (showMap || showAlbum || showWeather) return;
       const t = e.target as HTMLElement;
       if (t.tagName === "TEXTAREA" || t.tagName === "INPUT" || e.metaKey || e.ctrlKey || e.altKey) return;
       if (e.key.length === 1 || e.key === "Process") input.current?.focus();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [showMap, showAlbum]);
+  }, [showMap, showAlbum, showWeather]);
 
   useEffect(() => {
     if (loaded && !showMap) input.current?.focus();
@@ -543,6 +545,7 @@ export default function Chat() {
         onCall={() => (calling ? setCallMini(false) : (setCallMini(false), setCalling(true)))}
         onMap={() => setShowMap(true)}
         onAlbum={() => setShowAlbum(true)}
+        onWeather={() => setShowWeather(true)}
         memCount={memCount}
         pulse={pulse}
       />
@@ -648,6 +651,7 @@ export default function Chat() {
 
       <AnimatePresence>{showMap && <MemoryMap theme={theme} onClose={() => setShowMap(false)} />}</AnimatePresence>
       <AnimatePresence>{showAlbum && <Album onClose={() => setShowAlbum(false)} />}</AnimatePresence>
+      <AnimatePresence>{showWeather && <Weather onClose={() => setShowWeather(false)} />}</AnimatePresence>
       <AnimatePresence>{calling && <Call mini={callMini} onMini={setCallMini} onClose={() => setCalling(false)} />}</AnimatePresence>
     </div>
   );

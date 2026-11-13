@@ -20,16 +20,18 @@ type Plugin = {
  * 一件都没有的时候整块不出现。新装的本事等他点头：在这儿点「启用」，或者直接跟她说都行。
  */
 export default function Plugins() {
-  const [list, setList] = useState<Plugin[]>([]);
+  const [all, setAll] = useState<Plugin[]>([]);
   const [busy, setBusy] = useState("");
 
   const load = useCallback(async () => {
     try {
       const { plugins } = (await (await fetch("/api/plugins")).json()) as { plugins: Plugin[] };
-      setList(plugins);
+      setAll(plugins);
     } catch {}
   }, []);
 
+  // 查天气的入口在右上角菜单里，挨着相册，左边不再列一遍
+  const list = all.filter((p) => p.id !== "weather");
   const waiting = list.some((p) => p.status === "probing" || p.status === "pending");
 
   useEffect(() => {
@@ -45,7 +47,7 @@ export default function Plugins() {
       const r = (await (
         await fetch("/api/plugins", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id, action }) })
       ).json()) as { plugins?: Plugin[] };
-      if (r.plugins) setList(r.plugins);
+      if (r.plugins) setAll(r.plugins);
     } catch {}
     setBusy("");
   };
