@@ -402,22 +402,188 @@ function hits(rule: OutfitRule, ctx: WearContext) {
 /** 季节，按月份算：3–5 春、6–8 夏、9–11 秋、12–2 冬（和 lib/wardrobe.ts 一致） */
 export const SEASONS = ["春", "夏", "秋", "冬"] as const;
 export type Season = (typeof SEASONS)[number];
+/** 衣橱分组用的那一组：四季之外再加一组「跨季」 */
+export const SEASON_GROUPS = [...SEASONS, "跨季"] as const;
+export type SeasonGroup = (typeof SEASON_GROUPS)[number];
+/** 季节在四季里的序号；「跨季」不算任何一季 */
+const seasonIndex = (s: SeasonGroup) => (SEASONS as readonly string[]).indexOf(s);
 const seasonOf = (month: number): Season => (month >= 3 && month <= 5 ? "春" : month >= 6 && month <= 8 ? "夏" : month >= 9 && month <= 11 ? "秋" : "冬");
 
-/**
- * 一身衣服适合哪几个季节：看 rule.months；没写 months 的，再看 when 里点名的季节（「秋季阴天…」）；
- * 都没有就不知道，返回空数组（衣橱里单独放在「其他」）。跨年的月份段（如 11–3）按整圈算。
- */
-export function outfitSeasons(o: Outfit): Season[] {
-  const months = new Set<number>();
-  const [a, b] = o.rule?.months ?? [];
-  if (a !== undefined && b !== undefined) {
-    const [from, to] = a <= b ? [a, b] : [b, a];
-    for (let m = from; m <= to; m++) months.add(m);
-  } else if (!o.rule?.months) {
-    for (const s of SEASONS) if (o.when.includes(`${s}季`) || o.when.includes(`${s}天`)) months.add(SEASONS.indexOf(s) * 3 + 4);
+/** 每个月一块，抄的是北京常年平均的最高 / 最低气温（°C），用来看一身的温度范围能不能在这个月穿得住 */
+const MONTH_TEMPS: [number, number][] = [
+  [2, -8],
+  [6, -5],
+  [13, 1],
+  [21, 8],
+  [27, 14],
+  [31, 19],
+  [31, 22],
+  [30, 21],
+  [26, 15],
+  [19, 8],
+  [10, 0],
+  [4, -6],
+];
+/** 一看就是跨季的薄外套：长款风衣、短风衣（配伞那种）、薄外套 */
+const CROSS_OUTER = /风衣|薄外套|薄夹克|冲锋衣|trench coat|light jacket|windbreaker/i;
+/** 薄薄一层、春秋穿的那种料子，不算冬装 */
+const SPRING_AUTUMN_LAYER = /衬衫|针织开衫|薄毛衣|薄针织|cardigan|shirt|shacket/i;
+/** 里面还搭了一条内搭，光秃秃的短袖 / 吊带（夏天那种）就不成立 */
+const WITH_INNER = /里面|内搭|叠穿|配.{0,6}(?:毛衣|针织|卫衣|衬衫)|under (?:a|an|her) /i;
+/** 一看就是冬天的 */
+const WINTER_WEAR = /羽绒|羊绒|呢裤|呢大衣|毛衣|雪地靴|毛线帽|围巾|puffer|down (?:jacket|coat)|cashmere|wool(?:en)? (?:coat|trousers?|pants)|sweater|jumper|snow boots?|beanie|scarf/i;
+/** 一看就是夏天的 */
+const SUMMER_WEAR = /棉麻|吊带|短袖|短裤|凉鞋|草编|t恤|t-shirt|sleeveless|tank|shorts|sandals?|linen|straw hat/i;
+
+/** 中文数字的月份说法（「十二月」「三到五月」）先换成阿拉伯数字，后面统一按数字认 */
+const CN_DIGITS = "一二三四五六七八九十";
+const cnToNum = (s: string) => (s === "十" ? 10 : s.length === 2 && s[0] === "十" ? 10 + CN_DIGITS.indexOf(s[1]) + 1 : s.length === 2 && s[1] === "十" ? 0 : CN_DIGITS.indexOf(s) + 1);
+/** 剩下的「一条」「十」这种数词换成别的字，免得被当成月份数字 */
+const cnMonths = (text: string) =>
+  text
+    .replace(/([一二三四五六七八九十]{1,2})\s*(?:到|至)\s*([一二三四五六七八九十]{1,2})\s*月/g, (_m, a: string, b: string) => `${cnToNum(a)}到${cnToNum(b)}月`)
+    .replace(/([一二三四五六七八九十]{1,2})\s*月(?![点号日])/g, (_m, a: string) => `${cnToNum(a)}月`)
+    .replace(/[一二三四五六七八九十]/g, " ");
+
+/** 月份看规则里的；没写规则从 when 里读，「秋天」「九到十一月」「12 月」都认 */
+const RANGE_WORD = /(?:(\d{1,2})\s*月?\s*(?:到|至|-|~|～)\s*(\d{1,2})\s*月|(\d{1,2})\s*月|(\d{1,2})\s*月\s*(?:到|至|-|~|～)\s*(\d{1,2})\s*(?![点时号日\d]))/g;
+/** 中文数字只认「三到五月」这种两边都是数字的，免得把「十月」前面那个字当成范围的开头 */
+const CN_RANGE = /([一二三四五六七八九十]{1,2})\s*(?:到|至|-|~)\s*([一二三四五六七八九十]{1,2})\s*月/g;
+
+/** when（或穿什么）里点名的季节：几个都是就整段按季节算，比如「春秋」= 春 + 秋，「冬天」= 冬 */
+function namedSeasons(text: string): Season[] {
+  const hit = new Set<Season>();
+  // 「春天」「夏季」「入秋」「初冬」「春秋」「春夏」「秋冬」，季节后面挨着另一个季节也算
+  const at = (s: Season) => {
+    const i = text.indexOf(s);
+    return i < 0 ? "" : text.slice(i + 1, i + 2);
+  };
+  for (const s of SEASONS) {
+    if (!text.includes(s)) continue;
+    const pair = SEASONS.some((p) => p !== s && p === at(s));
+    // 「夏天」「冬天」都算；「大夏天」是夏天本身，也照算
+    if (text.includes(`${s}季`) || text.includes(`${s}天`) || text.includes(`入${s}`) || text.includes(`初${s}`) || pair) hit.add(s);
   }
-  return SEASONS.filter((s) => [...months].some((m) => seasonOf(m) === s));
+  return SEASONS.filter((s) => hit.has(s));
+}
+
+function monthsFrom(text: string, rule?: OutfitRule): number[] {
+  const months = new Set<number>();
+  const add = (a: number, b: number) => {
+    for (let m = Math.min(a, b); m <= Math.max(a, b); m++) if (m >= 1 && m <= 12) months.add(m);
+  };
+  const [a, b] = rule?.months ?? [];
+  if (a !== undefined && b !== undefined) {
+    // 跨年那段（11→3）按整圈算：11、12、1、2
+    if (a <= b) add(a, b);
+    else {
+      add(a, 12);
+      add(1, b);
+    }
+  } else {
+    // 「10:30」「18:00」「18 点到 22 点」里的数字不是月份
+    const t = text.replace(/\d{1,2}:\d{2}/g, " ").replace(/\d{1,2}\s*[-~至到]\s*\d{1,2}\s*(?:点|时)/g, " ");
+    for (const m of t.matchAll(CN_RANGE)) add(cnToNum(m[1]), cnToNum(m[2]));
+    // 「9–11 月」「12 月」「九月到十一月」；「一月底」「10 月 1 号」不算月份
+    for (const m of cnMonths(t).matchAll(RANGE_WORD)) {
+      const to = m[4] ?? m[2] ?? m[3];
+      if (to === undefined) continue;
+      add(Number(m[1] ?? m[3]), Number(to));
+    }
+  }
+  // 「冬天」= 12、1、2 月
+  for (const s of namedSeasons(text)) {
+    const first = seasonIndex(s) * 3 + 3;
+    for (const m of [first, first + 1, first + 2]) months.add(m > 12 ? m - 12 : m);
+  }
+  return [...months].sort((x, y) => x - y);
+}
+
+/** rule 里写了的温度范围；没写就从 when 里读「8~22°C」「18°C 以下」「24 度以上」 */
+function tempRange(text: string, rule?: OutfitRule): { min: number; max: number } {
+  if (rule && (rule.tempMin !== undefined || rule.tempMax !== undefined)) {
+    return { min: rule.tempMin ?? -20, max: rule.tempMax ?? 45 };
+  }
+  const t = text.replace(/[–—−]/g, "-").replace(/～/g, "~");
+  const pair = /(-?\d{1,2})\s*(?:~|-|到|至)\s*(-?\d{1,2})?\s*(?:°\s*c|℃|度)/i.exec(t);
+  if (!pair) {
+    const one = /(-?\d{1,2})\s*(?:°\s*c|℃|度)(以下|以内|以上)?/i.exec(t);
+    if (!one) return { min: -20, max: 45 };
+    const v = Number(one[1]);
+    if (one[2] === "以上") return { min: v, max: 45 };
+    if (one[2]) return { min: -20, max: v };
+    return { min: v - 6, max: v + 6 };
+  }
+  const a = Number(pair[1]);
+  const b = pair[2] === undefined ? a : Number(pair[2]);
+  const from = Math.min(a, b);
+  const to = Math.max(a, b);
+  // 「3°C 以下」：单位挂在后半截；「5~12°C」两头都算
+  const tail = t.slice(pair.index! + pair[0].length, pair.index! + pair[0].length + 3);
+  if (from === to) {
+    if (tail.startsWith("以上")) return { min: from, max: 45 };
+    if (/^(以下|以内)/.test(tail)) return { min: -20, max: to };
+    return { min: from - 6, max: to + 6 };
+  }
+  return { min: from, max: to };
+}
+
+/** 这几个月里，温度范围盖住了各月的中位数才算穿得住（冬天那件盖不住七月的 31°C，就不进夏） */
+function monthsByTemp(months: number[], min: number, max: number): Season[] {
+  const hit = new Set<Season>();
+  for (const m of months) {
+    const [hi, lo] = MONTH_TEMPS[m - 1];
+    const mid = (hi + lo) / 2;
+    if (mid >= min - 2 && mid <= max + 2) hit.add(seasonOf(m));
+  }
+  return SEASONS.filter((s) => hit.has(s));
+}
+
+/**
+ * 一身衣服按它自己合适穿的月份和温度，归到哪些季节。
+ *
+ * 先看月份：rule.months，或者 when 里写的月份 / 季节；只看月份落在几个季节里。只要落进两个季节
+ * （「春秋下雨」「9–11 月」这种），就归「跨季」——跨季那几身只在「跨季」里出现一次。
+ * 一个月没写、只写了温度的，看温度盖得住哪几个月；穿着内容一看就是薄外套（长风衣、短风衣配伞）也归「跨季」。
+ *
+ * 月份只落在一个季节时照月份走；没写月份的才拿穿什么校正一次：「羽绒、毛衣、呢裤」不进春秋，
+ * 「棉麻、短袖、短裤、凉鞋」不进春秋冬，「衬衫、针织开衫」这种薄一层的不进冬。
+ * 什么都没写，就放「跨季」，不出「不知道放哪」的那一组。
+ */
+export function outfitSeasonGroups(o: Outfit): SeasonGroup[] {
+  const text = `${o.when} ${o.wear}`;
+  const months = monthsFrom(o.when, o.rule);
+  const { min, max } = tempRange(o.when, o.rule);
+  const all = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+  const fromMonths = months.length ? monthsByTemp(months, min, max) : [];
+  const byText = (): SeasonGroup[] => {
+    if (CROSS_OUTER.test(text)) return ["跨季"];
+    // 没写月份才看温度盖了几个季节：一冷一热都盖得住就是跨季
+    const byTemp = monthsByTemp(all, min, max);
+    return byTemp.length === 1 ? byTemp : ["跨季"];
+  };
+  const out: SeasonGroup[] = fromMonths.length >= 2 ? ["跨季"] : fromMonths.length === 1 ? fromMonths : byText();
+  if (out[0] === "跨季") return out;
+  // 季节是从月份推出来的，衣服只好当参考；月份只落在一个季节时照月份走
+  if (months.length && months.every((m) => seasonOf(m) === out[0])) return out;
+  return byWear(out[0], o.wear);
+}
+
+/** 穿什么校正一次：分到一个季节、但穿着内容明显对不上时，按衣服改回来 */
+function byWear(s: Season, wear: string): SeasonGroup[] {
+  const winter = WINTER_WEAR.test(wear) && !SUMMER_WEAR.test(wear);
+  const summer = SUMMER_WEAR.test(wear) && !WINTER_WEAR.test(wear) && !WITH_INNER.test(wear);
+  const light = SPRING_AUTUMN_LAYER.test(wear) && !WINTER_WEAR.test(wear);
+  if (winter) return s === "春" || s === "秋" || s === "夏" ? ["冬"] : [s];
+  if (summer) return s === "冬" || s === "春" || s === "秋" ? ["夏"] : [s];
+  if (light) return s === "冬" ? ["春", "秋"] : [s];
+  return [s];
+}
+
+/** 原来的叫法：按季节归到哪几季；跨季或者一时间分不出来的，返回空数组 */
+export function outfitSeasons(o: Outfit): Season[] {
+  const groups = outfitSeasonGroups(o);
+  return groups.length === 1 && groups[0] !== "跨季" ? [groups[0]] : [];
 }
 
 /** 带条件的造型里挑一个穿：priority 大的先，同样大的后加的优先 */

@@ -6,10 +6,12 @@ import { useEffect, useState } from "react";
 
 /** 相册（按日期攒，日期倒序，能翻回以前的每一天）和衣橱（几套固定造型，今天穿哪套） */
 type Season = "春" | "夏" | "秋" | "冬";
-type Outfit = { key: string; name: string; when: string; seasons?: Season[]; url: string | null };
+/** 四季之外单独一组：适合两个季节以上、明显跨季的（长风衣、薄短风衣配伞那种） */
+type SeasonGroup = Season | "跨季";
+type Outfit = { key: string; name: string; when: string; seasons?: SeasonGroup[]; url: string | null };
 
-/** 衣橱按季节分组，顺序固定；不知道适合哪季的放最后 */
-const SEASONS: (Season | "其他")[] = ["春", "夏", "秋", "冬", "其他"];
+/** 衣橱按季节分组，顺序固定；跨季的那组单独挂在四季后面，不重复出现在四季里 */
+const GROUPS: SeasonGroup[] = ["春", "夏", "秋", "冬", "跨季"];
 type Photo = {
   id: number;
   date: string;
@@ -36,8 +38,8 @@ export default function Album({ onClose }: { onClose: () => void }) {
   const [data, setData] = useState<Data | null>(null);
   const [tab, setTab] = useState<"album" | "wardrobe">("album");
   const [zoom, setZoom] = useState<string | null>(null);
-  /** 衣橱目前只看哪一页（null = 全部，按季节分组；其余只出该季节的衣服，跨季的每组都会出现一次） */
-  const [season, setSeason] = useState<Season | "其他" | null>(null);
+  /** 衣橱目前只看哪一页（null = 全部，按季节分组；其余只出那一组的衣服，跨季的那几身只在「跨季」里出现） */
+  const [season, setSeason] = useState<SeasonGroup | null>(null);
 
   useEffect(() => {
     fetch("/api/album")
@@ -60,9 +62,10 @@ export default function Album({ onClose }: { onClose: () => void }) {
   })();
 
   const shelf = (() => {
-    const groups = SEASONS.map((s) => ({
+    const groups = GROUPS.map((s) => ({
       season: s,
-      items: (data?.outfits ?? []).filter((o) => (s === "其他" ? !o.seasons?.length : o.seasons?.includes(s))),
+      // 属于哪一组看接口给的分组；没给（或给了空的）的按跨季算，不会凭空少一身
+      items: (data?.outfits ?? []).filter((o) => (o.seasons?.length ? o.seasons.includes(s) : s === "跨季")),
     })).filter((g) => g.items.length);
     return season ? groups.filter((g) => g.season === season) : groups;
   })();
@@ -136,7 +139,7 @@ export default function Album({ onClose }: { onClose: () => void }) {
         {data && tab === "wardrobe" && (
           <>
             <div className="mb-7 flex flex-wrap gap-1.5">
-              {([null, ...SEASONS] as const).map((s) => (
+              {([null, ...GROUPS] as const).map((s) => (
                 <button
                   key={s ?? "all"}
                   onClick={() => setSeason(s)}

@@ -3,7 +3,7 @@ import { db } from "@/lib/db";
 import { diaryOf } from "@/lib/diary";
 import { captionOf, fillCaptions } from "@/lib/captions";
 import { listPhotos, outfits, today, wardrobeFile } from "@/lib/wardrobe";
-import { outfitSeasons } from "@/lib/wardrobeoutfits";
+import { outfitSeasonGroups } from "@/lib/wardrobeoutfits";
 
 export const dynamic = "force-dynamic";
 
@@ -15,7 +15,7 @@ export async function GET() {
       key: o.key,
       name: o.name,
       when: o.when,
-      seasons: outfitSeasons(o),
+      seasons: outfitSeasonGroups(o),
       url: outfitUrl(o.key),
     })),
     photos: [...dailyPhotos(), ...drawnPhotos()].sort((a, b) => b.created_at - a.created_at || b.id - a.id),
