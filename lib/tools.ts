@@ -965,6 +965,9 @@ const TASK_TITLE: Record<string, (a: Record<string, unknown>) => string> = {
   write_file: (a) => `写文件 ${short(a.name)}`,
 };
 
+/** 只是看一眼、查一下的工具：不登记成任务 */
+const QUIET_TOOLS = new Set(["list_dir", "read_file", "search_files", "recent_files", "system_info", "list_reminders", "dispatch_status", "task_result", "list_gaps", "use_plugin"]);
+
 /**
  * 对话里调工具用这个：几秒内做完就照常把结果交回去；做不完就转到后台接着做，先告诉她「在后台做着」，
  * 回复马上能说完，对话（打字、电话）不被一件慢活卡住——他接着说话她立刻能接。
@@ -1013,7 +1016,9 @@ export async function runTool(name: string, rawArgs: string, ctx?: ToolCtx, opts
     // 挂到回复里的东西（图片、文件卡片）也记到任务上，任务栏点开能直接看到
     const attached: string[] = [];
     const tctx = ctx && { ...ctx, attach: (md: string) => (attached.push(md), ctx.attach(md)) };
-    if (title && opts.register !== false) taskId = startTask(name, title(args));
+    // 顺手查一下、看一眼的不进任务栏：任务栏是给「她在替他办的事」看的，翻个文件夹、读个文件都列进去就全是噪音
+    const quiet = QUIET_TOOLS.has(name) || (name === "plugin_manage" && (!args.action || args.action === "list"));
+    if (title && !quiet && opts.register !== false) taskId = startTask(name, title(args));
     const out = await fn(args as never, tctx);
     // 画图、开图、写文件：真挂上东西才算成；其他看返回的话是不是报错
     const ok = ["show_image", "write_file"].includes(name) ? attached.length > 0 : !/^(出错了|没有这个|这不是)/.test(out);
