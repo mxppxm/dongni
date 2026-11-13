@@ -8,7 +8,9 @@ import { promisify } from "node:util";
 import { addReminder, cancelReminder, pendingReminders, resolveWhen } from "./reminders";
 import { generateImage } from "./imagegen";
 import { createMood } from "./moods";
-import { setCity, takeDailyPhoto, today, wardrobeFile } from "./wardrobe";
+import { ensureWardrobe, setCity, takeDailyPhoto, today, wardrobeFile } from "./wardrobe";
+import { outfits, saveOutfit } from "./wardrobeoutfits";
+import { completeJson } from "./llm";
 import { addLocalImage, IMAGE_EXT, imageMarkdown } from "./images";
 import { postAssistant, startRepair } from "./selfrepair";
 import { speakAsHer } from "./speak";
@@ -425,7 +427,7 @@ export const TOOLS = [
     function: {
       name: "repair_self",
       description:
-        "修改你自己（这个聊天应用）的代码：对方让你加功能、修 bug、改样式、改你的说话方式或行为时用。一次只交一件事，几件事就分几次交（会自动排队、一件做完接下一件），这样每件一两分钟就好，也不会一件出错连累全部。把对方的要求连同必要的上下文写清楚，交给后台的编码助手去改；改完会自动检查、重启，失败自动退回。要几分钟。",
+        "修改你自己（这个聊天应用）的代码：对方让你修 bug、改样式、改你的说话方式或行为、改已有功能时用。加衣服用 add_outfit，学一件新本事按「学新本事」那条派活，这两样都不用改代码。一次只交一件事，几件事就分几次交（会自动排队、一件做完接下一件），这样每件一两分钟就好，也不会一件出错连累全部。把对方的要求连同必要的上下文写清楚，交给后台的编码助手去改；改完会自动检查、重启，失败自动退回。要几分钟。",
       parameters: { type: "object", properties: { request: { type: "string", description: "要改什么，写具体" } }, required: ["request"] },
     },
   },
@@ -517,6 +519,37 @@ export const TOOLS = [
       name: "set_city",
       description: "记下他所在的城市（中文或拼音都行，如 北京、Shanghai），你的穿搭会跟着那边的天气换。没记过就默认北京。",
       parameters: { type: "object", properties: { city: { type: "string" } }, required: ["city"] },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "add_outfit",
+      description:
+        "给自己的衣橱加一身新衣服（或者改已有的一身）。他让你加衣服、设计新造型、改某身衣服时用这个——衣服是数据，不用改代码、不用重启，加完马上能穿，定妆照会在后台自动补拍。别为了加衣服去调 repair_self。",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "这身的名字，如「阴天的图书馆」" },
+          wear: { type: "string", description: "穿什么，从上到下写具体：上装、外套、下装、鞋、配饰" },
+          when: { type: "string", description: "什么时候穿，一句话，如「秋天阴天 5~12°C 的白天」" },
+          key: { type: "string", description: "改已有的一身时写它的 key；新加的不用写" },
+          real: { type: "boolean", description: "定妆照要真人照片感就写 true（默认 true）" },
+          rule: {
+            type: "object",
+            description: "自动选中它的条件，都满足才穿；不写就只能手动指定",
+            properties: {
+              hours: { type: "array", items: { type: "number" }, description: "几点到几点，如 [8, 19]；跨夜写 [22, 6]" },
+              tempMin: { type: "number", description: "气温不低于（°C）" },
+              tempMax: { type: "number", description: "气温不高于（°C）" },
+              kinds: { type: "array", items: { type: "string", enum: ["sun", "cloud", "rain", "snow"] }, description: "天气" },
+              months: { type: "array", items: { type: "number" }, description: "几月到几月，含头不含尾，如 [9, 12]；跨年写 [11, 3]" },
+              priority: { type: "number", description: "同时满足好几身时数大的先穿，一般写 5" },
+            },
+          },
+        },
+        required: ["name", "wear"],
+      },
     },
   },
   {
@@ -616,6 +649,38 @@ function pendingProposal(): { request: string; at: number } | null {
   }
 }
 
+/**
+ * 他到底有没有让她做这件事：看最近几句对话。他明说了、或者她提议后他同意了（「行」「加吧」「派出去吧」「弄吧」），都算。
+ * 只有完全是她自己起意——他没提过、也没同意过——才不算。判断不出来（超时、出错）就放行：宁可多改一次，不把他明说的要求挡在外面。
+ */
+async function heAsked(assistantId: number, request: string): Promise<boolean> {
+  try {
+    const rows = (
+      db()
+        .prepare("SELECT role, content FROM messages WHERE kind != 'system' AND status = 'done' AND (? = 0 OR id < ?) ORDER BY id DESC LIMIT 8")
+        .all(assistantId, assistantId) as { role: string; content: string }[]
+    ).reverse();
+    const talk = rows.map((m) => `${m.role === "user" ? "他" : "她"}：${m.content.replace(/\s+/g, " ").slice(0, 300)}`).join("\n");
+    const r = await Promise.race([
+      completeJson<{ asked: boolean }>(
+        [
+          {
+            role: "user",
+            content: `下面是一段对话，「她」是 AI 伙伴。她现在想去改自己的程序，要做的事是：\n${request.slice(0, 600)}\n\n最近的对话：\n${talk}\n\n判断：这件事是不是「他」让她做的？他明确要求了，或者她提出来之后他同意了（哪怕只说「行」「加吧」「派出去吧」「弄吧」「好」），都算是。只有完全是她自己起意、他既没提过也没同意过，才算不是。\n只输出 JSON：{"asked":true 或 false}`,
+          },
+        ],
+        40,
+        "none",
+      ),
+      new Promise<null>((ok) => setTimeout(() => ok(null), 6_000)),
+    ]);
+    if (r && r.asked === false) console.log(`[dongni] 改自己没放行：判断是她自己起意——${request.slice(0, 60)}`);
+    return !r || r.asked !== false;
+  } catch {
+    return true;
+  }
+}
+
 /** 这条回复对应的、他最近说的那句话（通话里 turnId 不是数字时取最新一句） */
 function lastUserText(assistantId: number): string {
   const row = (
@@ -668,6 +733,15 @@ const IMPL: Record<string, (a: never, ctx?: ToolCtx) => Promise<string>> = {
     setCity(city);
     return `记下了：${city.trim()}。以后穿什么跟着那边的天气走。`;
   }) as (a: never, ctx?: ToolCtx) => Promise<string>,
+  add_outfit: (async (a: Record<string, unknown>) => {
+    try {
+      const o = saveOutfit({ real: true, ...a });
+      void ensureWardrobe().catch(() => {}); // 新的一身：定妆照后台补拍
+      return `加好了：「${o.name}」已经在衣橱里（现在一共 ${outfits().length} 身），不用重启，条件对上就会穿它${o.rule ? "" : "（这身没写自动条件，只有他点名才会穿）"}。定妆照在后台补拍，要一两分钟。照实告诉他加好了；别说照片已经拍好。`;
+    } catch (e) {
+      return `出错了：没加成——${e instanceof Error ? e.message : e}`;
+    }
+  }) as (a: never, ctx?: ToolCtx) => Promise<string>,
   take_photo: (async () => {
     void takeDailyPhoto(true, true);
     return "开始拍了（要一两分钟），拍好会自动发给他、放进相册。现在只用一句话跟他说你去拍了，别说已经拍好。";
@@ -691,12 +765,14 @@ const IMPL: Record<string, (a: never, ctx?: ToolCtx) => Promise<string>> = {
   repair_self: (async ({ request }: { request: string }, ctx?: ToolCtx) => {
     // 只改他让改的。两条路放行：这一轮他的话里真有让她改的意思；或者上一回她把想法提了出来、这一轮他点头了。
     // 之前只认关键词：她提议、他说「行，就这么弄」反而过不了。
-    const asked = lastUserText(Number(ctx?.turnId) || 0);
+    const turn = Number(ctx?.turnId) || 0;
+    const asked = lastUserText(turn);
     const proposal = pendingProposal();
     const approved = !!proposal && APPROVE.test(asked.trim()) && !REFUSE.test(asked);
-    if (!ASK_TO_CHANGE.test(asked) && !approved) {
+    // 关键词没对上不等于他没让改（「你给自己再加一套衣服吧」「派出去吧」都曾被挡下）：拿最近几句让模型判断
+    if (!ASK_TO_CHANGE.test(asked) && !approved && !(await heAsked(turn, String(request ?? "")))) {
       setKv(PROPOSAL_KEY, JSON.stringify({ request: String(request ?? "").slice(0, 2000), at: Date.now() }));
-      return "他这一轮没让你改自己，所以还没交出去，别说在改。你想改的这件事已经记成一条提议：用一句话把想法照实告诉他，问他要不要改；他同意了，你再调一次 repair_self 就会放行。";
+      return "这件事他没让你做，也没同意过，所以还没交出去，别说在改。你想改的已经记成一条提议：用一句话把想法照实告诉他，问他要不要改；他同意了，你再调一次 repair_self 就会放行。";
     }
     setKv(PROPOSAL_KEY, "");
     return startRepair(request);
@@ -784,6 +860,7 @@ const TASK_TITLE: Record<string, (a: Record<string, unknown>) => string> = {
   cancel_reminder: () => "取消提醒",
   humanize_text: () => "润色文字",
   set_city: (a) => `换城市：${short(a.city)}`,
+  add_outfit: (a) => `加衣服：${short(a.name)}`,
   show_image: (a) => `打开图片 ${short(path.basename(String(a.path ?? "")))}`,
   set_voice_key: () => "配语音 key",
   dispatch_status: () => "看派出去的活",

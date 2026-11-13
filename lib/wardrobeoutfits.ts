@@ -146,6 +146,34 @@ function merge(entries: Partial<Outfit>[]): Outfit[] {
   return list;
 }
 
+/**
+ * 往清单文件里加一件（同 key 就是改那一件）。写的是 data/wardrobe/outfits.json，不动代码，下一次读衣橱就生效。
+ * 返回写进去的那一条；内容不合规范就抛错，说清楚缺什么。
+ */
+export function saveOutfit(raw: Record<string, unknown>): Outfit {
+  const name = str(raw.name, 40);
+  if (!name) throw new Error("得给这身起个名字（name）");
+  const key = str(raw.key, 32) ?? `o${Date.now().toString(36)}`;
+  if (!KEY.test(key)) throw new Error("key 只能用字母、数字、下划线、横线");
+  const entry = parseEntry({ ...raw, key, name });
+  const builtin = BUILTIN_OUTFITS.some((o) => o.key === key);
+  if (!entry || (!builtin && !entry.wear)) throw new Error("得写清楚这身穿什么（wear）");
+  const file = OUTFITS_FILE();
+  let list: unknown[] = [];
+  try {
+    const old = JSON.parse(fs.readFileSync(file, "utf8")) as unknown;
+    list = Array.isArray(old) ? old : Array.isArray((old as { outfits?: unknown[] })?.outfits) ? (old as { outfits: unknown[] }).outfits : [];
+  } catch {
+    /* 文件还没有：从空清单开始 */
+  }
+  const next = [...list.filter((o) => (o as { key?: string })?.key !== key), entry];
+  fs.mkdirSync(WARDROBE_DIR, { recursive: true });
+  const tmp = `${file}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(next, null, 2), "utf8");
+  fs.renameSync(tmp, file);
+  return outfits().find((o) => o.key === key)!;
+}
+
 /** 上一次读到的文件内容；内容没变就直接返回上次那份，变了就马上重新解析，不留旧数据 */
 let cache: { file: string; exists: boolean; text: string; list: Outfit[] } | null = null;
 /** 清单每换一次内容加一：用来判断「是不是新加了衣服，该补定妆照了」 */

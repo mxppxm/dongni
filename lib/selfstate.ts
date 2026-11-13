@@ -24,8 +24,12 @@ export function selfState(): string {
   const jobs = listDispatches();
   lines.push(
     jobs.length
-      ? `派出去的活：${jobs.map((j) => `#${j.id}「${j.title.slice(0, 24)}」${j.stageText}（${Math.max(1, Math.round((Date.now() - j.startedAt) / 60000))} 分钟了）`).join("；")}。`
+      ? `派出去的活：${jobs.map((j) => `#${j.id}「${j.title.slice(0, 24)}」${j.stageText}，${j.backend === "dsh" ? "DS superagent 在干" : j.backend === "builtin" ? "内置执行器在干" : "还没人接"}（${Math.max(1, Math.round((Date.now() - j.startedAt) / 60000))} 分钟了）`).join("；")}。`
       : "现在没有派出去在跑的活。",
+  );
+  // 这几条是事实，他问起来照这个说，别自己猜
+  lines.push(
+    "后台是怎么干活的（他问才说）：派出去的活交给他本机的 DS superagent（DeepSeek Harness 上那个）干，它不在线才用内置执行器；派出去的活可以同时跑好几件，互不排队。改你自己的代码也是 superagent 来改，但一次只改一件，改完要重启。加衣服（add_outfit）不改代码、不重启。",
   );
   lines.push(imagegenStatus());
   const mood = moodGenerating();
