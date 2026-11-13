@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""Hand a task to dsh-superagent through its local inbox, and read what comes back.
+
+The local Source reads task files from `<inbox>/pending` and writes every reply to `<inbox>/replies/<task>`. This script
+writes such a task file, so a person can give the agent work without opening GitHub or the panel:
+
+    dshtask "把 math.js 的除零改成抛 RangeError，跑一下测试"
+    dshtask --cwd ~/src/app --wait "修掉首页在 375px 下的横向滚动"
+    dshtask list
+    dshtask reply t-20261101-010203-a1b
+
+The inbox defaults to `~/.dsh/state/superagent/inbox`; `DSH_LOCAL_INBOX` overrides it, and must match the Source's
+`directory` setting when that is set to something else.
+"""
+
+import argparse
+import json
+import os
+import random
+import string
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+DEFAULT_INBOX = Path.home() / '.dsh' / 'state' / 'superagent' / 'inbox'
+REPLY_KINDS = ('reply', 'notice')
+
+
+def inbox() -> Path:
+    return Path(os.environ.get('DSH_LOCAL_INBOX') or DEFAULT_INBOX).expanduser()
+
+
+def new_id() -> str:
+    stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+    return f"t-{stamp}-{''.join(random.choice(string.ascii_lowercase + string.digits) for _ in range(3))}"
+
+
+def reply_files(task: str) -> list[Path]:
+    directory = inbox() / 'replies' / task
+    if not directory.is_dir():
+        return []
+    return sorted(directory.glob('*.md'), key=lambda path: path.stat().st_mtime)
+
+
+def kind_of(path: Path) -> str:
+    with path.open(encoding='utf-8') as handle:
+        head = handle.readline()
+    return head.removeprefix('<!--').split('·')[0].strip() if head.startswith('<!--') else ''
+
+
+def body_of(path: Path) -> str:
+    lines = path.read_text(encoding='utf-8').splitlines()
+    return '\n'.join(lines[1:]).strip() if lines and lines[0].startswith('<!--') else '\n'.join(lines).strip()
+
+
+def deliver(task: str, wait: float) -> int:
+    """Waits until the agent's reply or notice lands, printing every message on the way."""
+    seen: set[str] = set()
+    deadline = time.time() + wait
+    while True:
+        for path in reply_files(task):
+            if path.name in seen:
+                continue
+            seen.add(path.name)
+            kind = kind_of(path)
+            stream = sys.stdout if kind in REPLY_KINDS else sys.stderr
+            label = {'acknowledgement': '已收到', 'reply': '交付', 'notice': '通知'}.get(kind, kind or '消息')
+            print(f'[{label}]', file=stream)
+            print(body_of(path), file=stream)
+            print(file=stream, flush=True)
+            if kind in REPLY_KINDS:
+                return 0
+        if time.time() >= deadline:
+            print(f'还没有结果。稍后运行 `dshtask reply {task}` 查看，或加更长的 --timeout。', file=sys.stderr)
+            return 1
+        time.sleep(2)
+
+
+def send(args: argparse.Namespace) -> int:
+    text = ' '.join(args.text).strip()
+    if not text:
+        print('用法：dshtask "要它做的活"', file=sys.stderr)
+        return 2
+    task = args.id or new_id()
+    cwd = None if args.no_cwd else os.path.abspath(args.cwd or os.getcwd())
+    if cwd and not os.path.isdir(cwd):
+        print(f'目录不存在：{cwd}', file=sys.stderr)
+        return 2
+    record = {'id': task, 'from': args.sender, 'text': text,
+              'at': datetime.now(timezone.utc).isoformat(timespec='seconds')}
+    if cwd:
+        record['cwd'] = cwd
+    pending = inbox() / 'pending'
+    pending.mkdir(parents=True, exist_ok=True)
+    writing = pending / f'{task}.json'
+    scratch = pending / f'.{task}.tmp'
+    scratch.write_text(json.dumps(record, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    # A rename keeps the Source from reading a half-written task file.
+    os.replace(scratch, writing)
+    where = cwd or '工单目录'
+    print(f'{task} → {where}', file=sys.stderr)
+    return deliver(task, args.timeout) if args.wait else 0
+
+
+def listing() -> int:
+    root = inbox()
+    tasks: dict[str, str] = {}
+    for sub in ('pending', 'archive'):
+        for path in sorted((root / sub).glob('*.json')):
+            try:
+                task = json.loads(path.read_text(encoding='utf-8'))
+            except (OSError, ValueError):
+                continue
+            tasks[task.get('id') or path.stem] = '待收' if sub == 'pending' else '已收'
+    if not tasks:
+        print(f'{root} 里还没有任务。', file=sys.stderr)
+        return 0
+    for task, stage in sorted(tasks.items()):
+        kinds = {kind_of(path) for path in reply_files(task)}
+        state = '已交付' if kinds & set(REPLY_KINDS) else ('处理中' if 'acknowledgement' in kinds else stage)
+        print(f'{task}  {state}')
+    return 0
+
+
+def reply(args: argparse.Namespace) -> int:
+    if not reply_files(args.id):
+        print(f'{args.id} 还没有回复。', file=sys.stderr)
+        return 1
+    if args.follow:
+        return deliver(args.id, args.timeout)
+    for path in reply_files(args.id):
+        print(f'--- {kind_of(path)} ---')
+        print(body_of(path))
+        print()
+    return 0
+
+
+def main() -> int:
+    argv = sys.argv[1:]
+    # Subcommands come first and never mix with the free-form task text, so each side gets its own parser.
+    if argv and argv[0] in ('list', 'reply'):
+        parser = argparse.ArgumentParser(prog='dshtask')
+        sub = parser.add_subparsers(dest='command', required=True)
+        sub.add_parser('list', help='列出任务和它们的进度')
+        show = sub.add_parser('reply', help='打印一个任务的回复')
+        show.add_argument('id')
+        show.add_argument('-f', '--follow', action='store_true', help='持续跟读，直到交付或通知')
+        show.add_argument('-t', '--timeout', type=float, default=600, help='等待秒数，默认 600')
+        args = parser.parse_args(argv)
+        return listing() if args.command == 'list' else reply(args)
+
+    parser = argparse.ArgumentParser(prog='dshtask', description='通过本地收件箱给 dsh-superagent 派活。')
+    parser.add_argument('text', nargs='*', help='要它做的活')
+    parser.add_argument('-c', '--cwd', help='工作目录，默认当前目录')
+    parser.add_argument('-n', '--no-cwd', action='store_true', help='不指定目录，让它在工单目录里干活')
+    parser.add_argument('-w', '--wait', action='store_true', help='等到交付再退出')
+    parser.add_argument('-t', '--timeout', type=float, default=600, help='等待秒数，默认 600')
+    parser.add_argument('--id', help='指定任务 id，默认为时间戳')
+    parser.add_argument('--from', dest='sender', default='owner', help='派活的人，默认 owner')
+    return send(parser.parse_args(argv))
+
+
+if __name__ == '__main__':
+    sys.exit(main())

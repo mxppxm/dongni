@@ -1,0 +1,50 @@
+diff --git a/src/sources/github-trigger.ts b/src/sources/github-trigger.ts
+index fffd86d..c61a4ce 100644
+--- a/src/sources/github-trigger.ts
++++ b/src/sources/github-trigger.ts
+@@ -60,7 +60,7 @@ function commentText(comment: GithubComment, kind: 'conversation' | 'inline' | '
+ export const mentions = (text: string, login: string): boolean =>
+   new RegExp(`(?:^|[^a-zA-Z0-9_@])@${escapeRegExp(login)}(?![a-zA-Z0-9_-])`, 'i').test(text)
+ const author = (user: { login: string; type?: string }, agent: string) =>
+-  ({ actor: { source: SOURCE, id: user.login }, human: isHumanLogin(user) && !sameName(user.login, agent) })
++  ({ actor: { source: SOURCE, id: user.login }, human: isHumanLogin(user) })
+ /** Builds a trigger for a comment or review; text is empty for a bodyless comment or a `COMMENTED` review without a body. */
+ export function commentTrigger(comment: GithubComment, ref: PullRef, kind: 'conversation' | 'inline' | 'review', agent: string): Trigger {
+   const at = comment.updated_at ?? comment.submitted_at ?? comment.created_at ?? new Date().toISOString()
+diff --git a/src/sources/github.ts b/src/sources/github.ts
+index f9b80b6..e66665f 100644
+--- a/src/sources/github.ts
++++ b/src/sources/github.ts
+@@ -17,6 +17,14 @@ import type { Localized, SourceKind } from './kind.ts'
+ import { z } from 'zod'
+ 
+ export { commentTrigger, type GithubComment } from './github-trigger.ts'
++/**
++ * Marks a comment the agent posted through its own channel, as `github-channel.ts` appends it. The Source tells the
++ * agent's own output apart by this marker rather than by account, so a person signed in to the same account as the
++ * agent can still address it.
++ */
++const SELF_MARKER = '<!-- dsh-superagent:'
++const postedByAgent = (body: string | null | undefined, user: { login: string }, agent: string): boolean =>
++  sameName(user.login, agent) && (body ?? '').includes(SELF_MARKER)
+ /** A notification of the agent account; `subject.url` is the API address of its Issue or PR. */
+ const NotificationSchema = z.looseObject({
+   repository: z.looseObject({ full_name: z.string() }), subject: z.looseObject({ url: z.string().nullish() }),
+@@ -224,7 +232,7 @@ async function readStream(ctx: SourceContext, round: Round, id: string, path: st
+   for (const item of items) {
+     // Stopping mid-stream aborts before advancing the cursor so unread items are retried.
+     if (stopped(ctx, round)) throw new Error('The GitHub Source stopped during the poll')
+-    if (sameName(item.user.login, login)) continue
++    if (postedByAgent(item.body, item.user, login)) continue
+     if (id === 'issues') {
+       const issue = IssueSchema.safeParse(item)
+       const pr = issue.success && !!issue.data.pull_request
+@@ -394,7 +402,7 @@ async function intakeComments(ctx: SourceContext, ref: PullRef, since: string, r
+       if (stopped(ctx, round)) throw new Error('The GitHub Source stopped during the poll')
+       const timestamp = Date.parse(comment.updated_at ?? comment.submitted_at ?? comment.created_at ?? '')
+       if (!Number.isFinite(timestamp) || timestamp < Date.parse(since)) continue
+-      if (sameName(comment.user.login, login)) continue
++      if (postedByAgent(comment.body, comment.user, login)) continue
+       // A review decision without a body still reaches the ticket: a worker may be waiting for that approval.
+       const trigger = commentTrigger(comment, ref, kind, login)
+       if (trigger.text) await ctx.receive(trigger)

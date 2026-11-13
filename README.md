@@ -61,7 +61,7 @@ pnpm start          # 打开 http://localhost:3939，电话服务在 3940（网�
 | 语音消息、念出来、打电话 | 豆包（火山引擎）语音的 key 写到 `~/.config/dongni/voice.json`，见下 | 录音照样能发，她会开口问你要 key；「念出来」退回 edge-tts |
 | 画图、拍照、新表情 | 准备一个 gpt-image 生图脚本放到 `vendor/gptimg/scripts/gptimg.mjs`（`.env` 里写 `GPTIMG_API_KEY`） | 她会照实告诉你画不了、为什么 |
 | 声纹 | 不用配，第一次用自动下载模型（28MB）到 `data/models/` | — |
-| 自己改自己、派活 | 本机装好 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 和 dsh-superagent，key 写在 `~/.dsh/env` | 改自己做不了，她会照实说；派活退回内置执行器 |
+| 自己改自己、派活 | 安装 DeepSeek Harness，并配置仓库自带的 [dsh-superagent](vendor/dsh-superagent/DONGNI.md)；模型凭据只放本机 | 改自己做不了，她会照实说；派活退回内置执行器 |
 
 `~/.config/dongni/voice.json`（权限建议 600）：
 
@@ -93,7 +93,7 @@ pnpm start          # 打开 http://localhost:3939，电话服务在 3940（网�
 | `DONGNI_DSH_INBOX` | superagent 本地收件箱目录，默认 `~/.dsh/state/superagent/inbox` |
 | `DONGNI_DSH` | 写 `off` 就不找 superagent，后台的活全走内置执行器 |
 | `DONGNI_DSH_AUTOSTART` | 写 `off` 就不自动拉起 superagent。默认启动时、以及派活发现它没在线时，用它自带的 `scripts/dsh-superagent start` 拉起（跑在 tmux 里，懂你重启不影响它；你手动 `stop` 过就不会再拉） |
-| `DONGNI_DSH_SCRIPT` | superagent 管理脚本的位置，默认 `~/src/dsh-superagent-prototype/scripts/dsh-superagent` |
+| `DONGNI_DSH_SCRIPT` | superagent 管理脚本的位置，默认 `~/src/dsh-superagent-prototype/scripts/dsh-superagent`；使用仓库自带版本时设为 `<懂你绝对路径>/vendor/dsh-superagent/scripts/dsh-superagent` |
 | `DONGNI_MODEL` / `DONGNI_CHAT_MODEL` | 换模型 / 只换聊天用的模型 |
 | `DONGNI_HUMANIZE_MODEL` | 去 AI 味改写用的模型，默认跟主线同一个；名字不被接口认会自动换主线模型，并在日志里说一声 |
 | `DONGNI_VOICEPRINT_MIN` | 声纹及格线，默认 0.45；0.30～0.45 算「听着像你」，下限用 `DONGNI_VOICEPRINT_MAYBE` 调；日志里有每句的分数 |
