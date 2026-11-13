@@ -1,14 +1,14 @@
 "use client";
 
 import { AnimatePresence, motion } from "motion/react";
-import { BookHeart, CloudSun, Cpu, LayoutGrid, Moon, Phone, Sparkles } from "lucide-react";
+import { BookHeart, Cpu, LayoutGrid, Moon, Phone, Puzzle, Sparkles } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Theme } from "./Starfield";
 
 type Models = { active: string; profiles: { id: string; label: string; model: string }[] };
 
 /**
- * 右上角只留一个按钮，点开是一块浮窗：打电话 / 记忆 / 相册 / 查天气四个入口，
+ * 右上角只留一个按钮，点开是一块浮窗：打电话 / 记忆 / 相册 / 本事四个入口，
  * 下面是深色、模型线路两个设置。以前五个图标排一排，太挤。
  */
 export default function Dock({
@@ -18,7 +18,7 @@ export default function Dock({
   calling,
   onMap,
   onAlbum,
-  onWeather,
+  onAbilities,
   memCount,
   pulse,
 }: {
@@ -28,7 +28,7 @@ export default function Dock({
   calling: boolean;
   onMap: () => void;
   onAlbum: () => void;
-  onWeather: () => void;
+  onAbilities: () => void;
   memCount: number | null;
   pulse: number;
 }) {
@@ -99,7 +99,7 @@ export default function Dock({
         }`}
         aria-label="菜单"
         aria-expanded={open}
-        title="打电话 · 记忆 · 相册 · 查天气 · 设置"
+        title="打电话 · 记忆 · 相册 · 本事 · 设置"
       >
         <LayoutGrid size={18} strokeWidth={1.6} />
         {calling && <span className="absolute top-2 right-2 h-1.5 w-1.5 rounded-full bg-emerald-400" />}
@@ -124,7 +124,7 @@ export default function Dock({
                 onClick={go(onMap)}
               />
               <Tile icon={<BookHeart size={18} strokeWidth={1.6} />} label="相册" sub="和衣橱" onClick={go(onAlbum)} />
-              <Tile icon={<CloudSun size={18} strokeWidth={1.6} />} label="查天气" sub="未来三天" onClick={go(onWeather)} />
+              <Tile icon={<Puzzle size={18} strokeWidth={1.6} />} label="本事" onClick={go(onAbilities)} />
             </div>
 
             <div className="my-2 h-px bg-[var(--border)]" />
