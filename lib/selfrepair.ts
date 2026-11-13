@@ -253,7 +253,7 @@ export function repairStatus() {
   const running = [...state.repairs.values()].map((r) => {
     const a = r.coder ? dshActivity(r.taskId) : null;
     const idle = a ? Math.round((Date.now() - a.lastAt) / 1000) : 0;
-    const live = a ? `；真实动静：第 ${a.steps} 步，${idle < 60 ? `${idle} 秒前还在动` : `${Math.floor(idle / 60)} 分钟没动静了`}${a.doing ? `，${a.doing}` : ""}` : "";
+    const live = a ? `；真实动静：${a.steps ? `第 ${a.steps} 步，` : ""}${idle < 60 ? `${idle} 秒前还在动` : `${Math.floor(idle / 60)} 分钟没动静了`}${a.doing ? `，${a.doing}` : ""}` : "";
     return `#${r.taskId}「${r.request.replace(/\s+/g, " ").slice(0, 30)}…」（${ago(r.at)}开始的${live}）`;
   });
   const lines = [

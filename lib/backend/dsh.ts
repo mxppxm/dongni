@@ -3,7 +3,6 @@ import { execFile, execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import zlib from "node:zlib";
 import { getKv, setKv } from "../db";
 import type { JobStage } from "../tasks";
 import type { Backend, Job, JobHooks } from "./types";
@@ -97,7 +96,23 @@ export function ensureSuperagent(why: string) {
  */
 export type Activity = { lastAt: number; steps: number; doing: string };
 const SESSIONS = path.join(os.homedir(), ".dsh", "sessions");
-const actCache = new Map<string, { file: string; mtime: number; act: Activity }>();
+const actCache = new Map<string, { file: string; mtime: number; act: Activity; readAt?: number }>();
+
+/**
+ * 把会话记录整个解出来。这个文件是很多段压缩数据接在一起的（它每写一批就追加一段），
+ * Node 自带的解压只解第一段——2026-11-13 任务栏上一直显示「第 0 步」就是这么来的，其实它已经走了九十多步。
+ * 所以用系统的 zstd 命令解（它会把所有段都解完；最后一段正写到一半也没关系，前面解出来的照用）。
+ */
+const ZSTD = ["/opt/homebrew/bin/zstd", "/usr/local/bin/zstd", "/usr/bin/zstd"].find((p) => fs.existsSync(p)) ?? "";
+function unzstdAll(file: string): string {
+  if (!ZSTD) return "";
+  try {
+    return execFileSync(ZSTD, ["-dc", "--", file], { maxBuffer: 256 << 20, stdio: ["ignore", "pipe", "ignore"], timeout: 10_000 }).toString("utf8");
+  } catch (e) {
+    const out = (e as { stdout?: Buffer }).stdout;
+    return out?.length ? out.toString("utf8") : "";
+  }
+}
 
 function sessionFile(ticket: string): string | null {
   const hit = actCache.get(ticket)?.file;
@@ -144,27 +159,28 @@ function readActivity(ticket: string): Activity | null {
   const cached = actCache.get(ticket);
   if (cached && cached.mtime === mtime) return cached.act;
   const act: Activity = { lastAt: mtime, steps: cached?.act.steps ?? 0, doing: cached?.act.doing ?? "" };
-  try {
-    const unzstd = (zlib as unknown as { zstdDecompressSync?: (b: Buffer) => Buffer }).zstdDecompressSync;
-    if (unzstd) {
-      let steps = 0;
-      let doing = "";
-      for (const line of unzstd(fs.readFileSync(file)).toString("utf8").split("\n")) {
-        if (line.includes('"type":"step/start"')) steps++;
-        else if (line.includes('"type":"tool/call"')) {
-          try {
-            const d = (JSON.parse(line) as { data?: { name?: string; arguments?: string } }).data;
-            if (d?.name) doing = describe(d.name, String(d.arguments ?? ""));
-          } catch {}
-        }
-      }
-      act.steps = steps;
-      act.doing = doing;
-    }
-  } catch {
-    // 它正往文件里写、读到半截：这一次只认「文件刚动过」，下一轮再读内容
+  // 文件一直在变（它每走一步都写）：内容最多三秒重读一次，中间只更新「刚动过」
+  if (cached && Date.now() - (cached.readAt ?? 0) < 3_000) {
+    actCache.set(ticket, { ...cached, mtime, act });
+    return act;
   }
-  actCache.set(ticket, { file, mtime, act });
+  const text = unzstdAll(file);
+  if (text) {
+    let steps = 0;
+    let doing = "";
+    for (const line of text.split("\n")) {
+      if (line.includes('"type":"step/start"')) steps++;
+      else if (line.includes('"type":"tool/call"')) {
+        try {
+          const d = (JSON.parse(line) as { data?: { name?: string; arguments?: string } }).data;
+          if (d?.name) doing = describe(d.name, String(d.arguments ?? ""));
+        } catch {}
+      }
+    }
+    act.steps = steps;
+    act.doing = doing;
+  }
+  actCache.set(ticket, { file, mtime, act, readAt: Date.now() });
   return act;
 }
 

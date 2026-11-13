@@ -159,7 +159,8 @@ export function activityLine(taskId: number, now = Date.now()): string {
   if (!a) return "";
   const idle = Math.max(0, Math.round((now - a.lastAt) / 1000));
   const ago = idle < 60 ? `${idle} 秒前还在动` : `${Math.floor(idle / 60)} 分钟没动静了${idle >= 300 ? "，可能卡住了" : ""}`;
-  return `第 ${a.steps} 步，${ago}${a.doing ? `，${a.doing}` : ""}`;
+  // 步数读不出来（解不开记录）就不说步数，别显示「第 0 步」让人以为没开始
+  return `${a.steps ? `第 ${a.steps} 步，` : ""}${ago}${a.doing ? `，${a.doing}` : ""}`;
 }
 
 function hooksFor(id: number): JobHooks {
