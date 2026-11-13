@@ -94,7 +94,8 @@ export function ensureSuperagent(why: string) {
  * ~/.dsh/sessions/<目录>/worker-<工单号>/session.v4.jsonl.zstd 里。
  * 这是它真实的动静：文件多久没变 = 多久没动；最后一次工具调用 = 正在干什么。不用猜，也不用它自己汇报。
  */
-export type Activity = { lastAt: number; steps: number; doing: string };
+/** recent：最近几个动作（时间 + 一句话），任务栏点开能看到它一路干了什么 */
+export type Activity = { lastAt: number; steps: number; doing: string; recent: { at: number; text: string }[] };
 const SESSIONS = path.join(os.homedir(), ".dsh", "sessions");
 const actCache = new Map<string, { file: string; mtime: number; act: Activity; readAt?: number }>();
 
@@ -158,7 +159,7 @@ function readActivity(ticket: string): Activity | null {
   }
   const cached = actCache.get(ticket);
   if (cached && cached.mtime === mtime) return cached.act;
-  const act: Activity = { lastAt: mtime, steps: cached?.act.steps ?? 0, doing: cached?.act.doing ?? "" };
+  const act: Activity = { lastAt: mtime, steps: cached?.act.steps ?? 0, doing: cached?.act.doing ?? "", recent: cached?.act.recent ?? [] };
   // 文件一直在变（它每走一步都写）：内容最多三秒重读一次，中间只更新「刚动过」
   if (cached && Date.now() - (cached.readAt ?? 0) < 3_000) {
     actCache.set(ticket, { ...cached, mtime, act });
@@ -168,17 +169,25 @@ function readActivity(ticket: string): Activity | null {
   if (text) {
     let steps = 0;
     let doing = "";
+    const recent: { at: number; text: string }[] = [];
     for (const line of text.split("\n")) {
       if (line.includes('"type":"step/start"')) steps++;
       else if (line.includes('"type":"tool/call"')) {
         try {
-          const d = (JSON.parse(line) as { data?: { name?: string; arguments?: string } }).data;
-          if (d?.name) doing = describe(d.name, String(d.arguments ?? ""));
+          const ev = JSON.parse(line) as { time?: number; data?: { name?: string; arguments?: string } };
+          const d = ev.data;
+          if (d?.name) {
+            doing = describe(d.name, String(d.arguments ?? ""));
+            // 连着几步干的是同一件事（反复读同一个文件）只记一条
+            if (recent[recent.length - 1]?.text !== doing) recent.push({ at: Number(ev.time) || mtime, text: doing });
+            else recent[recent.length - 1].at = Number(ev.time) || mtime;
+          }
         } catch {}
       }
     }
     act.steps = steps;
     act.doing = doing;
+    act.recent = recent.slice(-8);
   }
   actCache.set(ticket, { file, mtime, act, readAt: Date.now() });
   return act;

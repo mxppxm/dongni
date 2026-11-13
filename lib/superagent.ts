@@ -163,6 +163,13 @@ export function activityLine(taskId: number, now = Date.now()): string {
   return `${a.steps ? `第 ${a.steps} 步，` : ""}${ago}${a.doing ? `，${a.doing}` : ""}`;
 }
 
+/** 给任务栏用：这件活现在的动静，结构化的（第几步、多久没动、正在干什么、最近几个动作） */
+export function activityOf(taskId: number, now = Date.now()) {
+  const a = dshActivity(taskId) ?? builtinActivity(taskId);
+  if (!a) return null;
+  return { steps: a.steps, idleSec: Math.max(0, Math.round((now - a.lastAt) / 1000)), doing: a.doing, recent: a.recent };
+}
+
 function hooksFor(id: number): JobHooks {
   return {
     ext: (extId) => updateJob(id, { ext_id: extId }),

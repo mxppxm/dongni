@@ -16,7 +16,7 @@ const LOGDIR = path.join(process.cwd(), "logs", "super");
 const ASK_WAIT_MS = 20 * 60_000;
 
 /** notes：他中途补的话，执行器下一步取走；answer：它正停下来等他回答时，回答从这里送进去 */
-type Live = { ac: AbortController; notes: string[]; answer: ((text: string) => void) | null; lastAt: number; steps: number; doing: string };
+type Live = { ac: AbortController; notes: string[]; answer: ((text: string) => void) | null; lastAt: number; steps: number; doing: string; recent: { at: number; text: string }[] };
 const running = ((globalThis as unknown as { __dongniBuiltinLive?: Map<number, Live> }).__dongniBuiltinLive ??= new Map<number, Live>());
 
 export const builtinBackend: Backend = {
@@ -28,7 +28,7 @@ export const builtinBackend: Backend = {
 
   start(job: Job, hooks: JobHooks) {
     const ac = new AbortController();
-    const live: Live = { ac, notes: [], answer: null, lastAt: Date.now(), steps: 0, doing: "" };
+    const live: Live = { ac, notes: [], answer: null, lastAt: Date.now(), steps: 0, doing: "", recent: [] };
     running.set(job.id, live);
     hooks.event("working", "内置执行器开始干了", "working");
     fs.mkdirSync(LOGDIR, { recursive: true });
@@ -84,6 +84,7 @@ export const builtinBackend: Backend = {
                   : name === "ask_user"
                     ? "在等他回答"
                     : live.doing;
+          if (live.doing && live.recent[live.recent.length - 1]?.text !== live.doing) live.recent = [...live.recent, { at: Date.now(), text: live.doing }].slice(-8);
         }
         try {
           fs.appendFileSync(trace, JSON.stringify(entry) + "\n");
@@ -131,7 +132,7 @@ export const builtinBackend: Backend = {
 export const builtinRunning = () => running.size;
 
 /** 内置执行器这件活现在的动静 */
-export function builtinActivity(jobId: number): { lastAt: number; steps: number; doing: string } | null {
+export function builtinActivity(jobId: number): { lastAt: number; steps: number; doing: string; recent: { at: number; text: string }[] } | null {
   const live = running.get(jobId);
-  return live ? { lastAt: live.lastAt, steps: live.steps, doing: live.doing } : null;
+  return live ? { lastAt: live.lastAt, steps: live.steps, doing: live.doing, recent: live.recent } : null;
 }

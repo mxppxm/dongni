@@ -13,7 +13,20 @@ type Task = {
   result: string;
   startedAt: number;
   endedAt: number | null;
+  /** 后台在跑的活的真实动静：第几步、多久没动（秒）、正在干什么、最近几个动作 */
+  live?: { steps: number; idleSec: number; doing: string; recent: { at: number; text: string }[] } | null;
+  /** 还没开工时卡在哪：排队、等接单、在等他回答 */
+  waiting?: string;
 };
+
+/** 一句话：这件活现在什么情况。两分钟没动静就明说 */
+const liveLine = (t: Task) => {
+  const l = t.live;
+  if (!l) return t.waiting ?? "";
+  if (l.idleSec >= 120) return `${Math.floor(l.idleSec / 60)} 分钟没动静了${l.idleSec >= 300 ? "，可能卡住了" : ""}${l.steps ? `（停在第 ${l.steps} 步）` : ""}`;
+  return `${l.steps ? `第 ${l.steps} 步 · ` : ""}${l.doing || "在干"}`;
+};
+const stalled = (t: Task) => !!t.live && t.live.idleSec >= 120;
 
 const ago = (ts: number, now: number) => {
   const s = Math.max(0, Math.round((now - ts) / 1000));
@@ -104,8 +117,22 @@ function Detail({ t, now, onClose }: { t: Task; now: number; onClose: () => void
               {p.split("/").pop()}
             </button>
           ))}
+          {t.status === "running" && (t.live || t.waiting) && (
+            <div className="space-y-0.5 text-[11.5px] leading-relaxed">
+              <div className={stalled(t) ? "text-[#f05252]/80" : "text-[var(--dim)]"}>{liveLine(t)}</div>
+              {(t.live?.recent ?? [])
+                .slice(0, -1)
+                .reverse()
+                .map((r, i) => (
+                  <div key={i} className="flex gap-2 text-[var(--faint)]">
+                    <span className="shrink-0 tabular-nums">{new Date(r.at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })}</span>
+                    <span className="min-w-0 break-words">{r.text}</span>
+                  </div>
+                ))}
+            </div>
+          )}
           {text && <div className="scroll-thin max-h-40 overflow-y-auto overscroll-contain text-[11.5px] leading-relaxed break-words whitespace-pre-wrap text-[var(--faint)]">{text}</div>}
-          {t.status === "running" && !text && (
+          {t.status === "running" && !text && !t.live && !t.waiting && (
             <div className="text-[11.5px] leading-relaxed text-[var(--faint)]">还在跑，暂时没有输出</div>
           )}
         </div>
@@ -139,6 +166,11 @@ function Row({ t, now, open, onToggle }: { t: Task; now: number; open: boolean; 
           <span className="block text-[11px] text-[var(--faint)] tabular-nums">
             {t.status === "running" ? `已 ${took(now - t.startedAt)}` : ago(t.endedAt ?? t.startedAt, now)}
           </span>
+          {t.status === "running" && liveLine(t) && (
+            <span className={`block truncate text-[11px] ${stalled(t) ? "text-[#f05252]/80" : "text-[var(--dim)]"}`} title={liveLine(t)}>
+              {liveLine(t)}
+            </span>
+          )}
         </span>
       </button>
       <AnimatePresence initial={false}>
