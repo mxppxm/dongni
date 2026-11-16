@@ -127,7 +127,7 @@ export default function Companion({ state = "idle", label, size = 112, caption =
           const rect = e.currentTarget.getBoundingClientRect();
           const px = Math.max(-1, Math.min(1, (e.clientX - rect.left) / rect.width * 2 - 1));
           const py = Math.max(-1, Math.min(1, (e.clientY - rect.top) / rect.height * 2 - 1));
-          lookX.set(px * 2.5); lookY.set(py * 1.5); turn.set(px * 3);
+          lookX.set(px * 2.5); lookY.set(py * 0.3); turn.set(px * 3);
         }}
         onPointerUp={release}
         onPointerCancel={() => { dragged.current = true; release(); rest(); }}
