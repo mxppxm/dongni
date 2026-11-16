@@ -30,11 +30,15 @@ export default function Companion({ state = "idle", label, size = 112, caption =
   const turn = useSpring(0, { stiffness: 170, damping: 22 });
 
   useEffect(() => {
-    const image = new Image();
     let live = true;
-    image.onload = () => { if (live) setLoaded(true); };
-    image.src = ATLAS;
-    return () => { live = false; image.onload = null; };
+    let remaining = 2;
+    const images = [ATLAS, "/companion/min-bodies.png"].map((src) => {
+      const image = new Image();
+      image.onload = () => { if (live && --remaining === 0) setLoaded(true); };
+      image.src = src;
+      return image;
+    });
+    return () => { live = false; images.forEach((image) => { image.onload = null; }); };
   }, []);
 
   useEffect(() => {
@@ -133,10 +137,10 @@ export default function Companion({ state = "idle", label, size = 112, caption =
       >
         {!loaded ? <img className={styles.fallback} src="/mood/anchor.png" alt="" draggable={false} /> : (
           <span className={styles.puppet} aria-hidden="true">
-            <span className={styles.bodyMotion}><span className={styles.body} style={sprite(body, 1)} /></span>
+            <span className={styles.bodyMotion}><span className={styles.body} style={sprite(body, 0)} /></span>
             <motion.span className={styles.headFollow} style={{ x: lookX, y: lookY, rotate: turn }}>
               <span className={styles.headMotion}>
-                <span className={`${styles.face} ${styles.openFace}`} style={sprite(face, 0)} />
+                <span className={styles.face} style={sprite(face, 0)} />
                 {!asleep && <span className={`${styles.face} ${styles.blink}`} style={sprite(1, 0)} />}
                 {shown === "speaking" && <span className={`${styles.face} ${styles.speech}`} style={sprite(0, 0)} />}
               </span>

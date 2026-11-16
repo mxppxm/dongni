@@ -1,16 +1,17 @@
 .companion { width: var(--companion-size, 112px); position: relative; flex-shrink: 0; color: var(--dim, #82776b); }
-.stage { display: block; position: relative; width: 100%; aspect-ratio: 2 / 3; padding: 0; border: 0; background: transparent; cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none; transform-origin: 50% 90%; -webkit-tap-highlight-color: transparent; }
+.stage { display: block; position: relative; width: 150%; left: -25%; aspect-ratio: 15 / 16; overflow: visible; padding: 0; border: 0; background: transparent; cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none; transform-origin: 50% 90%; -webkit-tap-highlight-color: transparent; }
 .stage:active { cursor: grabbing; }
 .stage:focus-visible { outline: 2px solid var(--dot, #dc937b); outline-offset: 4px; border-radius: 24px; }
-.puppet { position: absolute; inset: 0; pointer-events: none; filter: drop-shadow(0 4px 4px rgba(76, 49, 27, .07)); }
+.puppet { position: absolute; top: 0; bottom: 0; left: 16.666667%; width: 66.666667%; overflow: visible; pointer-events: none; filter: drop-shadow(0 4px 4px rgba(76, 49, 27, .07)); }
 .headFollow, .headMotion, .bodyMotion, .face, .body { position: absolute; display: block; width: 100%; aspect-ratio: 1; }
 .headFollow { top: 0; left: 0; z-index: 2; transform-origin: 50% 88%; }
 .headMotion { inset: 0; transform-origin: 50% 88%; animation: head-rest 5.2s ease-in-out infinite; }
 .face, .body { inset: 0; background-image: url('/companion/min-atlas.png'); background-size: 400% 200%; background-repeat: no-repeat; }
-.bodyMotion { top: 36.5%; left: 0; transform-origin: 50% 85%; animation: body-breathe 4.5s ease-in-out infinite; }
+.bodyMotion { top: 17%; left: -15%; width: 130%; aspect-ratio: 3 / 4; transform-origin: 50% 85%; animation: body-breathe 4.5s ease-in-out infinite; }
+.body { aspect-ratio: 3 / 4; background-image: url('/companion/min-bodies.png'); background-size: 400% 100%; }
 .blink { opacity: 0; animation: eye-blink 6.1s linear infinite; }
 .speech { opacity: 0; animation: mouth-talk .64s steps(1, end) infinite; }
-.fallback { position: absolute; width: 100%; bottom: 8%; pointer-events: none; }
+.fallback { position: absolute; left: 16.666667%; width: 66.666667%; bottom: 8%; pointer-events: none; }
 .caption { display: block; width: 100%; margin-top: -3px; text-align: center; font-size: 11px; line-height: 1.6; letter-spacing: .06em; color: var(--dim, #82776b); pointer-events: none; }
 .companion[data-state='typing'] .headMotion, .companion[data-state='listening'] .headMotion { animation: head-listen 3.8s ease-in-out infinite; }
 .companion[data-state='thinking'] .headMotion { animation: head-think 4s ease-in-out infinite; }
