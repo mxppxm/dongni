@@ -789,7 +789,7 @@ export default function Chat() {
       />
 
       <div ref={scroller} onScroll={onScroll} className="scroll-thin relative z-10 flex-1 overflow-y-auto">
-        <div className="mx-auto w-full max-w-[680px] px-5 pt-16 pb-44">
+        <div className="mx-auto w-full max-w-[680px] px-5 pt-16 pb-72 min-[1001px]:pb-44">
           {msgs.map((m, i) => {
             const prev = msgs[i - 1];
             const showTime = !prev || m.createdAt - prev.createdAt > 3600_000;

@@ -1,159 +1,115 @@
 "use client";
 
-import { animate, motion, useMotionValue, useReducedMotion, useSpring } from "motion/react";
 import { useEffect, useRef, useState, type CSSProperties } from "react";
+import type { BoopFace } from "../vendor/boopface/index";
 import styles from "./Companion.module.css";
 
 export type CompanionState = "idle" | "typing" | "thinking" | "working" | "success" | "confused" | "listening" | "speaking";
-
 const LABELS: Record<CompanionState, string> = {
   idle: "我在呢", typing: "听你说", thinking: "让我想想", working: "正在忙", success: "好啦", confused: "等你看一下", listening: "在听你说", speaking: "正在回应",
 };
-const ATLAS = "/companion/min-atlas.png";
+let runtime: Promise<typeof import("./minCharacter.js")> | null = null;
 
-/** 头部与身体独立运动；图集上排是四种脸，下排是四种身体姿态。 */
-export default function Companion({ state = "idle", label, size = 112, caption = false }: {
+function showState(element: BoopFace, state: CompanionState) {
+  element.setAttribute("data-speaking", String(state === "speaking"));
+  element.reset();
+  const result = state === "typing" ? element.play("inspect")
+    : state === "thinking" ? element.startWaiting({ variant: "wave" })
+    : state === "working" ? element.startWaiting({ variant: "spin" })
+    : state === "success" ? element.play("success")
+    : state === "confused" ? element.play("wary")
+    : state === "listening" ? element.play("inspect") : undefined;
+  void Promise.resolve(result).catch(() => {});
+}
+
+
+/** 使用 BoopFace 的真实状态、眼睛和手势引擎；角色为同一张连续的 SVG。 */
+export default function Companion({ state = "idle", label, size = 144, caption = false }: {
   state?: CompanionState; label?: string; size?: number; caption?: boolean;
 }) {
-  const reduce = useReducedMotion();
-  const [loaded, setLoaded] = useState(false);
-  const [paused, setPaused] = useState(false);
-  const [asleep, setAsleep] = useState(false);
-  const [gesture, setGesture] = useState<"wave" | "press" | null>(null);
-  const [celebrated, setCelebrated] = useState(false);
-  const clearGesture = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const down = useRef<{ x: number; y: number } | null>(null);
-  const dragged = useRef(false);
-  const x = useMotionValue(0), y = useMotionValue(0);
-  const lookX = useSpring(0, { stiffness: 170, damping: 22 });
-  const lookY = useSpring(0, { stiffness: 170, damping: 22 });
-  const turn = useSpring(0, { stiffness: 170, damping: 22 });
+  const mount = useRef<HTMLDivElement>(null);
+  const face = useRef<BoopFace | null>(null);
+  const wanted = useRef(state);
+  wanted.current = state;
+  const [ready, setReady] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const [greeting, setGreeting] = useState(false);
+  const greetingTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   useEffect(() => {
-    let live = true;
-    let remaining = 2;
-    const images = [ATLAS, "/companion/min-bodies.png"].map((src) => {
-      const image = new Image();
-      image.onload = () => { if (live && --remaining === 0) setLoaded(true); };
-      image.src = src;
-      return image;
-    });
-    return () => { live = false; images.forEach((image) => { image.onload = null; }); };
-  }, []);
-
-  useEffect(() => {
-    const visibility = () => setPaused(document.hidden);
-    visibility();
-    document.addEventListener("visibilitychange", visibility);
-    return () => document.removeEventListener("visibilitychange", visibility);
-  }, []);
-
-  useEffect(() => {
-    setCelebrated(false);
-    if (state !== "success") return;
-    const t = setTimeout(() => setCelebrated(true), 2400);
-    return () => clearTimeout(t);
-  }, [state]);
-
-  useEffect(() => {
-    setAsleep(false);
-    if (state !== "idle") return;
-    let timer: ReturnType<typeof setTimeout>;
-    const wake = () => {
-      setAsleep(false);
-      clearTimeout(timer);
-      timer = setTimeout(() => setAsleep(true), 90_000);
+    let alive = true;
+    let element: BoopFace | null = null;
+    const greet = () => {
+      if (!element) return;
+      void Promise.resolve(element.play("affirm")).then(() => {
+        if (alive && element && ["typing", "thinking", "working"].includes(wanted.current)) showState(element, wanted.current);
+      }).catch(() => {});
+      setGreeting(true);
+      clearTimeout(greetingTimer.current);
+      greetingTimer.current = setTimeout(() => setGreeting(false), 1800);
     };
-    wake();
-    window.addEventListener("pointerdown", wake, { passive: true });
-    window.addEventListener("keydown", wake);
+    const restoreAfterGesture = (event: Event) => {
+      const detail = (event as CustomEvent<{source:string;phase:string}>).detail;
+      if (detail.source !== "interaction" || detail.phase !== "end") return;
+      queueMicrotask(() => {
+        if (alive && element && ["typing", "thinking", "working"].includes(wanted.current)) showState(element, wanted.current);
+      });
+    };
+    const keyboard = (event: KeyboardEvent) => {
+      event.stopPropagation();
+      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); greet(); }
+    };
+    (runtime ??= import("./minCharacter.js")).then(() => {
+      if (!alive || !mount.current) return;
+      element = document.createElement("boop-face") as BoopFace;
+      element.setAttribute("data-character", "min");
+      element.setAttribute("color", "#f7d4bd");
+      element.setAttribute("auto-sleep", "90000");
+      element.setAttribute("wake-on", "activity");
+      element.setAttribute("motion", "auto");
+      element.setAttribute("antenna-drag", "false");
+      element.setAttribute("role", "button");
+      element.setAttribute("tabindex", "0");
+      element.setAttribute("title", "点一下打招呼，按住脸颊或轻轻拖动试试");
+      element.style.cssText = "display:block;width:100%;height:100%;--face-size:100%;";
+      element.addEventListener("click", greet);
+      element.addEventListener("keydown", keyboard);
+      element.addEventListener("action-state", restoreAfterGesture);
+      face.current = element;
+      mount.current.appendChild(element);
+      setReady(true);
+    }).catch(() => { if (alive) setFailed(true); });
     return () => {
-      clearTimeout(timer);
-      window.removeEventListener("pointerdown", wake);
-      window.removeEventListener("keydown", wake);
+      alive = false;
+      clearTimeout(greetingTimer.current);
+      element?.removeEventListener("click", greet);
+      element?.removeEventListener("keydown", keyboard);
+      element?.removeEventListener("action-state", restoreAfterGesture);
+      element?.remove();
+      face.current = null;
     };
-  }, [state]);
+  }, []);
 
-  useEffect(() => () => clearTimeout(clearGesture.current), []);
+  useEffect(() => {
+    const element = face.current;
+    if (!ready || !element) return;
+    showState(element, state);
+  }, [state, ready]);
 
-  const wave = () => {
-    clearTimeout(clearGesture.current);
-    setAsleep(false);
-    setGesture("wave");
-    clearGesture.current = setTimeout(() => setGesture(null), 1800);
-  };
-  const rest = () => { lookX.set(0); lookY.set(0); turn.set(0); };
-  const release = () => {
-    down.current = null;
-    setGesture((g) => g === "press" ? null : g);
-  };
-  const shown = state === "success" && celebrated ? "idle" : state;
-  const waving = gesture === "wave" || shown === "success";
-  const face = asleep ? 1 : shown === "confused" ? 3 : shown === "speaking" || waving ? 2 : 0;
-  const body = waving ? 2 : shown === "working" ? 1 : shown === "speaking" ? 3 : 0;
-  const text = gesture === "wave" ? "嗨，我在呢" : asleep ? "眯一会儿" : state === "success" && celebrated ? LABELS.idle : label || LABELS[shown];
-  const sprite = (column: number, row: number): CSSProperties => ({ backgroundPosition: `${column * 100 / 3}% ${row * 100}%` });
+  const text = greeting ? "嗨，我在呢" : label || LABELS[state];
+  useEffect(() => { face.current?.setAttribute("aria-label", `敏，${text}。可以点击、按压或拖动`); }, [text, ready]);
 
   return (
-    <div className={styles.companion} style={{ "--companion-size": `${size}px` } as CSSProperties} data-state={shown} data-wave={waving} data-sleep={asleep} data-paused={paused || !!reduce}>
-      <motion.button
-        type="button"
-        className={styles.stage}
-        aria-label={`敏，${text}。点击和她打招呼，可以轻轻拖动她`}
-        title="点一下打招呼，也可以轻轻拖动"
-        style={{ x, y }}
-        drag={!reduce}
-        dragMomentum={false}
-        dragConstraints={{ left: -24, right: 24, top: -16, bottom: 12 }}
-        dragElastic={0.12}
-        animate={{ scaleX: gesture === "press" && !reduce ? 1.045 : 1, scaleY: gesture === "press" && !reduce ? 0.955 : 1 }}
-        transition={{ type: "spring", stiffness: 310, damping: 19 }}
-        onDragStart={() => { dragged.current = true; setGesture(null); }}
-        onDragEnd={() => {
-          animate(x, 0, { type: "spring", stiffness: 250, damping: 18 });
-          animate(y, 0, { type: "spring", stiffness: 250, damping: 18 });
-          release(); rest();
-        }}
-        onPointerDown={(e) => {
-          if (e.button !== 0) return;
-          dragged.current = false;
-          down.current = { x: e.clientX, y: e.clientY };
-          setAsleep(false);
-          setGesture("press");
-        }}
-        onPointerMove={(e) => {
-          if (down.current && Math.hypot(e.clientX - down.current.x, e.clientY - down.current.y) > 5) dragged.current = true;
-          if (reduce || e.pointerType === "touch") return;
-          const rect = e.currentTarget.getBoundingClientRect();
-          const px = Math.max(-1, Math.min(1, (e.clientX - rect.left) / rect.width * 2 - 1));
-          const py = Math.max(-1, Math.min(1, (e.clientY - rect.top) / rect.height * 2 - 1));
-          lookX.set(px * 2.5); lookY.set(py * 0.3); turn.set(px * 3);
-        }}
-        onPointerUp={release}
-        onPointerCancel={() => { dragged.current = true; release(); rest(); }}
-        onPointerLeave={() => { release(); rest(); }}
-        onKeyDown={(e) => e.stopPropagation()}
-        onClick={() => { if (!dragged.current) wave(); dragged.current = false; }}
-      >
-        {!loaded ? <img className={styles.fallback} src="/mood/anchor.png" alt="" draggable={false} /> : (
-          <span className={styles.puppet} aria-hidden="true">
-            <span className={styles.bodyMotion}><span className={styles.body} style={sprite(body, 0)} /></span>
-            <motion.span className={styles.headFollow} style={{ x: lookX, y: lookY, rotate: turn }}>
-              <span className={styles.headMotion}>
-                <span className={styles.face} style={sprite(face, 0)} />
-                {!asleep && <span className={`${styles.face} ${styles.blink}`} style={sprite(1, 0)} />}
-                {shown === "speaking" && <span className={`${styles.face} ${styles.speech}`} style={sprite(0, 0)} />}
-              </span>
-            </motion.span>
-          </span>
-        )}
-      </motion.button>
-      {caption && <span className={styles.caption}>{text}</span>}
+    <div className={styles.companion} style={{ "--companion-size": `${size}px` } as CSSProperties}>
+      <div className={styles.stage}>
+        <div ref={mount} className={styles.mount} />
+        {!ready && <img className={styles.fallback} src="/mood/anchor.png" alt={failed ? "敏的动态形象暂未加载" : "敏"} draggable={false} />}
+      </div>
+      {caption && <div className={styles.caption}>{state !== "idle" || greeting || label ? text : ""}</div>}
     </div>
   );
 }
 
-/** 桌面放在对话右侧，窄屏收进输入框上方，避免挡住消息和发送按钮。 */
 export function CompanionDock(props: { state: CompanionState; label?: string }) {
   return <div className={styles.slot}><aside className={styles.dock} aria-label="敏的状态"><Companion {...props} caption /></aside></div>;
 }
