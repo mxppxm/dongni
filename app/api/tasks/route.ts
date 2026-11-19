@@ -21,6 +21,7 @@ export async function GET() {
         startedAt: t.started_at,
         endedAt: t.ended_at,
         live,
+        stage,
         waiting: !live && t.status === "running" && background ? (stage === "queued" ? "排队等人接" : stage === "asking" ? "在等你回答" : lastEvent || "已经交出去，等后台接单") : "",
       };
     }),

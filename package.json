@@ -7,7 +7,8 @@
     "dev": "next dev --turbopack -p 3939",
     "build": "next build",
     "start": "next start -p 3939",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:companion": "node --experimental-strip-types --test tests/companion.test.mjs"
   },
   "packageManager": "pnpm@9.15.4",
   "dependencies": {

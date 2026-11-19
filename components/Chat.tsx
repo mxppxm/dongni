@@ -7,6 +7,9 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import Dock from "./Dock";
 import Markdown from "./Markdown";
 import Mood from "./Mood";
+import { CompanionDock } from "./Companion";
+import { getCompanionPresentation, type CompanionFeedback } from "@/lib/companion-state";
+import { useTaskSnapshot } from "./Tasks";
 import Starfield, { type Theme } from "./Starfield";
 import { AttachmentStrip, flushAttachments, useAttachments } from "./useAttachments";
 import useAutoReload from "./useAutoReload";
@@ -183,6 +186,44 @@ export default function Chat() {
   const [memCount, setMemCount] = useState<number | null>(null);
   const [pulse, setPulse] = useState(0);
   const [theme, setTheme] = useState<Theme>("light");
+  const [inputFocused, setInputFocused] = useState(false);
+  const taskSnapshot = useTaskSnapshot();
+  const [companionResult, setCompanionResult] = useState<CompanionFeedback | null>(null);
+  const lastReply = msgs.findLast((m) => m.role === "assistant" && m.kind !== "system");
+  const lastTask = taskSnapshot?.filter((t) => t.endedAt).sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0))[0];
+  const previousReply = useRef<{ key: string; status: Status } | null>(null);
+  const previousTask = useRef<string | null>(null);
+  const resultTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  // 只回应亲眼看到的完成转换；刷新时已有的历史消息和旧任务不触发庆祝。
+  useEffect(() => {
+    const prev = previousReply.current;
+    previousReply.current = lastReply ? { key: lastReply.key, status: lastReply.status } : null;
+    if (!prev || prev.key !== lastReply?.key || prev.status === lastReply.status) return;
+    if (lastReply.status !== "done" && lastReply.status !== "error") return;
+    clearTimeout(resultTimer.current);
+    setCompanionResult({ state: lastReply.status === "error" ? "failure" : "success", mood: lastReply.mood, activityKey: lastReply.key });
+    resultTimer.current = setTimeout(() => setCompanionResult(null), 2600);
+  }, [lastReply?.key, lastReply?.status]);
+
+  useEffect(() => {
+    if (!taskSnapshot) return;
+    const key = lastTask ? `${lastTask.id}:${lastTask.status}` : "";
+    const prev = previousTask.current;
+    previousTask.current = key;
+    if (prev === null || key === prev || !lastTask) return;
+    clearTimeout(resultTimer.current);
+    setCompanionResult({ state: lastTask.status === "error" ? "failure" : "success", activityKey: `task:${lastTask.id}` });
+    resultTimer.current = setTimeout(() => setCompanionResult(null), 2600);
+  }, [taskSnapshot, lastTask?.id, lastTask?.status]);
+
+  useEffect(() => () => clearTimeout(resultTimer.current), []);
+
+  const companion = getCompanionPresentation({
+    reply: msgs.findLast(m => m.role === "assistant" && (m.status === "waiting" || m.status === "streaming")),
+    sending: msgs.some(m => m.role === "user" && m.status === "sending"),
+    tasks: taskSnapshot, feedback: companionResult, typing: inputFocused && draft.length > 0,
+  });
   useEffect(() => {
     setTheme(document.documentElement.dataset.theme === "dark" ? "dark" : "light");
   }, []);
@@ -787,6 +828,7 @@ export default function Chat() {
 
       <div className="pointer-events-none fixed inset-x-0 bottom-0 z-20 bg-[linear-gradient(to_top,var(--bg)_0%,var(--bg-85)_45%,transparent_100%)] pt-16 pb-6">
         <div className="pointer-events-auto mx-auto w-full max-w-[680px] px-5">
+          {!calling && !showMap && !showAlbum && !showAbilities && <CompanionDock {...companion} />}
           {att.hint && <div className="mb-2 text-center text-xs text-[var(--faint)]">{att.hint}</div>}
           {micHint && <div className="mb-2 text-center text-xs text-[var(--faint)]">{micHint}</div>}
           <div
@@ -801,6 +843,8 @@ export default function Chat() {
               onPaste={att.onPaste}
               ref={input}
               value={draft}
+              onFocus={() => setInputFocused(true)}
+              onBlur={() => setInputFocused(false)}
               rows={1}
               onChange={(e) => {
                 setDraft(e.target.value);

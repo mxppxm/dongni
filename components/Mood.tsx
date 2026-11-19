@@ -6,19 +6,32 @@ import { useEffect, useState } from "react";
  * 她等你时的样子：一张 44px 小贴纸 + 一个动作 + 一点小特效。
  * 有哪些样子从服务端拿（她自己新画的也在里面）。
  */
-type MoodInfo = { key: string; name: string; url: string; preset: string; fx: string };
+export type MoodInfo = { key: string; name: string; url: string; preset: string; fx: string };
 
 let cache: Record<string, MoodInfo> | null = null;
 let loading: Promise<Record<string, MoodInfo>> | null = null;
 
 function loadMoods(force = false) {
+  if (loading) return loading;
   if (!force && cache) return Promise.resolve(cache);
-  if (!force && loading) return loading;
   loading = fetch("/api/moods")
     .then((r) => r.json())
     .then(({ moods }: { moods: MoodInfo[] }) => (cache = Object.fromEntries(moods.map((m) => [m.key, m]))))
-    .catch(() => cache ?? {});
+    .catch(() => cache ?? {})
+    .finally(() => { loading = null; });
   return loading;
+}
+
+/** 角色与消息贴纸共用已有的 mood 元数据，不新增轮询或生成请求。 */
+export function useMoodInfo(mood?: string) {
+  const [moods, setMoods] = useState(cache);
+  useEffect(() => {
+    if (!mood) return;
+    let live = true;
+    void loadMoods(!!cache && !cache[mood]).then(value => { if (live) setMoods(value); });
+    return () => { live = false; };
+  }, [mood]);
+  return mood ? moods?.[mood] ?? null : null;
 }
 
 const Star = () => (
@@ -90,12 +103,8 @@ function Fx({ kind }: { kind: string }) {
 }
 
 export default function Mood({ mood = "think" }: { mood?: string }) {
-  const [moods, setMoods] = useState(cache);
-  useEffect(() => {
-    // 不认识的 key（她刚画的新样子）就重新拉一次
-    if (!cache || !cache[mood]) void loadMoods(!!cache).then(setMoods);
-  }, [mood]);
-  const m = moods?.[mood] ?? moods?.think;
+  const selected = useMoodInfo(mood);
+  const m = selected ?? cache?.think;
   if (!m) return <span className="breathe inline-block h-2 w-2 rounded-full bg-[var(--dot)]" />;
   return (
     <span key={m.key} className={`mood mood-${m.preset}`} title={m.name}>

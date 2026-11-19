@@ -1,0 +1,20 @@
+.companion { width: var(--companion-size, 112px); position: relative; flex-shrink: 0; color: var(--dim, #82776b); }
+.stage { position: relative; width: 100%; aspect-ratio: 1; overflow: visible; border-radius: 24px; user-select: none; -webkit-user-select: none; -webkit-tap-highlight-color: transparent; }
+.stage > boop-face { display: block; width: 100%; height: 100%; opacity: 0; }
+.companion[data-ready='true'] .stage > boop-face { opacity: 1; }
+.stage:focus-visible { outline: 2px solid var(--dot, #dc937b); outline-offset: 4px; }
+.caption { display: block; width: 100%; margin-top: 8px; text-align: center; font-size: 11px; line-height: 1.6; letter-spacing: .04em; color: var(--dim, #82776b); pointer-events: none; overflow-wrap: anywhere; }
+.fallback { position: absolute; inset: 12%; border-radius: 32%; display: flex; align-items: center; justify-content: center; gap: 16%; background: #f6d82f; box-shadow: inset 0 2px 8px #ffe991; pointer-events: none; }
+.fallback i { width: 18%; height: 28%; border-radius: 45%; background: white; }
+.slot { height: 0; position: relative; }
+.dragBounds { position: fixed; inset: 12px; pointer-events: none; }
+.dock { position: fixed; right: max(24px, calc((100vw - 950px) / 2)); bottom: 118px; pointer-events: auto; touch-action: none; cursor: grab; }
+.dock:active { cursor: grabbing; }
+.dock .stage { touch-action: none; }
+.dock .stage > boop-face { pointer-events: none; }
+@media (max-width: 1000px) {
+  .slot { height: 74px; display: flex; justify-content: flex-end; align-items: flex-end; margin-bottom: 4px; }
+  .dock { position: relative; right: auto; bottom: auto; }
+  .dock .companion { width: 56px; }
+  .dock .caption { position: absolute; right: calc(100% + 12px); top: 42%; width: max-content; max-width: min(240px, calc(100vw - 120px)); margin: 0; }
+}
